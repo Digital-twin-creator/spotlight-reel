@@ -109,8 +109,13 @@
     opacity:0; pointer-events:none;
   }
   #playerCanvas, #drawCanvas, #previewCanvas{
-    position:absolute; touch-action:none; background:#000;
+    position:absolute; touch-action:none;
   }
+  /* playerCanvas/previewCanvasは最初の描画までの一瞬を黒で埋める。
+     drawCanvasは常にplayerCanvas（静止フレーム）の上に重ねる透明な
+     ストローク入力用オーバーレイなので、不透明な背景を持たせてはいけない
+     （持たせると、実際のフレームが描けていても画面が真っ黒に見えてしまう）。 */
+  #playerCanvas, #previewCanvas{ background:#000; }
   #playerCanvas{ z-index:1; }
   #drawCanvas, #previewCanvas{ z-index:2; }
   .video-wrap:not(.editing) #drawCanvas{ display:none; }
@@ -123,6 +128,19 @@
   }
   .draw-hint.fade-out{ opacity:0; }
   .video-wrap:not(.editing) .draw-hint{ display:none; }
+
+  /* --- 描画モード中、常にビューポート内に固定される操作バー ---
+     editorSection が hidden の間はこのバーも一緒に非表示になる
+     （position:fixedでもdisplay:noneの祖先の中では描画されないため）。
+     どんな状態（映像が真っ黒になった場合を含む）でも必ず押せることが目的。 */
+  .fixed-editor-bar{
+    position:fixed; left:0; right:0; bottom:0; z-index:50;
+    display:flex; gap:8px;
+    padding:10px 12px calc(10px + env(safe-area-inset-bottom));
+    background:rgba(11,13,18,.95); border-top:1px solid var(--line);
+  }
+  .fixed-editor-bar button{ margin:0; }
+  #editorSection{ padding-bottom:84px; }
 
   .time-readout{font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); min-width:64px; text-align:right;}
   .seek-row{margin-top:8px;}
@@ -239,6 +257,11 @@
 
   <!-- 3. フリーズ編集（描画モード） -->
   <section id="editorSection" hidden>
+    <!-- 映像がどんな状態でも必ず押せるよう、画面に固定した操作バー -->
+    <div class="fixed-editor-bar" id="fixedEditorBar">
+      <button class="ghost grow" id="cancelFreezeBtn">キャンセル</button>
+      <button class="primary grow" id="commitFreezeBtn"><span class="step-badge">⑥</span>完了</button>
+    </div>
     <div class="card">
       <h2 id="editorTitle"><span class="step-badge">④</span>止まった映像を指でなぞってください</h2>
 
@@ -274,11 +297,6 @@
             <option value="dark">dark（減光）</option>
           </select>
         </div>
-      </div>
-
-      <div class="row" style="margin-top:6px;">
-        <button class="ghost grow" id="cancelFreezeBtn">キャンセル</button>
-        <button class="primary grow" id="commitFreezeBtn"><span class="step-badge">⑥</span>完了</button>
       </div>
     </div>
   </section>
@@ -578,6 +596,31 @@ function computeBgPixel(r, g, b, mode) {
   return [gray, gray, gray];
 }
 
+/**
+ * 静止フレームのサンプル画素（中央＋四隅寄りの5点、[r,g,b]の配列。
+ * 取得失敗箇所は null）から、「フレームが実際には描けていない」らしさを判定する。
+ *   - 中央が黒に近い（iOSでdrawImageが黒フレームを返す典型パターン）
+ *   - 5点すべてがほぼ同一色（全面ベタ塗り＝何も描かれていない可能性）
+ * のどちらかに該当すれば true（＝無効なフレームとして扱う）。
+ * DOM非依存の純粋関数。canvasから画素を集める側（app側）と責務を分離している。
+ */
+function isFrameInvalid(samples) {
+  var valid = (samples || []).filter(function (s) { return s; });
+  if (valid.length === 0) return true;
+
+  var center = valid[0];
+  if (center[0] < 10 && center[1] < 10 && center[2] < 10) return true;
+  if (valid.length < 2) return false;
+
+  var minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
+  valid.forEach(function (s) {
+    minR = Math.min(minR, s[0]); maxR = Math.max(maxR, s[0]);
+    minG = Math.min(minG, s[1]); maxG = Math.max(maxG, s[1]);
+    minB = Math.min(minB, s[2]); maxB = Math.max(maxB, s[2]);
+  });
+  return (maxR - minR) <= 3 && (maxG - minG) <= 3 && (maxB - minB) <= 3;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DEFAULT_STYLE: DEFAULT_STYLE,
@@ -595,7 +638,8 @@ if (typeof module !== "undefined" && module.exports) {
     matchOutputPreset: matchOutputPreset,
     buildStrokeGeometry: buildStrokeGeometry,
     trimGeometryToLength: trimGeometryToLength,
-    computeBgPixel: computeBgPixel
+    computeBgPixel: computeBgPixel,
+    isFrameInvalid: isFrameInvalid
   };
 }
 </script>
@@ -914,27 +958,131 @@ function seekAndWait(t) {
 
 /* ---------------- フリーズ編集（描画モード） ---------------- */
 
+// 現在編集中フリーズの静止フレーム（playerCanvasからコピーした静的なcanvas）。
+// video要素から直接drawImageし続けると、iOSで黒フレームに固まることがあるため、
+// 描画モード中はこれだけを表示・利用し、videoへは触れない。
+var frozenFrameCanvas = null;
+
 function startNewFreeze() {
-  els.video.pause();
-  draftIsNew = true;
-  draft = {
+  attemptEnterDrawMode({
     id: "fz-" + Date.now(),
     time: els.video.currentTime,
     name: "",
     sfx: "shakin",
     background: "mono",
     strokes: []
-  };
-  enterDrawMode();
+  }, true);
 }
 
 function editFreeze(id) {
   var fz = appState.freezes.filter(function (f) { return f.id === id; })[0];
   if (!fz) return;
-  els.video.pause();
-  draftIsNew = false;
-  draft = JSON.parse(JSON.stringify(fz));
-  seekAndWait(draft.time).then(enterDrawMode);
+  var draftCandidate = JSON.parse(JSON.stringify(fz));
+  seekAndWait(draftCandidate.time).then(function () {
+    attemptEnterDrawMode(draftCandidate, false);
+  });
+}
+
+/**
+ * 描画モードへ入る前に、まず今 playerCanvas に映っている内容をコピーして
+ * 静止フレームとして使えるか確認する。黒（または全面同一色）なら1回だけ
+ * 100ms待って再取得し、それでも駄目なら描画モードには入らずエラーを表示して
+ * 元の画面のまま終了する（＝黒画面のまま固まる事態を避ける）。
+ * 取得に成功した場合のみ、実際に draft を確定し video を一時停止・
+ * ライブ描画ループを止めて描画モードに入る。
+ */
+function attemptEnterDrawMode(draftCandidate, isNew) {
+  captureFrozenFrame().then(function (frame) {
+    if (!frame) {
+      showError("静止フレームを取得できませんでした。少し待ってからもう一度お試しください。");
+      return;
+    }
+    var entered = false;
+    try {
+      frozenFrameCanvas = frame;
+      draft = draftCandidate;
+      draftIsNew = isNew;
+      els.video.pause();
+      stopPlayerRenderLoop();
+      enterDrawMode();
+      entered = true;
+    } finally {
+      if (!entered) {
+        // 途中で例外が起きた場合は、必ず通常表示に戻す
+        frozenFrameCanvas = null;
+        draft = null;
+        startPlayerRenderLoop();
+      }
+    }
+  });
+}
+
+/** playerCanvasの現在の内容をコピーし、有効なフレームか確認する（必要なら1回だけ再試行） */
+function captureFrozenFrame() {
+  return new Promise(function (resolve) {
+    var first = snapshotPlayerCanvas();
+    if (first && !isFrameInvalid(sampleFramePoints(first))) {
+      resolve(first);
+      return;
+    }
+    setTimeout(function () {
+      var second = snapshotPlayerCanvas();
+      if (second && !isFrameInvalid(sampleFramePoints(second))) {
+        resolve(second);
+      } else {
+        resolve(null);
+      }
+    }, 100);
+  });
+}
+
+/** playerCanvasの実ピクセルをそのまま複製する（video/decodeを経由しない、常に安全なcanvas間コピー） */
+function snapshotPlayerCanvas() {
+  var src = els.playerCanvas;
+  if (!src.width || !src.height) return null;
+  var out = document.createElement("canvas");
+  out.width = src.width;
+  out.height = src.height;
+  try {
+    out.getContext("2d").drawImage(src, 0, 0);
+  } catch (err) {
+    return null;
+  }
+  return out;
+}
+
+/** 中央＋四隅寄り5点の[r,g,b]を取り出す（判定自体はcore-logicのisFrameInvalidが行う） */
+function sampleFramePoints(canvas) {
+  var ctx = canvas.getContext("2d");
+  var w = canvas.width, h = canvas.height;
+  if (w < 2 || h < 2) return [];
+  var pts = [
+    [Math.floor(w * 0.5), Math.floor(h * 0.5)],
+    [Math.floor(w * 0.1), Math.floor(h * 0.1)],
+    [Math.floor(w * 0.9), Math.floor(h * 0.1)],
+    [Math.floor(w * 0.1), Math.floor(h * 0.9)],
+    [Math.floor(w * 0.9), Math.floor(h * 0.9)]
+  ];
+  return pts.map(function (p) {
+    try {
+      var d = ctx.getImageData(p[0], p[1], 1, 1).data;
+      return [d[0], d[1], d[2]];
+    } catch (err) {
+      return null;
+    }
+  });
+}
+
+/** 確保済みの frozenFrameCanvas を playerCanvas に静的に描き込む（以後この上に何も上書きしない） */
+function paintFrozenFrame() {
+  if (!frozenFrameCanvas) return;
+  var canvas = els.playerCanvas;
+  var ctx = canvas.getContext("2d");
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0); // rawピクセル単位で全面に描く
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(frozenFrameCanvas, 0, 0, canvas.width, canvas.height);
+  ctx.restore(); // dprの変換を元に戻す（再生ループ再開時に必要）
 }
 
 function enterDrawMode() {
@@ -952,19 +1100,31 @@ function enterDrawMode() {
   setPlayStatus("フリーズ編集中");
 
   layoutOverlayCanvases();
+  paintFrozenFrame();
   redrawStrokesOverlay();
   showDrawHint();
 }
 
+/**
+ * 描画モードの後始末。何度呼んでも安全（冪等）で、例外を投げない。
+ * 描画canvasを非表示に戻し、ライブ描画ループを必ず再開する。
+ */
 function exitDrawMode() {
-  els.editorSection.hidden = true;
-  els.videoWrap.classList.remove("editing");
-  els.videoWrap.classList.remove("previewing");
-  stopPreviewPlayback();
-  hideDrawHint();
-  draft = null;
-  currentStroke = null;
-  setPlayStatus(els.video.paused ? "一時停止中" : "再生中");
+  try {
+    els.editorSection.hidden = true;
+    els.videoWrap.classList.remove("editing");
+    els.videoWrap.classList.remove("previewing");
+    stopPreviewPlayback();
+    hideDrawHint();
+  } catch (err) {
+    showError("後始末中にエラーが発生しました: " + (err && err.message ? err.message : err));
+  } finally {
+    draft = null;
+    currentStroke = null;
+    frozenFrameCanvas = null;
+    startPlayerRenderLoop(); // 通常のライブ描画を必ず再開する
+    setPlayStatus(els.video.paused ? "一時停止中" : "再生中");
+  }
 }
 
 function cancelFreezeEdit() {
@@ -989,16 +1149,19 @@ function commitFreezeEdit() {
       showError("サムネイル生成でエラーが発生しました（続行します）: " + (err && err.message ? err.message : err));
     })
     .then(function () {
-      if (isNew) {
-        appState.freezes.push(target);
-      } else {
-        var idx = appState.freezes.findIndex(function (f) { return f.id === target.id; });
-        if (idx >= 0) appState.freezes[idx] = target;
+      try {
+        if (isNew) {
+          appState.freezes.push(target);
+        } else {
+          var idx = appState.freezes.findIndex(function (f) { return f.id === target.id; });
+          if (idx >= 0) appState.freezes[idx] = target;
+        }
+      } finally {
+        exitDrawMode();
+        renderFreezeList();
+        saveToLocalStorage();
+        updateJsonPreview();
       }
-      exitDrawMode();
-      renderFreezeList();
-      saveToLocalStorage();
-      updateJsonPreview();
     });
 }
 
@@ -1057,7 +1220,10 @@ function startPlayerRenderLoop() {
   if (playerRenderRAF) return;
   var ctx = els.playerCanvas.getContext("2d");
   function tick() {
-    if (els.video.readyState >= 2 && overlaySize.width > 0) {
+    // draft がある間（描画モード中）は video からの描画をしない。
+    // 静止フレームは frozenFrameCanvas 側で固定表示しているため、
+    // ここで video を描いてしまうと、iOSでの黒フレーム化を再び持ち込むことになる。
+    if (!draft && els.video.readyState >= 2 && overlaySize.width > 0) {
       try {
         ctx.drawImage(els.video, 0, 0, overlaySize.width, overlaySize.height);
       } catch (err) {
@@ -1067,6 +1233,12 @@ function startPlayerRenderLoop() {
     playerRenderRAF = requestAnimationFrame(tick);
   }
   playerRenderRAF = requestAnimationFrame(tick);
+}
+
+/** 描画モードに入る直前など、ライブ描画ループを止めたいときに呼ぶ */
+function stopPlayerRenderLoop() {
+  if (playerRenderRAF) cancelAnimationFrame(playerRenderRAF);
+  playerRenderRAF = null;
 }
 
 /**
@@ -1243,23 +1415,26 @@ function redrawStrokesOverlay() {
  * サムネイル生成。何が起きても reject せず必ず resolve する
  * （ここで例外/rejectを外に漏らすと、呼び出し元の commitFreezeEdit が
  *   止まってしまい「完了を押しても画面が固まる」原因になるため）。
+ *
+ * video要素から改めてdrawImageするのではなく、描画モードに入る時点で既に
+ * 取得・検証済みの frozenFrameCanvas を縮小して使う（videoは編集中ずっと
+ * pause済みで触れていないため、ここで改めて読み直すと黒フレームの
+ * リスクを再び持ち込むことになる）。
  */
 function captureThumbnail(fz) {
-  return seekAndWait(fz.time).then(function () {
+  return new Promise(function (resolve) {
     try {
-      var vw = els.video.videoWidth, vh = els.video.videoHeight;
-      if (!vw || !vh || els.video.readyState < 2) { fz.thumb = ""; return; }
+      if (!frozenFrameCanvas) { fz.thumb = ""; resolve(); return; }
+      var vw = frozenFrameCanvas.width, vh = frozenFrameCanvas.height;
       var tw = 92, th = Math.max(1, Math.round(tw * vh / vw));
       var c = document.createElement("canvas");
       c.width = tw; c.height = th;
-      var ctx = c.getContext("2d");
-      ctx.drawImage(els.video, 0, 0, tw, th);
+      c.getContext("2d").drawImage(frozenFrameCanvas, 0, 0, tw, th);
       fz.thumb = c.toDataURL("image/jpeg", 0.6);
     } catch (err) {
       fz.thumb = "";
     }
-  }).catch(function () {
-    fz.thumb = "";
+    resolve();
   });
 }
 
@@ -1336,19 +1511,20 @@ function stopPreviewPlayback() {
 }
 
 function startPreviewPlayback() {
-  var vw = els.video.videoWidth, vh = els.video.videoHeight;
-  if (!vw || !vh || els.video.readyState < 2) {
-    showError("プレビューを表示できませんでした（動画フレームの取得に失敗）。");
+  if (!frozenFrameCanvas) {
+    showError("プレビューを表示できませんでした（静止フレームがありません）。");
     return;
   }
 
   var W = overlaySize.width, H = overlaySize.height;
   var frameCanvas, fctx, bgCanvas, geoInfo;
   try {
+    // video要素からではなく、描画モードに入る時点で確保済みの
+    // frozenFrameCanvas を使う（videoはずっとpauseしたまま触れない）
     frameCanvas = document.createElement("canvas");
     frameCanvas.width = W; frameCanvas.height = H;
     fctx = frameCanvas.getContext("2d");
-    fctx.drawImage(els.video, 0, 0, W, H);
+    fctx.drawImage(frozenFrameCanvas, 0, 0, W, H);
 
     bgCanvas = document.createElement("canvas");
     bgCanvas.width = W; bgCanvas.height = H;

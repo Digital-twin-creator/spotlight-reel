@@ -267,6 +267,24 @@ test("computeBgPixel: dark は30%の明るさになる", () => {
   assert.strictEqual(b, Math.round(200 * 0.3));
 });
 
+/* ---- isFrameInvalid（静止フレーム取得失敗＝黒フレームの検知） ---- */
+test("isFrameInvalid: 中央が黒に近ければ無効", () => {
+  const samples = [[2, 3, 1], [100, 100, 100], [50, 50, 50], [10, 10, 10], [200, 0, 0]];
+  assert.strictEqual(core.isFrameInvalid(samples), true);
+});
+test("isFrameInvalid: 5点すべて同一色（ベタ塗り）なら無効", () => {
+  const samples = [[120, 120, 120], [121, 120, 121], [120, 121, 120], [120, 120, 122], [119, 120, 120]];
+  assert.strictEqual(core.isFrameInvalid(samples), true);
+});
+test("isFrameInvalid: 中央が明るく、色にばらつきがあれば有効", () => {
+  const samples = [[120, 100, 150], [30, 40, 200], [220, 60, 10], [10, 200, 90], [80, 80, 240]];
+  assert.strictEqual(core.isFrameInvalid(samples), false);
+});
+test("isFrameInvalid: サンプルが1点も取れなければ無効", () => {
+  assert.strictEqual(core.isFrameInvalid([null, null, null, null, null]), true);
+  assert.strictEqual(core.isFrameInvalid([]), true);
+});
+
 /* ---- まとめ ---- */
 console.log("");
 console.log(passed + " 件成功 / " + failures + " 件失敗");

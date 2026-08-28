@@ -25,8 +25,9 @@ spotlight-reel/
 ├── examples/
 │   └── sample.json         # make_dummy.py が生成するサンプル
 ├── tests/
-│   ├── editor_logic.test.js       # index.html のJSON生成ロジックのユニットテスト（依存なし）
-│   └── player_ui.playwright.test.mjs # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
+│   ├── editor_logic.test.js            # index.html のJSON生成ロジックのユニットテスト（依存なし）
+│   ├── player_ui.playwright.test.mjs   # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
+│   └── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 ├── colab.ipynb             # Colab用ノートブック
 └── README.md
 ```
@@ -178,6 +179,7 @@ node tests/editor_logic.test.js   # index.html のJSON生成ロジックのユ�
 npm install --no-save playwright-core
 python3 -m http.server 8794 &   # index.html をどこかで配信しておく
 node tests/player_ui.playwright.test.mjs
+node tests/freeze_black_screen.playwright.test.mjs
 ```
 
 ## GitHub Pages の有効化
