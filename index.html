@@ -103,14 +103,16 @@
     background:#000; border-radius:var(--radius); overflow:hidden;
     touch-action:none;
   }
+  /* video要素は非表示のデコーダーとしてのみ使う。表示は常に#playerCanvasへdrawImageする */
   .video-wrap video{
-    position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000;
+    position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
+    opacity:0; pointer-events:none;
   }
-  #drawCanvas, #previewCanvas{
-    position:absolute; touch-action:none; z-index:2;
+  #playerCanvas, #drawCanvas, #previewCanvas{
+    position:absolute; touch-action:none; background:#000;
   }
-  #previewCanvas{ background:#000; }
-  .video-wrap.playing-preview video{ visibility:hidden; }
+  #playerCanvas{ z-index:1; }
+  #drawCanvas, #previewCanvas{ z-index:2; }
   .video-wrap:not(.editing) #drawCanvas{ display:none; }
   .video-wrap:not(.previewing) #previewCanvas{ display:none; }
 
@@ -206,6 +208,7 @@
     <div class="card">
       <div class="video-wrap" id="videoWrap">
         <video id="video" playsinline muted></video>
+        <canvas id="playerCanvas"></canvas>
         <canvas id="drawCanvas"></canvas>
         <canvas id="previewCanvas"></canvas>
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
@@ -632,7 +635,7 @@ function init() {
     "pickVideoBtn", "useSampleBtn", "videoFileInput", "videoFileName", "restoreStatus",
     "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
     "guideCard", "guideCloseBtn",
-    "playerSection", "video", "videoWrap", "drawCanvas", "previewCanvas", "drawHint",
+    "playerSection", "video", "videoWrap", "playerCanvas", "drawCanvas", "previewCanvas", "drawHint",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
@@ -724,8 +727,10 @@ function init() {
 
   wireDrawCanvasTouch();
   window.addEventListener("resize", function () {
-    if (draft) layoutOverlayCanvases();
+    if (els.video.videoWidth) layoutOverlayCanvases();
   });
+  // 最初のタップ（動画がまだ無ければ何もしない）で video の初期化を試みる
+  document.addEventListener("pointerdown", tryUnlockVideo, { passive: true });
 
   setVideoStatus("未選択");
   setPlayStatus("待機中");
@@ -836,6 +841,9 @@ function loadVideoFile(file) {
   var url = URL.createObjectURL(file);
   els.video.src = url;
   els.playerSection.hidden = false;
+  // change イベントはユーザー操作起点で呼ばれるため、ここで初期化を試みる
+  // （失敗しても tryUnlockVideo は次のタップで再試行される）
+  tryUnlockVideo();
 
   var restored = loadFromLocalStorage(file.name);
   if (restored) {
@@ -854,6 +862,8 @@ function onVideoLoadedMetadata() {
   els.seekBar.step = "0.01";
   updateTimeReadout();
   if (els.video.duration) setVideoStatus("準備完了（" + els.video.duration.toFixed(1) + "秒）");
+  layoutOverlayCanvases();
+  startPlayerRenderLoop();
 }
 
 function onVideoTimeUpdate() {
@@ -1013,12 +1023,17 @@ function hideDrawHint() {
 
 /* ---------------- キャンバスの配置とタッチ描画 ---------------- */
 
+/**
+ * playerCanvas / drawCanvas / previewCanvas をすべて、動画の実表示領域
+ * （レターボックスを除いた領域）に合わせて配置・リサイズする。
+ * playerCanvas は常時表示なので動画のメタデータが分かり次第呼ぶ。
+ */
 function layoutOverlayCanvases() {
   var rect = els.video.getBoundingClientRect();
   var content = computeContentRect(rect.width, rect.height, els.video.videoWidth || rect.width, els.video.videoHeight || rect.height);
   var dpr = window.devicePixelRatio || 1;
 
-  [els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
+  [els.playerCanvas, els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
     canvas.style.left = content.left + "px";
     canvas.style.top = content.top + "px";
     canvas.style.width = content.width + "px";
@@ -1030,6 +1045,54 @@ function layoutOverlayCanvases() {
   });
 
   overlaySize = { width: content.width, height: content.height };
+}
+
+/**
+ * video要素（非表示のデコーダー）から playerCanvas へ毎フレーム描画し続ける。
+ * 常時 rAF で回すことで、再生中もシーク直後の静止フレームも同じ経路で表示され、
+ * 「video要素が固まって見える／操作できない」という状態を作らない。
+ */
+var playerRenderRAF = null;
+function startPlayerRenderLoop() {
+  if (playerRenderRAF) return;
+  var ctx = els.playerCanvas.getContext("2d");
+  function tick() {
+    if (els.video.readyState >= 2 && overlaySize.width > 0) {
+      try {
+        ctx.drawImage(els.video, 0, 0, overlaySize.width, overlaySize.height);
+      } catch (err) {
+        // デコード途中のフレームなどは無視して次フレームへ
+      }
+    }
+    playerRenderRAF = requestAnimationFrame(tick);
+  }
+  playerRenderRAF = requestAnimationFrame(tick);
+}
+
+/**
+ * iOS Safari 対策：動画に対する最初のユーザー操作の中で必ず
+ * play()→pause() を一度実行しておく（無音動画でも、実際に play() を
+ * 一度成功させておかないと、その後の描画やシークが不安定になる端末があるため）。
+ *
+ * 重要: play() の Promise 解決を待たずに、同じ同期処理の中で即 pause() まで
+ * 呼び切ること。video.paused は play()/pause() 呼び出し時点で同期的に
+ * 更新される仕様のため、ここで非同期に pause() すると「▶ 再生」ボタン自身の
+ * タップ（pointerdown → このハンドラ → click → ボタンのトグル処理、の順で
+ * 発火する）が届いた時点で paused が false のままになり、ボタンの
+ * 「一時停止のつもりで pause() を呼ぶ」誤動作を招く（＝タップしても
+ * 再生されない不具合の原因になる）。
+ */
+var videoUnlocked = false;
+function tryUnlockVideo() {
+  if (videoUnlocked || !els.video.currentSrc) return;
+  videoUnlocked = true;
+  try {
+    var p = els.video.play();
+    els.video.pause();
+    if (p && typeof p.catch === "function") p.catch(function () { /* 無視 */ });
+  } catch (err) {
+    // 無視（失敗してもアプリの動作自体は継続する）
+  }
 }
 
 function wireDrawCanvasTouch() {

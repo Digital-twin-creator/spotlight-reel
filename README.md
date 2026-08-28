@@ -15,6 +15,7 @@
 ```
 spotlight-reel/
 ├── index.html            # スマホ用エディタ（GitHub Pagesで公開、ビルド不要の単一HTML）
+├── diag.html              # 動画再生・シークの自己診断ツール（実機での不具合調査用）
 ├── render.py              # メイン：JSON + 動画 → MP4
 ├── make_dummy.py          # テスト用ダミー動画・ダミーJSON生成
 ├── requirements.txt       # opencv-python-headless, numpy, pillow
@@ -51,6 +52,15 @@ spotlight-reel/
 
 編集内容は動画ファイル名をキーに端末の `localStorage` に自動保存されるため、途中でリロードしても
 同じ動画ファイルを選び直せば復元されます（動画そのものは保存されないので、再選択が必要です）。
+
+### 動画が再生・シークできないときは（diag.html）
+
+実機（特にiPhone Safari）で動画の再生やシークが動かない場合は、
+https://digital-twin-creator.github.io/spotlight-reel/diag.html を開いてください。
+開くだけで自動的に、動画の取得・デコード・再生・シークまわりの状態を順に調べ、
+画面に一覧表示します（途中1回だけ、再生テストのためのタップが必要です）。
+「📋 結果をコピー」で全文をコピーできるので、不具合報告の際に貼り付けてください。
+自分の動画ファイルを選んで同じ診断を行うこともできます。
 
 ### Colabへの受け渡し手順
 

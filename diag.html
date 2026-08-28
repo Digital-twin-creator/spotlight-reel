@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>動画再生 診断ツール</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141822; --panel2:#1c2130; --panel3:#232939;
+    --text:#eef1f7; --muted:#8b93a7; --accent:#5b8cff; --line:#2a3145;
+    --ok:#33cc88; --warn:#e8b339; --error:#ff5468;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+    padding:calc(12px + env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  h1{font-size:17px; margin:0 0 4px;}
+  .sub{font-size:12px; color:var(--muted); margin-bottom:14px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px; margin-bottom:12px;}
+  button{
+    min-height:48px; width:100%; border:none; border-radius:10px; background:var(--panel3);
+    color:var(--text); font-size:15px; font-weight:700; padding:10px 14px; margin-bottom:8px;
+  }
+  button.primary{background:var(--accent); color:#fff;}
+  button.big{font-size:16px; min-height:56px;}
+  input[type=file]{display:none;}
+  .section-title{
+    font-size:12px; color:var(--accent); font-weight:700; letter-spacing:.03em;
+    margin:14px 0 6px; text-transform:uppercase;
+  }
+  .row{
+    display:flex; gap:8px; align-items:flex-start; padding:8px 0;
+    border-bottom:1px solid var(--line); font-size:13px;
+  }
+  .row:last-child{border-bottom:none;}
+  .row .icon{flex-shrink:0; font-size:14px; line-height:1.5;}
+  .row .body{min-width:0; flex:1;}
+  .row .label{font-weight:700;}
+  .row .detail{color:var(--muted); word-break:break-all; white-space:pre-wrap; margin-top:2px; font-size:12px;}
+  .row.status-ok .label{color:var(--ok);}
+  .row.status-warn .label{color:var(--warn);}
+  .row.status-error .label{color:var(--error);}
+  .row.status-info .label{color:var(--text);}
+  #tapGate{display:none; text-align:center; padding:10px 0;}
+  #tapGate.show{display:block;}
+  #tapGate p{font-size:12px; color:var(--muted); margin:0 0 8px;}
+  textarea#reportArea{
+    width:100%; min-height:160px; background:var(--panel3); color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:10px; font-size:11px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .copy-status{font-size:12px; color:var(--ok); min-height:16px; margin-top:6px;}
+</style>
+</head>
+<body>
+
+<h1>動画再生 診断ツール</h1>
+<div class="sub">
+  このページを開くと、動画の読み込み・再生・シークに関する状態を自動的に調べます。
+  実機Safariでの不具合調査用です。
+</div>
+
+<div class="card">
+  <button class="primary" id="pickOwnBtn">📂 自分の動画でも診断する</button>
+  <input type="file" id="ownVideoInput" accept="video/*">
+  <button id="copyBtn">📋 結果をコピー</button>
+  <div class="copy-status" id="copyStatus"></div>
+</div>
+
+<div id="results" class="card"></div>
+
+<div id="tapGate">
+  <p>この先は実機の制約上、指でタップしてからでないと正しく検証できません。</p>
+  <button class="primary big" id="tapGateBtn">▶ タップして再生・シークのテストを続行</button>
+</div>
+
+<div class="card">
+  <div class="section-title">結果テキスト（コピー用）</div>
+  <textarea id="reportArea" readonly></textarea>
+</div>
+
+<video id="diagVideo" playsinline muted style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;"></video>
+<canvas id="diagCanvas" hidden></canvas>
+
+<script>
+"use strict";
+
+var SAMPLE_URL = "examples/dummy_input.mp4";
+var resultsEl = document.getElementById("results");
+var reportLines = [];
+var pendingTapCallback = null;
+
+/* ---------------- ログ出力（画面 + コピー用テキストの両方に積む） ---------------- */
+
+function log(status, label, detail) {
+  reportLines.push("[" + status.toUpperCase() + "] " + label + (detail ? " - " + detail : ""));
+  var row = document.createElement("div");
+  row.className = "row status-" + status;
+  var icon = { ok: "✅", warn: "⚠️", error: "❌", info: "ℹ️" }[status] || "ℹ️";
+  var iconEl = document.createElement("span");
+  iconEl.className = "icon";
+  iconEl.textContent = icon;
+  var body = document.createElement("div");
+  body.className = "body";
+  var labelEl = document.createElement("div");
+  labelEl.className = "label";
+  labelEl.textContent = label;
+  var detailEl = document.createElement("div");
+  detailEl.className = "detail";
+  detailEl.textContent = detail || "";
+  body.appendChild(labelEl);
+  if (detail) body.appendChild(detailEl);
+  row.appendChild(iconEl);
+  row.appendChild(body);
+  resultsEl.appendChild(row);
+  updateReportArea();
+}
+
+function sectionHeader(text) {
+  reportLines.push("");
+  reportLines.push("== " + text + " ==");
+  var h = document.createElement("div");
+  h.className = "section-title";
+  h.textContent = text;
+  resultsEl.appendChild(h);
+  updateReportArea();
+}
+
+function updateReportArea() {
+  document.getElementById("reportArea").value = reportLines.join("\n");
+}
+
+// console だけでなく捕捉されなかった例外も画面に出す
+window.addEventListener("error", function (e) {
+  log("error", "window.onerror（捕捉されなかった例外）", (e.message || String(e)) + (e.filename ? " @ " + e.filename + ":" + e.lineno : ""));
+});
+window.addEventListener("unhandledrejection", function (e) {
+  var reason = e.reason;
+  log("error", "unhandledrejection（未処理のPromise reject）", (reason && reason.message) ? reason.message : String(reason));
+});
+
+/* ---------------- 個別チェック ---------------- */
+
+function reportDeviceInfo() {
+  sectionHeader("端末・ブラウザ情報");
+  var ua = navigator.userAgent;
+  log("info", "User Agent", ua);
+  var m = ua.match(/OS (\d+)_(\d+)(?:_(\d+))?/);
+  var v = ua.match(/Version\/(\d+\.\d+(?:\.\d+)?)/);
+  var iosLabel = m ? ("iOS " + m[1] + "." + m[2] + (m[3] ? "." + m[3] : "")) : "検出できず（iOS実機以外の可能性）";
+  log("info", "iOSバージョン(UAから推定)", iosLabel + (v ? "  / Safari Version=" + v[1] : ""));
+  log("info", "画面サイズ", "screen=" + screen.width + "x" + screen.height +
+    " viewport=" + window.innerWidth + "x" + window.innerHeight +
+    " dpr=" + (window.devicePixelRatio || 1));
+  log("info", "platform / touch", (navigator.platform || "不明") + " / maxTouchPoints=" + (navigator.maxTouchPoints || 0));
+}
+
+/** examples/dummy_input.mp4 への fetch と Range(部分取得)対応チェック */
+function checkFetch() {
+  return fetch(SAMPLE_URL, { cache: "no-store" })
+    .then(function (res) {
+      log(res.ok ? "ok" : "error", "fetch（通常GET）",
+        "status=" + res.status +
+        " content-type=" + res.headers.get("content-type") +
+        " content-length=" + res.headers.get("content-length"));
+      return fetch(SAMPLE_URL, { headers: { Range: "bytes=0-65535" }, cache: "no-store" });
+    })
+    .then(function (res2) {
+      var partial = res2.status === 206;
+      log(partial ? "ok" : "warn", "fetch（Range対応チェック）",
+        "status=" + res2.status + " content-range=" + res2.headers.get("content-range") +
+        (partial ? "" : "（206以外＝Range非対応の可能性。シークが遅い/失敗する原因になり得ます）"));
+    })
+    .catch(function (err) {
+      log("error", "fetchに失敗", err.name + ": " + err.message);
+    });
+}
+
+/** <video> の loadedmetadata 到達確認（タイムアウト付き） */
+function checkVideoMetadata(videoEl, srcUrl) {
+  return new Promise(function (resolve) {
+    var done = false;
+    function finish(status, detail) {
+      if (done) return;
+      done = true;
+      videoEl.removeEventListener("loadedmetadata", onLoaded);
+      videoEl.removeEventListener("error", onErr);
+      log(status, "video: loadedmetadata", detail);
+      resolve();
+    }
+    function onLoaded() {
+      finish("ok", "videoWidth=" + videoEl.videoWidth + " videoHeight=" + videoEl.videoHeight +
+        " duration=" + (videoEl.duration ? videoEl.duration.toFixed(2) : videoEl.duration) + "s" +
+        " readyState=" + videoEl.readyState);
+    }
+    function onErr() {
+      var e = videoEl.error;
+      finish("error", "code=" + (e && e.code) + " message=" + (e && e.message ? e.message : "(なし)") +
+        "（4=非対応コーデックの可能性。HEVC/HEIC等）");
+    }
+    videoEl.addEventListener("loadedmetadata", onLoaded);
+    videoEl.addEventListener("error", onErr);
+    try {
+      videoEl.src = srcUrl;
+      videoEl.load();
+    } catch (err) {
+      finish("error", "src設定で例外: " + err.message);
+      return;
+    }
+    setTimeout(function () { finish("error", "タイムアウト（8秒以内にloadedmetadataに到達せず）"); }, 8000);
+  });
+}
+
+function checkCodecs(videoEl) {
+  sectionHeader("コーデック対応状況");
+  var codecs = [
+    ["H.264 Baseline (avc1.42E01E)", 'video/mp4; codecs="avc1.42E01E"'],
+    ["H.264 High (avc1.640028)", 'video/mp4; codecs="avc1.640028"'],
+    ["HEVC/H.265 (hvc1.1.6.L93.B0)", 'video/mp4; codecs="hvc1.1.6.L93.B0"'],
+    ["VP9/WebM", 'video/webm; codecs="vp9"'],
+    ["VP8/WebM", 'video/webm; codecs="vp8"']
+  ];
+  codecs.forEach(function (c) {
+    var r = "";
+    try { r = videoEl.canPlayType(c[1]); } catch (err) { r = "(例外: " + err.message + ")"; }
+    log(r === "probably" ? "ok" : (r === "maybe" ? "warn" : "warn"), "canPlayType: " + c[0], JSON.stringify(r) + (r ? "" : "（空文字＝非対応）"));
+  });
+  var hasRVFC = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+  log(hasRVFC ? "ok" : "info", "requestVideoFrameCallback", hasRVFC ? "あり" : "なし（フォールバックとして requestAnimationFrame を使用）");
+}
+
+/** タップ操作後の play() 成否と、実際に currentTime が進むかどうか */
+function checkPlayAndAdvance(videoEl) {
+  var p;
+  try {
+    p = videoEl.play();
+  } catch (err) {
+    log("error", "play()（同期例外）", err.name + ": " + err.message);
+    return Promise.resolve();
+  }
+  if (!p || typeof p.then !== "function") {
+    log("warn", "play()", "Promiseを返しませんでした（古い実装の可能性）。currentTime進行のみ確認します。");
+    p = Promise.resolve();
+  }
+  return p.then(function () {
+    log("ok", "play()", "再生開始に成功しました（rejectなし）");
+    var t0 = videoEl.currentTime;
+    return new Promise(function (res) { setTimeout(res, 500); }).then(function () {
+      var t1 = videoEl.currentTime;
+      log(t1 > t0 ? "ok" : "error", "currentTime が進むか",
+        t0.toFixed(2) + "s → " + t1.toFixed(2) + "s" + (t1 > t0 ? "" : "（進んでいません＝再生が実質止まっている可能性）"));
+      try { videoEl.pause(); } catch (err) { /* 無視 */ }
+    });
+  }).catch(function (err) {
+    log("error", "play()が失敗（reject）", (err && err.name ? err.name : "Error") + ": " + (err && err.message ? err.message : String(err)));
+  });
+}
+
+/** currentTime=2.0 にシークして seeked を待ち、canvasに描いて中央画素が黒でないか確認 */
+function checkSeekAndDraw(videoEl) {
+  return new Promise(function (resolve) {
+    var done = false;
+    var target = videoEl.duration ? Math.min(2.0, videoEl.duration * 0.5) : 2.0;
+    function onSeeked() {
+      if (done) return;
+      done = true;
+      videoEl.removeEventListener("seeked", onSeeked);
+      afterSeek();
+    }
+    videoEl.addEventListener("seeked", onSeeked);
+    try {
+      videoEl.currentTime = target;
+    } catch (err) {
+      log("error", "currentTime設定で例外", err.message);
+      resolve();
+      return;
+    }
+    setTimeout(function () {
+      if (done) return;
+      done = true;
+      videoEl.removeEventListener("seeked", onSeeked);
+      log("error", "seeked待機", "2秒以内に seeked イベントが来ませんでした（タイムアウト）");
+      resolve();
+    }, 2000);
+
+    function afterSeek() {
+      log("ok", "seeked到達", "currentTime=" + videoEl.currentTime.toFixed(2) + "s（目標 " + target.toFixed(2) + "s）");
+      try {
+        var vw = videoEl.videoWidth || 0, vh = videoEl.videoHeight || 0;
+        if (!vw || !vh) {
+          log("warn", "drawImage", "videoWidth/videoHeightが0のため描画テストをスキップしました");
+          resolve();
+          return;
+        }
+        var cw = 160, ch = Math.max(1, Math.round(cw * vh / vw));
+        var canvas = document.getElementById("diagCanvas");
+        canvas.width = cw; canvas.height = ch;
+        var ctx = canvas.getContext("2d");
+        ctx.drawImage(videoEl, 0, 0, cw, ch);
+        var px = ctx.getImageData(Math.floor(cw / 2), Math.floor(ch / 2), 1, 1).data;
+        var isBlack = px[0] < 8 && px[1] < 8 && px[2] < 8;
+        log(isBlack ? "error" : "ok", "drawImage中央画素の色",
+          "rgb(" + px[0] + "," + px[1] + "," + px[2] + ")" +
+          (isBlack ? "（黒＝フレームが実際には描画されていない可能性があります）" : "（正常にフレームが描けています）"));
+      } catch (err) {
+        log("error", "drawImage/getImageDataで例外", err.name + ": " + err.message +
+          (err.name === "SecurityError" ? "（canvasがtainted＝同一オリジンでないか設定に問題がある可能性）" : ""));
+      }
+      resolve();
+    }
+  });
+}
+
+/* ---------------- 一連の診断（自動フェーズ＋タップ後フェーズ） ---------------- */
+
+function runDiagnostics(srcUrl, label, opts) {
+  opts = opts || {};
+  sectionHeader("動画診断: " + label);
+  var videoEl = document.getElementById("diagVideo");
+
+  var chain = Promise.resolve();
+  if (!opts.skipFetchCheck) chain = chain.then(checkFetch);
+  chain = chain
+    .then(function () { return checkVideoMetadata(videoEl, srcUrl); })
+    .then(function () { checkCodecs(videoEl); })
+    .then(function () {
+      sectionHeader("タップ後の再生・シークテスト: " + label);
+      return waitForTap();
+    })
+    .then(function () {
+      return checkPlayAndAdvance(videoEl);
+    })
+    .then(function () {
+      return checkSeekAndDraw(videoEl);
+    })
+    .then(function () {
+      log("info", "診断完了", label + " の診断がすべて終わりました。「結果をコピー」で共有できます。");
+    })
+    .catch(function (err) {
+      log("error", "診断中に予期しない例外", err.name + ": " + err.message);
+    });
+  return chain;
+}
+
+function waitForTap() {
+  return new Promise(function (resolve) {
+    var gate = document.getElementById("tapGate");
+    gate.classList.add("show");
+    pendingTapCallback = function () {
+      gate.classList.remove("show");
+      resolve();
+    };
+  });
+}
+
+document.getElementById("tapGateBtn").addEventListener("click", function () {
+  if (pendingTapCallback) {
+    var cb = pendingTapCallback;
+    pendingTapCallback = null;
+    cb();
+  }
+});
+
+/* ---------------- 自分の動画で診断 ---------------- */
+
+document.getElementById("pickOwnBtn").addEventListener("click", function () {
+  document.getElementById("ownVideoInput").click();
+});
+document.getElementById("ownVideoInput").addEventListener("change", function (e) {
+  var file = e.target.files && e.target.files[0];
+  if (!file) return;
+  var url = URL.createObjectURL(file);
+  log("info", "自分の動画を選択", "name=" + file.name + " type=" + file.type + " size=" + file.size + "bytes");
+  runDiagnostics(url, file.name, { skipFetchCheck: true });
+});
+
+/* ---------------- 結果コピー ---------------- */
+
+document.getElementById("copyBtn").addEventListener("click", function () {
+  var text = reportLines.join("\n");
+  var statusEl = document.getElementById("copyStatus");
+  function ok() { statusEl.textContent = "結果をコピーしました"; }
+  function fail() {
+    var ta = document.getElementById("reportArea");
+    ta.focus(); ta.select();
+    try { document.execCommand("copy"); ok(); } catch (e) { statusEl.textContent = "コピーに失敗しました。テキストエリアから手動でコピーしてください。"; }
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok).catch(fail);
+  } else {
+    fail();
+  }
+});
+
+/* ---------------- 起動時に自動実行 ---------------- */
+
+reportDeviceInfo();
+runDiagnostics(SAMPLE_URL, "examples/dummy_input.mp4", { skipFetchCheck: false });
+</script>
+</body>
+</html>
