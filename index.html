@@ -129,6 +129,36 @@
   .draw-hint.fade-out{ opacity:0; }
   .video-wrap:not(.editing) .draw-hint{ display:none; }
 
+  /* --- 描画モード中は映像エリアを画面上部に固定し、
+     ページ本体はスクロールさせない（bodyのスクロールがiOSのアドレスバー
+     出入りを引き起こし、それに伴うresizeでcanvasの中身が消えることへの
+     根本対策）。設定項目（#editorSection）だけを、その下の残り領域で
+     独立してスクロールさせる。 */
+  body.freeze-editing{
+    position:fixed; inset:0; width:100%; overflow:hidden;
+  }
+  /* #editorSection(これから固定表示する設定項目)と#playerSection(その中の
+     #videoWrapをposition:fixedさせるための入れ物として必要)以外の、
+     ガイド・動画選択・フリーズ一覧・全体設定・書き出し等は全て非表示にする。
+     #playerSection自体はdisplay:noneにできない（子孫の#videoWrapが
+     position:fixedでも、display:noneの祖先の中では描画されないため）。 */
+  body.freeze-editing main > *:not(#editorSection):not(#playerSection){
+    display:none;
+  }
+  body.freeze-editing #playerControls{ display:none; }
+  body.freeze-editing #playerSection > .card{
+    padding:0; border:none; background:transparent; margin-bottom:0;
+  }
+  body.freeze-editing #videoWrap{
+    position:fixed; left:0; right:0; top:0; z-index:10;
+    max-width:520px; margin:0 auto; border-radius:0;
+  }
+  body.freeze-editing #editorSection{
+    position:fixed; left:0; right:0; bottom:0; z-index:8;
+    max-width:520px; margin:0 auto;
+    overflow-y:auto; -webkit-overflow-scrolling:touch;
+  }
+
   /* --- 描画モード中、常にビューポート内に固定される操作バー ---
      editorSection が hidden の間はこのバーも一緒に非表示になる
      （position:fixedでもdisplay:noneの祖先の中では描画されないため）。
@@ -232,25 +262,27 @@
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
       </div>
 
-      <div class="seek-row">
-        <label><span class="step-badge">②</span>止めたいところまでシーク</label>
-        <input type="range" id="seekBar" min="0" max="1" step="0.01" value="0">
-        <div class="row">
-          <div class="grow"></div>
-          <div class="time-readout" id="timeReadout">0.00s</div>
+      <div id="playerControls">
+        <div class="seek-row">
+          <label><span class="step-badge">②</span>止めたいところまでシーク</label>
+          <input type="range" id="seekBar" min="0" max="1" step="0.01" value="0">
+          <div class="row">
+            <div class="grow"></div>
+            <div class="time-readout" id="timeReadout">0.00s</div>
+          </div>
         </div>
-      </div>
 
-      <div class="row fine-row wrap" style="margin-top:6px;">
-        <button class="small" data-seek="-1">−1秒</button>
-        <button class="small" data-seek="-0.1">−0.1秒</button>
-        <button class="small" data-seek="0.1">+0.1秒</button>
-        <button class="small" data-seek="1">+1秒</button>
-      </div>
+        <div class="row fine-row wrap" style="margin-top:6px;">
+          <button class="small" data-seek="-1">−1秒</button>
+          <button class="small" data-seek="-0.1">−0.1秒</button>
+          <button class="small" data-seek="0.1">+0.1秒</button>
+          <button class="small" data-seek="1">+1秒</button>
+        </div>
 
-      <div class="row" style="margin-top:10px;">
-        <button class="ghost" id="playPauseBtn">▶ 再生</button>
-        <button class="primary grow" id="addFreezeBtn"><span class="step-badge">③</span>＋ フリーズ追加</button>
+        <div class="row" style="margin-top:10px;">
+          <button class="ghost" id="playPauseBtn">▶ 再生</button>
+          <button class="primary grow" id="addFreezeBtn"><span class="step-badge">③</span>＋ フリーズ追加</button>
+        </div>
       </div>
     </div>
   </section>
@@ -666,6 +698,11 @@ var draft = null;          // 現在編集中のフリーズ（未保存）
 var draftIsNew = false;    // draft が新規追加か、既存の編集か
 var currentStroke = null;  // 描画中のストローク { widthRatio, points:[[x,y],...] }
 var overlaySize = { width: 0, height: 0 };
+// 直近に実際にcanvasの.width/.heightを再設定したときのCSSピクセルサイズ。
+// resize毎に無条件でリサイズすると（特にiOSでアドレスバーの出入りにより
+// 頻発するresizeで）canvasの中身が消えてしまうため、幅かアスペクト比が
+// 実際に変わった時だけ再設定するための比較基準として使う。
+var lastCanvasContentSize = { width: 0, height: 0 };
 var previewRAF = null;
 
 var els = {};
@@ -679,7 +716,7 @@ function init() {
     "pickVideoBtn", "useSampleBtn", "videoFileInput", "videoFileName", "restoreStatus",
     "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
     "guideCard", "guideCloseBtn",
-    "playerSection", "video", "videoWrap", "playerCanvas", "drawCanvas", "previewCanvas", "drawHint",
+    "playerSection", "playerControls", "video", "videoWrap", "playerCanvas", "drawCanvas", "previewCanvas", "drawHint",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
@@ -770,9 +807,7 @@ function init() {
   els.errorBannerClose.addEventListener("click", hideError);
 
   wireDrawCanvasTouch();
-  window.addEventListener("resize", function () {
-    if (els.video.videoWidth) layoutOverlayCanvases();
-  });
+  window.addEventListener("resize", handleWindowResize);
   // 最初のタップ（動画がまだ無ければ何もしない）で video の初期化を試みる
   document.addEventListener("pointerdown", tryUnlockVideo, { passive: true });
 
@@ -885,6 +920,9 @@ function loadVideoFile(file) {
   var url = URL.createObjectURL(file);
   els.video.src = url;
   els.playerSection.hidden = false;
+  // 動画が変わったら、次のlayoutOverlayCanvasesは必ず実際に
+  // リサイズ処理を行う（別動画でも解像度が一致していたケースの誤検知を防ぐ）
+  lastCanvasContentSize = { width: 0, height: 0 };
   // change イベントはユーザー操作起点で呼ばれるため、ここで初期化を試みる
   // （失敗しても tryUnlockVideo は次のタップで再試行される）
   tryUnlockVideo();
@@ -1009,8 +1047,16 @@ function attemptEnterDrawMode(draftCandidate, isNew) {
     } finally {
       if (!entered) {
         // 途中で例外が起きた場合は、必ず通常表示に戻す
+        els.editorSection.hidden = true;
+        els.editorSection.style.top = "";
+        els.videoWrap.classList.remove("editing");
+        els.videoWrap.style.top = "";
+        els.videoWrap.style.width = "";
+        els.videoWrap.style.height = "";
+        document.body.classList.remove("freeze-editing");
         frozenFrameCanvas = null;
         draft = null;
+        layoutOverlayCanvases();
         startPlayerRenderLoop();
       }
     }
@@ -1096,13 +1142,18 @@ function enterDrawMode() {
 
   els.editorSection.hidden = false;
   els.videoWrap.classList.add("editing");
-  els.videoWrap.scrollIntoView({ behavior: "smooth", block: "start" });
+  // 映像エリアを画面上部に固定し、bodyのスクロールを止める
+  // （iOSでのアドレスバー出入り＝resize連発を根本的に避けるため）。
+  // 以後 #editorSection の中の設定項目だけが独立してスクロールする。
+  document.body.classList.add("freeze-editing");
+  sizeFixedVideoWrap(); // video-wrapの実サイズを、canvasのレイアウト計算より先に確定させる
   setPlayStatus("フリーズ編集中");
 
   layoutOverlayCanvases();
   paintFrozenFrame();
   redrawStrokesOverlay();
   showDrawHint();
+  layoutFixedEditorArea();
 }
 
 /**
@@ -1112,8 +1163,11 @@ function enterDrawMode() {
 function exitDrawMode() {
   try {
     els.editorSection.hidden = true;
+    els.editorSection.style.top = "";
     els.videoWrap.classList.remove("editing");
     els.videoWrap.classList.remove("previewing");
+    els.videoWrap.style.width = "";
+    els.videoWrap.style.height = "";
     stopPreviewPlayback();
     hideDrawHint();
   } catch (err) {
@@ -1122,6 +1176,8 @@ function exitDrawMode() {
     draft = null;
     currentStroke = null;
     frozenFrameCanvas = null;
+    document.body.classList.remove("freeze-editing");
+    layoutOverlayCanvases(); // video-wrapが通常サイズに戻った後のcanvas再配置
     startPlayerRenderLoop(); // 通常のライブ描画を必ず再開する
     setPlayStatus(els.video.paused ? "一時停止中" : "再生中");
   }
@@ -1187,9 +1243,14 @@ function hideDrawHint() {
 /* ---------------- キャンバスの配置とタッチ描画 ---------------- */
 
 /**
- * playerCanvas / drawCanvas / previewCanvas をすべて、動画の実表示領域
- * （レターボックスを除いた領域）に合わせて配置・リサイズする。
- * playerCanvas は常時表示なので動画のメタデータが分かり次第呼ぶ。
+ * playerCanvas / drawCanvas / previewCanvas の位置・表示サイズ(CSSピクセル)は
+ * 毎回安全に更新できる（中身は消えない）。一方 canvas.width/height の
+ * 再設定（＝バッキングストアの確保し直し）は中身を消してしまうため、
+ * 実際に表示幅かアスペクト比が変わったときだけ行う。
+ * iOSでアドレスバーの出入りにより頻発する resize イベントのたびに
+ * canvasの中身が消え、描画モード中に画面が真っ黒になる不具合の対策。
+ *
+ * 戻り値: 実際に canvas.width/height を再設定した場合 true。
  */
 function layoutOverlayCanvases() {
   var rect = els.video.getBoundingClientRect();
@@ -1201,13 +1262,62 @@ function layoutOverlayCanvases() {
     canvas.style.top = content.top + "px";
     canvas.style.width = content.width + "px";
     canvas.style.height = content.height + "px";
+  });
+  overlaySize = { width: content.width, height: content.height };
+
+  var widthChanged = Math.abs(content.width - lastCanvasContentSize.width) > 0.5;
+  var aspectChanged = (function () {
+    if (!lastCanvasContentSize.width || !lastCanvasContentSize.height || !content.height) return true;
+    var a1 = content.width / content.height;
+    var a2 = lastCanvasContentSize.width / lastCanvasContentSize.height;
+    return Math.abs(a1 - a2) > 0.01;
+  })();
+  if (!widthChanged && !aspectChanged) {
+    return false;
+  }
+
+  [els.playerCanvas, els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
     canvas.width = Math.max(1, Math.round(content.width * dpr));
     canvas.height = Math.max(1, Math.round(content.height * dpr));
     var ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   });
+  lastCanvasContentSize = { width: content.width, height: content.height };
+  return true;
+}
 
-  overlaySize = { width: content.width, height: content.height };
+/**
+ * window の resize イベント（iOSではアドレスバーの出入りだけでも頻発する）。
+ * canvasが実際に再設定された場合のみ、必要な再描画を行う：
+ *   - 描画モード中: frozenFrameCanvas とストロークを描き直す
+ *   - 通常モード: 次のrAFを待たず、その場でvideoの現在フレームを描き直す
+ * 描画モード中は、映像エリア自体を position:fixed にしているぶん
+ * 高さが変わることがあるため、editorSectionのスクロール領域も再計算する。
+ */
+function handleWindowResize() {
+  if (!els.video.videoWidth) return;
+  var resized = layoutOverlayCanvases();
+  if (draft) {
+    if (resized) {
+      paintFrozenFrame();
+      redrawStrokesOverlay();
+    }
+    layoutFixedEditorArea();
+  } else if (resized) {
+    drawPlayerFrameOnce();
+  }
+}
+
+/** playerCanvasへ、videoの現在フレームを1回だけ描く（rAFループの本体から共通利用） */
+function drawPlayerFrameOnce() {
+  if (draft) return; // 描画モード中はvideoから描かない（frozenFrameCanvas側を維持する）
+  if (els.video.readyState < 2 || overlaySize.width <= 0) return;
+  var ctx = els.playerCanvas.getContext("2d");
+  try {
+    ctx.drawImage(els.video, 0, 0, overlaySize.width, overlaySize.height);
+  } catch (err) {
+    // デコード途中のフレームなどは無視して次フレームへ
+  }
 }
 
 /**
@@ -1218,18 +1328,8 @@ function layoutOverlayCanvases() {
 var playerRenderRAF = null;
 function startPlayerRenderLoop() {
   if (playerRenderRAF) return;
-  var ctx = els.playerCanvas.getContext("2d");
   function tick() {
-    // draft がある間（描画モード中）は video からの描画をしない。
-    // 静止フレームは frozenFrameCanvas 側で固定表示しているため、
-    // ここで video を描いてしまうと、iOSでの黒フレーム化を再び持ち込むことになる。
-    if (!draft && els.video.readyState >= 2 && overlaySize.width > 0) {
-      try {
-        ctx.drawImage(els.video, 0, 0, overlaySize.width, overlaySize.height);
-      } catch (err) {
-        // デコード途中のフレームなどは無視して次フレームへ
-      }
-    }
+    drawPlayerFrameOnce();
     playerRenderRAF = requestAnimationFrame(tick);
   }
   playerRenderRAF = requestAnimationFrame(tick);
@@ -1239,6 +1339,54 @@ function startPlayerRenderLoop() {
 function stopPlayerRenderLoop() {
   if (playerRenderRAF) cancelAnimationFrame(playerRenderRAF);
   playerRenderRAF = null;
+}
+
+// 描画モード中に固定表示する下部操作バーのおおよその高さ（px、実測に近い値）
+var FIXED_BAR_APPROX_HEIGHT = 70;
+// 設定項目（ブラシ太さ・名前・SFX等）のスクロール領域として最低限確保したい高さ
+var MIN_EDITOR_FIELDS_HEIGHT = 200;
+
+/**
+ * 描画モード中、映像エリア(#videoWrap)の表示サイズを決める。
+ * 単純に「幅いっぱい・アスペクト比9:13」のままだと、iOS Safariの実効
+ * ビューポート高さ（アドレスバー表示中は600px台になることがある）では
+ * 映像だけで画面のほとんどを占めてしまい、下の設定項目（#editorSection）を
+ * 表示するスクロール領域がほぼ無くなってしまう。そのため、ヘッダー・
+ * 下部固定バー・設定項目の最低表示分を差し引いた残り高さを上限として、
+ * 映像エリアの幅・高さをJSで直接計算する。
+ */
+function sizeFixedVideoWrap() {
+  var header = document.querySelector(".app-header");
+  var headerH = header ? header.getBoundingClientRect().height : 0;
+  var viewportH = window.innerHeight;
+
+  var maxVideoH = viewportH - headerH - FIXED_BAR_APPROX_HEIGHT - MIN_EDITOR_FIELDS_HEIGHT;
+  maxVideoH = Math.max(160, Math.min(maxVideoH, viewportH * 0.55));
+
+  var maxWidthByViewport = Math.min(window.innerWidth, 520);
+  var w = Math.min(maxWidthByViewport, maxVideoH * 9 / 13);
+  var h = w * 13 / 9;
+
+  // headerはposition:stickyのまま表示し続けるので、その高さぶん
+  // videoWrapの固定位置を下にずらす（ここを忘れるとヘッダーと映像が重なる）
+  els.videoWrap.style.top = Math.round(headerH) + "px";
+  els.videoWrap.style.width = Math.round(w) + "px";
+  els.videoWrap.style.height = Math.round(h) + "px";
+}
+
+/**
+ * 描画モード中、映像エリア(#videoWrap)を画面上部にposition:fixedした分、
+ * その高さぶん #editorSection の開始位置(top)をずらして、
+ * 映像の下に隠れないようにする。ヘッダーの高さも含めて動的に計算する
+ * （文言の折り返し等で微妙に変わり得るため固定値にしない）。
+ */
+function layoutFixedEditorArea() {
+  if (!draft) return;
+  sizeFixedVideoWrap();
+  var header = document.querySelector(".app-header");
+  var headerH = header ? header.getBoundingClientRect().height : 0;
+  var videoH = els.videoWrap.getBoundingClientRect().height;
+  els.editorSection.style.top = Math.round(headerH + videoH) + "px";
 }
 
 /**

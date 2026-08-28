@@ -25,9 +25,10 @@ spotlight-reel/
 ├── examples/
 │   └── sample.json         # make_dummy.py が生成するサンプル
 ├── tests/
-│   ├── editor_logic.test.js            # index.html のJSON生成ロジックのユニットテスト（依存なし）
-│   ├── player_ui.playwright.test.mjs   # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
-│   └── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
+│   ├── editor_logic.test.js                    # index.html のJSON生成ロジックのユニットテスト（依存なし）
+│   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
+│   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
+│   └── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
 ├── colab.ipynb             # Colab用ノートブック
 └── README.md
 ```
@@ -66,14 +67,20 @@ https://digital-twin-creator.github.io/spotlight-reel/diag.html を開いてく�
 
 ### Colabへの受け渡し手順
 
-1. スマホで書き出した `project.json` と、元の動画ファイルを **同じフォルダ名で** Googleドライブに置く
+1. スマホで書き出した `project.json` と、元の動画ファイルを、Googleドライブの
+   **`マイドライブ/spotlight_reel/`** フォルダに置く
    （例: `MyDrive/spotlight_reel/input.mp4` と `MyDrive/spotlight_reel/project.json`）。
-2. `colab.ipynb` を開き、「本番用（任意）」セクションでドライブをマウントし、
-   `VIDEO_PATH` / `JSON_PATH` / `OUT_PATH` をそのパスに書き換えて実行する。
-3. `OUT_PATH` に出力されたMP4をドライブから確認・ダウンロードする。
+2. `colab.ipynb` を開き、「ランタイム → すべてのセルを実行」する。
+   「本番用（自動実行）」セクションが、そのフォルダの `project.json` を自動的に読み込み、
+   動画ファイルも自動的に探して `render.py` を実行する
+   （パスを手で書き換える必要はありません）。
+3. 出力は `MyDrive/spotlight_reel/output_YYYYMMDD_HHMM.mp4` として保存され、
+   ノートブック内で再生されたあと、スマホへのダウンロードも自動的に始まる。
 
-（`colab.ipynb` の最初の3セルは、動作確認用のダミー動画で「ランタイム→すべてのセルを実行」
-だけで一気に試せるようになっています。）
+`project.json` をまだドライブに置いていない状態で実行しても、「本番用」セクションは
+案内メッセージを表示して自動的にスキップされるだけで、エラーにはなりません
+（`colab.ipynb` の最初の3セルは、動作確認用のダミー動画で
+「ランタイム→すべてのセルを実行」だけで一気に試せるようになっています）。
 
 ## 使い方（Google Colab）
 
@@ -180,6 +187,7 @@ npm install --no-save playwright-core
 python3 -m http.server 8794 &   # index.html をどこかで配信しておく
 node tests/player_ui.playwright.test.mjs
 node tests/freeze_black_screen.playwright.test.mjs
+node tests/resize_scroll_black_screen.playwright.test.mjs
 ```
 
 ## GitHub Pages の有効化
