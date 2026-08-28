@@ -1,5 +1,5 @@
 # make_dummy.py / render.py が生成する確認用の動画・画像（大きいため追跡しない）
-examples/dummy_input.mp4
+# dummy_input.mp4 だけは「サンプル動画で試す」機能から fetch するため例外的に追跡する
 examples/out.mp4
 examples/*_preview.png
 examples/preview.png

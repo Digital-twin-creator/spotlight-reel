@@ -34,6 +34,36 @@
     position:sticky; top:0; z-index:5;
   }
   .app-header .sub{font-size:11px;color:var(--muted);}
+
+  /* --- 状態バー --- */
+  .status-bar-row{display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;}
+  .status-chip{
+    font-size:11px; padding:4px 9px; border-radius:999px; background:var(--panel3);
+    color:var(--muted); border:1px solid var(--line); white-space:nowrap;
+  }
+  .status-chip.ok{color:var(--ok); border-color:var(--ok);}
+  .status-chip.warn{color:var(--danger); border-color:var(--danger);}
+  .error-banner{
+    margin-top:8px; background:rgba(255,84,104,.12); border:1px solid var(--danger);
+    color:#ffd7dc; border-radius:10px; padding:8px 10px; font-size:12px;
+    display:flex; gap:8px; align-items:flex-start; line-height:1.5;
+  }
+  .error-banner span{flex:1; word-break:break-word;}
+  .error-banner button{
+    min-height:28px; min-width:28px; padding:0; font-size:14px; background:transparent;
+    color:#ffd7dc; border:none; flex-shrink:0;
+  }
+
+  /* --- 使い方ガイド --- */
+  .step-badge{
+    display:inline-flex; align-items:center; justify-content:center;
+    width:20px; height:20px; border-radius:999px; background:var(--accent);
+    color:#fff; font-size:11px; font-weight:700; flex-shrink:0; margin-right:6px;
+  }
+  .guide-card ol{list-style:none; margin:0 0 10px; padding:0; display:flex; flex-direction:column; gap:6px;}
+  .guide-card li{display:flex; align-items:center; font-size:13px;}
+  button .step-badge{margin-right:8px;}
+
   main{padding:12px 12px 40px; max-width:520px; margin:0 auto;}
   section{margin-bottom:14px;}
   .card{
@@ -84,6 +114,14 @@
   .video-wrap:not(.editing) #drawCanvas{ display:none; }
   .video-wrap:not(.previewing) #previewCanvas{ display:none; }
 
+  .draw-hint{
+    position:absolute; inset:0; z-index:3; display:flex; align-items:center; justify-content:center;
+    text-align:center; padding:24px; background:rgba(0,0,0,.45); color:#fff; font-size:16px;
+    font-weight:700; pointer-events:none; transition:opacity .4s ease; opacity:1;
+  }
+  .draw-hint.fade-out{ opacity:0; }
+  .video-wrap:not(.editing) .draw-hint{ display:none; }
+
   .time-readout{font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); min-width:64px; text-align:right;}
   .seek-row{margin-top:8px;}
   .fine-row button{flex:1;}
@@ -123,15 +161,39 @@
 <header class="app-header">
   <h1>人物スポットライト エディタ</h1>
   <div class="sub">動画を止めて指でなぞり、名前を入れて project.json を書き出します</div>
+  <div class="status-bar-row">
+    <span class="status-chip" id="videoStatusChip">🎬 動画: 未選択</span>
+    <span class="status-chip" id="playStatusChip">▶ 状態: 待機中</span>
+  </div>
+  <div class="error-banner" id="errorBanner" hidden>
+    <span id="errorBannerText"></span>
+    <button id="errorBannerClose" aria-label="エラーを閉じる">✕</button>
+  </div>
 </header>
 
 <main>
 
+  <!-- 使い方ガイド -->
+  <section class="card guide-card" id="guideCard">
+    <h2>使い方</h2>
+    <ol>
+      <li><span class="step-badge">①</span>動画を選ぶ</li>
+      <li><span class="step-badge">②</span>止めたいところまでシークする</li>
+      <li><span class="step-badge">③</span>＋フリーズ追加をタップ</li>
+      <li><span class="step-badge">④</span>止まった映像を指でなぞる</li>
+      <li><span class="step-badge">⑤</span>名前を入力する</li>
+      <li><span class="step-badge">⑥</span>完了をタップ</li>
+      <li><span class="step-badge">⑦</span>JSONを書き出す</li>
+    </ol>
+    <button class="ghost small" id="guideCloseBtn">閉じる</button>
+  </section>
+
   <!-- 1. 素材読み込み -->
   <section id="loaderSection" class="card">
-    <h2>1. 動画を選ぶ</h2>
+    <h2><span class="step-badge">①</span>動画を選ぶ</h2>
     <div class="stack">
       <button class="primary" id="pickVideoBtn">🎬 動画を選ぶ</button>
+      <button class="ghost" id="useSampleBtn">🎞 サンプル動画で試す</button>
       <input type="file" id="videoFileInput" accept="video/*" hidden>
       <div class="muted" id="videoFileName">まだ動画が選ばれていません</div>
       <div class="muted">※ 動画ファイル自体は保存されません。編集を再開するには、同じ動画ファイルをもう一度選んでください。</div>
@@ -146,9 +208,11 @@
         <video id="video" playsinline muted></video>
         <canvas id="drawCanvas"></canvas>
         <canvas id="previewCanvas"></canvas>
+        <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
       </div>
 
       <div class="seek-row">
+        <label><span class="step-badge">②</span>止めたいところまでシーク</label>
         <input type="range" id="seekBar" min="0" max="1" step="0.01" value="0">
         <div class="row">
           <div class="grow"></div>
@@ -165,7 +229,7 @@
 
       <div class="row" style="margin-top:10px;">
         <button class="ghost" id="playPauseBtn">▶ 再生</button>
-        <button class="primary grow" id="addFreezeBtn">＋ フリーズ追加</button>
+        <button class="primary grow" id="addFreezeBtn"><span class="step-badge">③</span>＋ フリーズ追加</button>
       </div>
     </div>
   </section>
@@ -173,7 +237,7 @@
   <!-- 3. フリーズ編集（描画モード） -->
   <section id="editorSection" hidden>
     <div class="card">
-      <h2 id="editorTitle">フリーズを編集</h2>
+      <h2 id="editorTitle"><span class="step-badge">④</span>止まった映像を指でなぞってください</h2>
 
       <div class="field">
         <label>ブラシ太さ <span class="brush-slider-value" id="brushWidthValue">0.12</span></label>
@@ -187,7 +251,7 @@
       </div>
 
       <div class="field">
-        <label>名前テロップ</label>
+        <label><span class="step-badge">⑤</span>名前テロップ</label>
         <input type="text" id="nameInput" placeholder="例：山田 太郎">
       </div>
 
@@ -211,7 +275,7 @@
 
       <div class="row" style="margin-top:6px;">
         <button class="ghost grow" id="cancelFreezeBtn">キャンセル</button>
-        <button class="primary grow" id="commitFreezeBtn">完了</button>
+        <button class="primary grow" id="commitFreezeBtn"><span class="step-badge">⑥</span>完了</button>
       </div>
     </div>
   </section>
@@ -255,7 +319,7 @@
 
   <!-- 7. 書き出し・読み込み -->
   <section class="card" id="ioSection">
-    <h2>書き出し・読み込み</h2>
+    <h2><span class="step-badge">⑦</span>書き出し・読み込み</h2>
     <div class="stack">
       <button class="primary" id="exportBtn">📤 JSONを書き出す</button>
       <button class="ghost" id="copyJsonBtn">📋 JSONをコピー</button>
@@ -565,8 +629,10 @@ document.addEventListener("DOMContentLoaded", init);
 
 function init() {
   [
-    "pickVideoBtn", "videoFileInput", "videoFileName", "restoreStatus",
-    "playerSection", "video", "videoWrap", "drawCanvas", "previewCanvas",
+    "pickVideoBtn", "useSampleBtn", "videoFileInput", "videoFileName", "restoreStatus",
+    "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
+    "guideCard", "guideCloseBtn",
+    "playerSection", "video", "videoWrap", "drawCanvas", "previewCanvas", "drawHint",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
@@ -577,13 +643,28 @@ function init() {
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea"
   ].forEach(function (id) { els[id] = $(id); });
 
+  wireGlobalErrorHandling();
+  initGuideCard();
+
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
   els.videoFileInput.addEventListener("change", handleVideoFileChange);
+  els.useSampleBtn.addEventListener("click", loadSampleVideo);
 
   els.video.addEventListener("loadedmetadata", onVideoLoadedMetadata);
   els.video.addEventListener("timeupdate", onVideoTimeUpdate);
-  els.video.addEventListener("play", function () { els.playPauseBtn.textContent = "⏸ 停止"; });
-  els.video.addEventListener("pause", function () { els.playPauseBtn.textContent = "▶ 再生"; });
+  els.video.addEventListener("play", function () {
+    els.playPauseBtn.textContent = "⏸ 停止";
+    if (!draft) setPlayStatus("再生中");
+  });
+  els.video.addEventListener("pause", function () {
+    els.playPauseBtn.textContent = "▶ 再生";
+    if (!draft) setPlayStatus("一時停止中");
+  });
+  els.video.addEventListener("error", onVideoError);
+  els.video.addEventListener("waiting", function () { setVideoStatus("読み込み中…"); });
+  els.video.addEventListener("canplay", function () {
+    if (els.video.duration) setVideoStatus("準備完了（" + els.video.duration.toFixed(1) + "秒）");
+  });
 
   els.seekBar.addEventListener("input", function () {
     els.video.currentTime = Number(els.seekBar.value);
@@ -595,7 +676,16 @@ function init() {
     });
   });
   els.playPauseBtn.addEventListener("click", function () {
-    if (els.video.paused) els.video.play(); else els.video.pause();
+    if (els.video.paused) {
+      var p = els.video.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(function (err) {
+          showError("動画を再生できませんでした: " + (err && err.message ? err.message : err));
+        });
+      }
+    } else {
+      els.video.pause();
+    }
   });
 
   els.addFreezeBtn.addEventListener("click", startNewFreeze);
@@ -630,14 +720,85 @@ function init() {
   els.copyJsonBtn.addEventListener("click", copyProjectJSON);
   els.loadJsonBtn.addEventListener("click", function () { els.jsonFileInput.click(); });
   els.jsonFileInput.addEventListener("change", handleJsonFileChange);
+  els.errorBannerClose.addEventListener("click", hideError);
 
   wireDrawCanvasTouch();
   window.addEventListener("resize", function () {
     if (draft) layoutOverlayCanvases();
   });
 
+  setVideoStatus("未選択");
+  setPlayStatus("待機中");
   renderFreezeList();
   updateJsonPreview();
+}
+
+/* ---------------- 状態バー・エラー表示 ---------------- */
+
+function wireGlobalErrorHandling() {
+  // console だけでなく画面にもエラーを出す（iOSはコンソールを見られないため）
+  window.addEventListener("error", function (e) {
+    showError("スクリプトエラー: " + (e.message || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var reason = e.reason;
+    var msg = (reason && reason.message) ? reason.message : String(reason);
+    showError("処理エラー: " + msg);
+  });
+}
+
+function showError(msg) {
+  console.error(msg);
+  if (!els.errorBanner) return;
+  els.errorBannerText.textContent = msg;
+  els.errorBanner.hidden = false;
+}
+
+function hideError() {
+  els.errorBanner.hidden = true;
+}
+
+function setVideoStatus(text, isError) {
+  if (!els.videoStatusChip) return;
+  els.videoStatusChip.textContent = "🎬 動画: " + text;
+  els.videoStatusChip.className = "status-chip" + (isError ? " warn" : (text.indexOf("準備完了") === 0 ? " ok" : ""));
+}
+
+function setPlayStatus(text) {
+  if (els.playStatusChip) els.playStatusChip.textContent = "▶ 状態: " + text;
+}
+
+/** 動画の decode エラー（HEVC/HEIC等の非対応コーデックを含む）を分かりやすく表示する */
+function onVideoError() {
+  var err = els.video.error;
+  var code = err ? err.code : 0;
+  var msg = "動画を読み込めませんでした。";
+  if (code === 4) {
+    msg = "この動画の形式を再生できませんでした。HEIC/HEVCなど非対応のコーデックの可能性があります。" +
+      "iPhoneの「設定→カメラ→フォーマット→互換性優先」に切り替えて撮影し直すか、" +
+      "他の動画（.mp4のH.264など）でお試しください。";
+  } else if (code === 3) {
+    msg = "動画のデコードに失敗しました。ファイルが壊れているか、対応していない形式の可能性があります。";
+  } else if (code === 2) {
+    msg = "動画の読み込み中にエラーが発生しました。もう一度お試しください。";
+  }
+  setVideoStatus("エラー", true);
+  setPlayStatus("エラー");
+  showError(msg);
+}
+
+/* ---------------- 使い方ガイド ---------------- */
+
+var GUIDE_DISMISS_KEY = "spotlightReel:v1:guideDismissed";
+
+function initGuideCard() {
+  try {
+    if (localStorage.getItem(GUIDE_DISMISS_KEY)) els.guideCard.hidden = true;
+  } catch (e) { /* localStorageが使えない環境は常に表示 */ }
+  els.guideCloseBtn.addEventListener("click", function () {
+    els.guideCard.hidden = true;
+    try { localStorage.setItem(GUIDE_DISMISS_KEY, "1"); } catch (e) { /* 無視 */ }
+  });
 }
 
 /* ---------------- 動画読み込み ---------------- */
@@ -645,8 +806,32 @@ function init() {
 function handleVideoFileChange(e) {
   var file = e.target.files && e.target.files[0];
   if (!file) return;
+  loadVideoFile(file);
+}
+
+/** 「サンプル動画で試す」：examples/dummy_input.mp4 を fetch して読み込む */
+function loadSampleVideo() {
+  setVideoStatus("サンプルを読み込み中…");
+  fetch("examples/dummy_input.mp4")
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.blob();
+    })
+    .then(function (blob) {
+      loadVideoFile(new File([blob], "dummy_input.mp4", { type: "video/mp4" }));
+    })
+    .catch(function (err) {
+      setVideoStatus("未選択");
+      showError("サンプル動画を読み込めませんでした: " + (err && err.message ? err.message : err));
+    });
+}
+
+function loadVideoFile(file) {
   appState.videoFileName = file.name;
   els.videoFileName.textContent = "選択中: " + file.name;
+  setVideoStatus("読み込み中…");
+  setPlayStatus("待機中");
+  hideError();
 
   var url = URL.createObjectURL(file);
   els.video.src = url;
@@ -668,6 +853,7 @@ function onVideoLoadedMetadata() {
   els.seekBar.max = String(els.video.duration || 0);
   els.seekBar.step = "0.01";
   updateTimeReadout();
+  if (els.video.duration) setVideoStatus("準備完了（" + els.video.duration.toFixed(1) + "秒）");
 }
 
 function onVideoTimeUpdate() {
@@ -685,20 +871,34 @@ function seekBy(delta) {
   els.video.currentTime = t;
 }
 
-/** currentTime を設定し、iOS でも確実にそのフレームが描画済みになってから解決する */
+/**
+ * currentTime を設定し、iOS でも確実にそのフレームが描画済みになってから解決する。
+ * 既に同じ時刻・データ準備済みなら（同じ時刻への再シークで seeked が発火しない
+ * 環境があるため）即座に解決し、それ以外は seeked を待つが、
+ * 万一 seeked が来ない場合に無限に止まらないようタイムアウトで必ず解決する。
+ */
 function seekAndWait(t) {
   return new Promise(function (resolve) {
+    if (Math.abs(els.video.currentTime - t) < 0.01 && els.video.readyState >= 2) {
+      resolve();
+      return;
+    }
     var done = false;
-    function onSeeked() {
+    function finish() {
       if (done) return;
       done = true;
-      els.video.removeEventListener("seeked", onSeeked);
+      els.video.removeEventListener("seeked", finish);
       resolve();
     }
-    els.video.addEventListener("seeked", onSeeked);
-    els.video.currentTime = t;
-    // 一部環境で seeked が発火しない場合の保険
-    setTimeout(onSeeked, 500);
+    els.video.addEventListener("seeked", finish);
+    try {
+      els.video.currentTime = t;
+    } catch (err) {
+      finish();
+      return;
+    }
+    // 一部環境で seeked が発火しない場合の保険（同じ時刻への再シーク等）
+    setTimeout(finish, 500);
   });
 }
 
@@ -728,7 +928,8 @@ function editFreeze(id) {
 }
 
 function enterDrawMode() {
-  els.editorTitle.textContent = draftIsNew ? "フリーズを追加" : "フリーズを編集（" + draft.time.toFixed(2) + "s）";
+  els.editorTitle.innerHTML = '<span class="step-badge">④</span>' +
+    (draftIsNew ? "止まった映像を指でなぞってください" : "フリーズを編集（" + draft.time.toFixed(2) + "s）");
   els.nameInput.value = draft.name || "";
   els.sfxSelect.value = draft.sfx || "";
   els.backgroundSelect.value = draft.background || "mono";
@@ -738,9 +939,11 @@ function enterDrawMode() {
   els.editorSection.hidden = false;
   els.videoWrap.classList.add("editing");
   els.videoWrap.scrollIntoView({ behavior: "smooth", block: "start" });
+  setPlayStatus("フリーズ編集中");
 
   layoutOverlayCanvases();
   redrawStrokesOverlay();
+  showDrawHint();
 }
 
 function exitDrawMode() {
@@ -748,31 +951,64 @@ function exitDrawMode() {
   els.videoWrap.classList.remove("editing");
   els.videoWrap.classList.remove("previewing");
   stopPreviewPlayback();
+  hideDrawHint();
   draft = null;
   currentStroke = null;
+  setPlayStatus(els.video.paused ? "一時停止中" : "再生中");
 }
 
 function cancelFreezeEdit() {
   exitDrawMode();
 }
 
+/**
+ * 「完了」処理。サムネイル生成が何らかの理由で失敗しても、
+ * ここで確実に exitDrawMode() まで到達させる（描画キャンバスが
+ * 動画の上に残ったまま操作不能になる事態を避けるための二重の安全網）。
+ */
 function commitFreezeEdit() {
   draft.name = els.nameInput.value.trim();
   draft.sfx = els.sfxSelect.value;
   draft.background = els.backgroundSelect.value;
 
-  captureThumbnail(draft).then(function () {
-    if (draftIsNew) {
-      appState.freezes.push(draft);
-    } else {
-      var idx = appState.freezes.findIndex(function (f) { return f.id === draft.id; });
-      if (idx >= 0) appState.freezes[idx] = draft;
-    }
-    exitDrawMode();
-    renderFreezeList();
-    saveToLocalStorage();
-    updateJsonPreview();
-  });
+  var target = draft;
+  var isNew = draftIsNew;
+
+  captureThumbnail(target)
+    .catch(function (err) {
+      showError("サムネイル生成でエラーが発生しました（続行します）: " + (err && err.message ? err.message : err));
+    })
+    .then(function () {
+      if (isNew) {
+        appState.freezes.push(target);
+      } else {
+        var idx = appState.freezes.findIndex(function (f) { return f.id === target.id; });
+        if (idx >= 0) appState.freezes[idx] = target;
+      }
+      exitDrawMode();
+      renderFreezeList();
+      saveToLocalStorage();
+      updateJsonPreview();
+    });
+}
+
+/* ---------------- 描画ガイド（初回ヒント） ---------------- */
+
+var drawHintTimer = null;
+
+function showDrawHint() {
+  if (!els.drawHint) return;
+  els.drawHint.hidden = false;
+  els.drawHint.classList.remove("fade-out");
+  clearTimeout(drawHintTimer);
+  drawHintTimer = setTimeout(hideDrawHint, 2500);
+}
+
+function hideDrawHint() {
+  clearTimeout(drawHintTimer);
+  if (!els.drawHint || els.drawHint.hidden) return;
+  els.drawHint.classList.add("fade-out");
+  setTimeout(function () { els.drawHint.hidden = true; }, 400);
 }
 
 /* ---------------- キャンバスの配置とタッチ描画 ---------------- */
@@ -798,6 +1034,8 @@ function layoutOverlayCanvases() {
 
 function wireDrawCanvasTouch() {
   var canvas = els.drawCanvas;
+  // draft がある間（描画モード中）は touchmove/touchend の中身に関わらず
+  // 必ず preventDefault してスクロールを止める（途中で止めると画面が暴れるため）
   canvas.addEventListener("touchstart", function (e) {
     if (!draft) return;
     e.preventDefault();
@@ -806,13 +1044,19 @@ function wireDrawCanvasTouch() {
   }, { passive: false });
 
   canvas.addEventListener("touchmove", function (e) {
-    if (!draft || !currentStroke) return;
+    if (!draft) return;
     e.preventDefault();
+    if (!currentStroke) return;
     var t = e.touches[0];
     extendStroke(t.clientX, t.clientY);
   }, { passive: false });
 
   canvas.addEventListener("touchend", function (e) {
+    if (!draft) return;
+    e.preventDefault();
+    endStroke();
+  }, { passive: false });
+  canvas.addEventListener("touchcancel", function (e) {
     if (!draft) return;
     e.preventDefault();
     endStroke();
@@ -835,6 +1079,7 @@ function wireDrawCanvasTouch() {
 }
 
 function beginStroke(clientX, clientY) {
+  hideDrawHint();
   var widthRatio = Number(els.brushWidthSlider.value);
   currentStroke = { width: widthRatio, points: [] };
   extendStroke(clientX, clientY, true);
@@ -913,20 +1158,27 @@ function redrawStrokesOverlay() {
 
 /* ---------------- サムネイル生成 ---------------- */
 
+/**
+ * サムネイル生成。何が起きても reject せず必ず resolve する
+ * （ここで例外/rejectを外に漏らすと、呼び出し元の commitFreezeEdit が
+ *   止まってしまい「完了を押しても画面が固まる」原因になるため）。
+ */
 function captureThumbnail(fz) {
   return seekAndWait(fz.time).then(function () {
-    var vw = els.video.videoWidth, vh = els.video.videoHeight;
-    if (!vw || !vh) { fz.thumb = ""; return; }
-    var tw = 92, th = Math.round(tw * vh / vw);
-    var c = document.createElement("canvas");
-    c.width = tw; c.height = th;
-    var ctx = c.getContext("2d");
-    ctx.drawImage(els.video, 0, 0, tw, th);
     try {
+      var vw = els.video.videoWidth, vh = els.video.videoHeight;
+      if (!vw || !vh || els.video.readyState < 2) { fz.thumb = ""; return; }
+      var tw = 92, th = Math.max(1, Math.round(tw * vh / vw));
+      var c = document.createElement("canvas");
+      c.width = tw; c.height = th;
+      var ctx = c.getContext("2d");
+      ctx.drawImage(els.video, 0, 0, tw, th);
       fz.thumb = c.toDataURL("image/jpeg", 0.6);
     } catch (err) {
       fz.thumb = "";
     }
+  }).catch(function () {
+    fz.thumb = "";
   });
 }
 
@@ -999,26 +1251,37 @@ function stopPreviewPlayback() {
   previewRAF = null;
   els.videoWrap.classList.remove("previewing");
   els.previewBtn.textContent = "▶ プレビュー";
+  if (draft) setPlayStatus("フリーズ編集中");
 }
 
 function startPreviewPlayback() {
   var vw = els.video.videoWidth, vh = els.video.videoHeight;
-  if (!vw || !vh) return;
+  if (!vw || !vh || els.video.readyState < 2) {
+    showError("プレビューを表示できませんでした（動画フレームの取得に失敗）。");
+    return;
+  }
 
   var W = overlaySize.width, H = overlaySize.height;
-  var frameCanvas = document.createElement("canvas");
-  frameCanvas.width = W; frameCanvas.height = H;
-  var fctx = frameCanvas.getContext("2d");
-  fctx.drawImage(els.video, 0, 0, W, H);
+  var frameCanvas, fctx, bgCanvas, geoInfo;
+  try {
+    frameCanvas = document.createElement("canvas");
+    frameCanvas.width = W; frameCanvas.height = H;
+    fctx = frameCanvas.getContext("2d");
+    fctx.drawImage(els.video, 0, 0, W, H);
 
-  var bgCanvas = document.createElement("canvas");
-  bgCanvas.width = W; bgCanvas.height = H;
-  buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background);
+    bgCanvas = document.createElement("canvas");
+    bgCanvas.width = W; bgCanvas.height = H;
+    buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background);
 
-  var geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
+    geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
+  } catch (err) {
+    showError("プレビューの生成に失敗しました: " + (err && err.message ? err.message : err));
+    return;
+  }
 
   els.videoWrap.classList.add("previewing");
   els.previewBtn.textContent = "■ 停止";
+  setPlayStatus("プレビュー中");
 
   var pctx = els.previewCanvas.getContext("2d");
   var HOLD = 0.3, BRUSH = appState.brushAnimSec, REST = 1.0;
@@ -1027,25 +1290,31 @@ function startPreviewPlayback() {
   document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
 
   function frame(now) {
-    var elapsed = (now - start) / 1000;
-    pctx.clearRect(0, 0, W, H);
-    pctx.drawImage(bgCanvas, 0, 0, W, H);
+    try {
+      var elapsed = (now - start) / 1000;
+      pctx.clearRect(0, 0, W, H);
+      pctx.drawImage(bgCanvas, 0, 0, W, H);
 
-    if (elapsed >= HOLD) {
-      var progress = geoInfo.total > 0 ? Math.min(1, (elapsed - HOLD) / BRUSH) : 1;
-      drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H);
-      if (elapsed >= HOLD + BRUSH) {
-        var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
-        drawTelop(pctx, draft.name, W, H, fade);
+      if (elapsed >= HOLD) {
+        var progress = geoInfo.total > 0 ? Math.min(1, (elapsed - HOLD) / BRUSH) : 1;
+        drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H);
+        if (elapsed >= HOLD + BRUSH) {
+          var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
+          drawTelop(pctx, draft.name, W, H, fade);
+        }
       }
-    }
 
-    if (elapsed < HOLD + BRUSH + REST) {
-      previewRAF = requestAnimationFrame(frame);
-    } else {
-      previewRAF = null;
-      els.previewBtn.textContent = "▶ プレビュー";
+      if (elapsed < HOLD + BRUSH + REST) {
+        previewRAF = requestAnimationFrame(frame);
+        return;
+      }
+    } catch (err) {
+      showError("プレビュー中にエラーが発生しました: " + (err && err.message ? err.message : err));
     }
+    previewRAF = null;
+    els.videoWrap.classList.remove("previewing");
+    els.previewBtn.textContent = "▶ プレビュー";
+    if (draft) setPlayStatus("フリーズ編集中");
   }
   previewRAF = requestAnimationFrame(frame);
 }
