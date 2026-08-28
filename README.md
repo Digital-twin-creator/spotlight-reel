@@ -67,30 +67,30 @@ https://digital-twin-creator.github.io/spotlight-reel/diag.html を開いてく�
 
 ### Colabへの受け渡し手順
 
-1. スマホで書き出した `project.json` と、元の動画ファイルを、Googleドライブの
+1. `colab.ipynb` を Colab で開く（GitHub連携から直接開くか、`File > Upload notebook`）。
+2. スマホで書き出した `project.json` と、元の動画ファイルを、Googleドライブの
    **`マイドライブ/spotlight_reel/`** フォルダに置く
    （例: `MyDrive/spotlight_reel/input.mp4` と `MyDrive/spotlight_reel/project.json`）。
-2. `colab.ipynb` を開き、「ランタイム → すべてのセルを実行」する。
-   「本番用（自動実行）」セクションが、そのフォルダの `project.json` を自動的に読み込み、
-   動画ファイルも自動的に探して `render.py` を実行する
-   （パスを手で書き換える必要はありません）。
-3. 出力は `MyDrive/spotlight_reel/output_YYYYMMDD_HHMM.mp4` として保存され、
-   ノートブック内で再生されたあと、スマホへのダウンロードも自動的に始まる。
-
-`project.json` をまだドライブに置いていない状態で実行しても、「本番用」セクションは
-案内メッセージを表示して自動的にスキップされるだけで、エラーにはなりません
-（`colab.ipynb` の最初の3セルは、動作確認用のダミー動画で
-「ランタイム→すべてのセルを実行」だけで一気に試せるようになっています）。
-
-## 使い方（Google Colab）
-
-1. `colab.ipynb` を Colab で開く（GitHub連携から直接開くか、`File > Upload notebook`）。
-2. セルを上から順に実行：
+   動画ファイル名は `project.json` の `"video"` と完全に一致していなくても構いません
+   （下記参照）。
+3. 「ランタイム → すべてのセルを実行」する。上から順に、
    1. リポジトリの `git clone` と `pip install -r requirements.txt`
    2. Googleドライブのマウント
-   3. `VIDEO_PATH` / `JSON_PATH` / `OUT_PATH`（すべてドライブ内のパス）を指定
-   4. `render.py` の実行
-   5. 出力ファイルの確認・プレビュー再生
+   3. `project.json` の読み込み・動画の自動解決・`render.py` の実行
+   4. 成功時のみ、出力動画の再生とスマホへのダウンロード
+
+   が自動的に行われます（パスを手で書き換える必要はありません）。
+4. 出力は `MyDrive/spotlight_reel/output_YYYYMMDD_HHMM.mp4` として保存されます。
+
+動画の自動解決は次の順で行われます:
+- `project.json` の `"video"` の**ファイル名本体（拡張子を除いた部分）**と一致する
+  ファイルを、拡張子を問わず `spotlight_reel` フォルダの中から探す
+  （例: `"video": "input.mov"` でも、フォルダ内に `input.mp4` があればそれを使う）。
+- 見つからなければ、フォルダ内で**最終更新日時が最も新しい動画ファイル**を使う。
+
+途中で失敗した場合（Googleドライブ未接続・`project.json` が無い・動画が見つからない・
+`render.py` のエラーなど）は、原因をノートブック上に大きく表示して処理を止めます。
+その場合、続く再生・ダウンロードのセルは実行されません（エラーにはなりません）。
 
 ## 使い方（ローカル / CLIから直接）
 
