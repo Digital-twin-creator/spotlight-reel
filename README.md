@@ -4,7 +4,8 @@
 指でなぞった軌跡を**太いブラシのストロークアニメーション**でカラー化し、
 **名前テロップ**と**効果音**を合成する動画レンダラーです。
 
-編集操作はスマホのブラウザ（別途作成予定のエディタ）で行い、その結果を**プロジェクトJSON**として受け取ります。
+編集操作はスマホのブラウザ上のエディタ（`index.html`、GitHub Pagesで公開）で行い、
+その結果を**プロジェクトJSON**として受け取ります。
 このリポジトリの `render.py` が、そのJSONと元動画からMP4を生成します。
 
 実行環境は **Google Colab**（Python 3.10以上、ffmpeg あり）を想定しています。
@@ -13,17 +14,54 @@
 
 ```
 spotlight-reel/
-├── render.py            # メイン：JSON + 動画 → MP4
-├── make_dummy.py         # テスト用ダミー動画・ダミーJSON生成
-├── requirements.txt      # opencv-python-headless, numpy, pillow
+├── index.html            # スマホ用エディタ（GitHub Pagesで公開、ビルド不要の単一HTML）
+├── render.py              # メイン：JSON + 動画 → MP4
+├── make_dummy.py          # テスト用ダミー動画・ダミーJSON生成
+├── requirements.txt       # opencv-python-headless, numpy, pillow
 ├── assets/
-│   ├── fonts/            # NotoSansJP-Bold.ttf
-│   └── sfx/               # shakin.wav, don.wav
+│   ├── fonts/             # NotoSansJP-Bold.ttf
+│   └── sfx/                # shakin.wav, don.wav
 ├── examples/
-│   └── sample.json        # make_dummy.py が生成するサンプル
-├── colab.ipynb            # Colab用ノートブック
+│   └── sample.json         # make_dummy.py が生成するサンプル
+├── tests/
+│   └── editor_logic.test.js # index.html のJSON生成ロジックのユニットテスト（Node実行）
+├── colab.ipynb             # Colab用ノートブック
 └── README.md
 ```
+
+## スマホ用エディタ（index.html）
+
+**公開URL**: https://digital-twin-creator.github.io/spotlight-reel/
+（GitHub Pagesの有効化手順は本ページ末尾「GitHub Pages の有効化」を参照）
+
+外部ライブラリ・ビルド一切なしの単一HTMLファイルです。iPhone Safari / Android Chrome の
+両方で、開くだけでそのまま動作します。
+
+### 使い方（スマホでの操作手順）
+
+1. 上記URLをスマホのブラウザで開き、「🎬 動画を選ぶ」で編集したい動画を選択する
+   （動画はサーバーに送信されず、その場で再生されるだけ）。
+2. シークバーや微調整ボタン（−1秒/−0.1秒/+0.1秒/+1秒）で止めたい瞬間に合わせ、
+   「＋ フリーズ追加」をタップする。
+3. 表示された静止フレームの上を指でなぞって軌跡を描き、名前・効果音・背景処理を選んで「完了」。
+   「▶ プレビュー」で演出の雰囲気をその場で確認できる。
+4. 必要なだけフリーズを追加したら（一覧のカードから編集・削除・シークが可能）、
+   「📤 JSONを書き出す」で `project.json` を保存する（共有シート対応時はそのままファイル/ドライブへ、
+   非対応ブラウザではダウンロードになる。「📋 JSONをコピー」でクリップボードにも取れる）。
+
+編集内容は動画ファイル名をキーに端末の `localStorage` に自動保存されるため、途中でリロードしても
+同じ動画ファイルを選び直せば復元されます（動画そのものは保存されないので、再選択が必要です）。
+
+### Colabへの受け渡し手順
+
+1. スマホで書き出した `project.json` と、元の動画ファイルを **同じフォルダ名で** Googleドライブに置く
+   （例: `MyDrive/spotlight_reel/input.mp4` と `MyDrive/spotlight_reel/project.json`）。
+2. `colab.ipynb` を開き、「本番用（任意）」セクションでドライブをマウントし、
+   `VIDEO_PATH` / `JSON_PATH` / `OUT_PATH` をそのパスに書き換えて実行する。
+3. `OUT_PATH` に出力されたMP4をドライブから確認・ダウンロードする。
+
+（`colab.ipynb` の最初の3セルは、動作確認用のダミー動画で「ランタイム→すべてのセルを実行」
+だけで一気に試せるようになっています。）
 
 ## 使い方（Google Colab）
 
@@ -122,9 +160,21 @@ python make_dummy.py
 python render.py examples/sample.json --out examples/out.mp4
 ffprobe examples/out.mp4   # 長さ・音声トラックを確認
 python render.py examples/sample.json --preview examples/preview.png
+
+node tests/editor_logic.test.js   # index.html のJSON生成ロジックのユニットテスト
 ```
+
+## GitHub Pages の有効化
+
+`index.html` をスマホから開けるようにするには、リポジトリの GitHub Pages を有効化してください
+（このリポジトリでは自動化する権限がなかったため、以下は手動手順です）。
+
+1. GitHubでこのリポジトリの **Settings → Pages** を開く
+2. **Build and deployment → Source** を `Deploy from a branch` に設定
+3. **Branch** を `main` / `/ (root)` にして **Save**
+4. 数分後に `https://digital-twin-creator.github.io/spotlight-reel/` で公開される
 
 ## 今後の予定
 
-スマホ用の編集エディタ（`index.html`、GitHub Pages でホスト予定）を別途追加し、
-そこで作成したプロジェクトJSONをこのリポジトリの `render.py` で処理する構成にする予定です。
+- スマホ用エディタ（`index.html`）の実機（iPhone Safari / Android Chrome）での最終確認
+- エディタから書き出したJSONを使った、より長い実動画でのレンダリング確認

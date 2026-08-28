@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>人物スポットライト エディタ</title>
+<style>
+  @font-face {
+    font-family: "SpotlightJP";
+    src: url("assets/fonts/NotoSansJP-Bold.ttf") format("truetype");
+    font-weight: 700;
+    font-display: swap;
+  }
+  :root{
+    --bg:#0b0d12; --panel:#141822; --panel2:#1c2130; --panel3:#232939;
+    --text:#eef1f7; --muted:#8b93a7; --accent:#5b8cff; --accent-d:#3f6bdb;
+    --danger:#ff5468; --ok:#33cc88; --line:#2a3145; --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+    padding-bottom:calc(24px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;
+  }
+  [hidden]{display:none!important;}
+  h1,h2,h3{margin:0 0 8px;}
+  h1{font-size:17px;}
+  h2{font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.02em;}
+  p{margin:4px 0;}
+  .app-header{
+    padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+    background:var(--panel); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:5;
+  }
+  .app-header .sub{font-size:11px;color:var(--muted);}
+  main{padding:12px 12px 40px; max-width:520px; margin:0 auto;}
+  section{margin-bottom:14px;}
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:12px;
+  }
+  .muted{color:var(--muted); font-size:12px;}
+  .row{display:flex; gap:8px; align-items:center;}
+  .row.wrap{flex-wrap:wrap;}
+  .grow{flex:1;}
+  .stack{display:flex; flex-direction:column; gap:8px;}
+
+  button{
+    min-height:44px; min-width:44px; border:none; border-radius:10px;
+    background:var(--panel3); color:var(--text); font-size:14px; padding:10px 14px;
+    font-weight:600; cursor:pointer;
+  }
+  button:active{filter:brightness(1.15);}
+  button.primary{background:var(--accent); color:#fff;}
+  button.ghost{background:transparent; border:1px solid var(--line); color:var(--text);}
+  button.danger{background:var(--danger); color:#fff;}
+  button.small{min-height:38px; padding:6px 10px; font-size:13px;}
+  button:disabled{opacity:.4; cursor:not-allowed;}
+  button.icon{width:44px; padding:0; font-size:18px;}
+
+  input[type=text], input[type=number], select{
+    background:var(--panel3); color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px; font-size:15px; min-height:44px; width:100%;
+  }
+  input[type=range]{width:100%; height:32px;}
+  label{font-size:12px; color:var(--muted); display:block; margin-bottom:4px;}
+  .field{margin-bottom:10px;}
+
+  /* --- 動画プレイヤー --- */
+  .video-wrap{
+    position:relative; width:100%; aspect-ratio:9/13;
+    background:#000; border-radius:var(--radius); overflow:hidden;
+    touch-action:none;
+  }
+  .video-wrap video{
+    position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000;
+  }
+  #drawCanvas, #previewCanvas{
+    position:absolute; touch-action:none; z-index:2;
+  }
+  #previewCanvas{ background:#000; }
+  .video-wrap.playing-preview video{ visibility:hidden; }
+  .video-wrap:not(.editing) #drawCanvas{ display:none; }
+  .video-wrap:not(.previewing) #previewCanvas{ display:none; }
+
+  .time-readout{font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); min-width:64px; text-align:right;}
+  .seek-row{margin-top:8px;}
+  .fine-row button{flex:1;}
+
+  /* --- フリーズ一覧カード --- */
+  .freeze-card{
+    display:flex; gap:10px; align-items:center; padding:10px;
+    background:var(--panel2); border-radius:12px; margin-bottom:8px; border:1px solid var(--line);
+  }
+  .freeze-card .thumb{
+    width:46px; height:82px; border-radius:8px; background:#000 center/cover no-repeat; flex-shrink:0;
+  }
+  .freeze-card .meta{flex:1; min-width:0;}
+  .freeze-card .meta .t{font-size:13px; color:var(--accent); font-weight:700;}
+  .freeze-card .meta .n{font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .freeze-card .meta .s{font-size:11px; color:var(--muted);}
+  .freeze-card .actions{display:flex; gap:6px;}
+
+  details.card summary{cursor:pointer; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between;}
+  details.card summary::-webkit-details-marker{display:none;}
+  details.card summary::after{content:"▸"; color:var(--muted); transition:transform .15s;}
+  details.card[open] summary::after{transform:rotate(90deg);}
+  details.card .body{margin-top:12px;}
+
+  .status-line{font-size:12px; color:var(--ok); min-height:16px;}
+  .brush-slider-value{font-variant-numeric:tabular-nums; color:var(--accent); font-weight:700;}
+
+  textarea#jsonPreviewArea{
+    width:100%; min-height:120px; background:var(--panel3); color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+</style>
+</head>
+<body>
+
+<header class="app-header">
+  <h1>人物スポットライト エディタ</h1>
+  <div class="sub">動画を止めて指でなぞり、名前を入れて project.json を書き出します</div>
+</header>
+
+<main>
+
+  <!-- 1. 素材読み込み -->
+  <section id="loaderSection" class="card">
+    <h2>1. 動画を選ぶ</h2>
+    <div class="stack">
+      <button class="primary" id="pickVideoBtn">🎬 動画を選ぶ</button>
+      <input type="file" id="videoFileInput" accept="video/*" hidden>
+      <div class="muted" id="videoFileName">まだ動画が選ばれていません</div>
+      <div class="muted">※ 動画ファイル自体は保存されません。編集を再開するには、同じ動画ファイルをもう一度選んでください。</div>
+      <div class="status-line" id="restoreStatus"></div>
+    </div>
+  </section>
+
+  <!-- 2. プレイヤーとシーク -->
+  <section id="playerSection" hidden>
+    <div class="card">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline muted></video>
+        <canvas id="drawCanvas"></canvas>
+        <canvas id="previewCanvas"></canvas>
+      </div>
+
+      <div class="seek-row">
+        <input type="range" id="seekBar" min="0" max="1" step="0.01" value="0">
+        <div class="row">
+          <div class="grow"></div>
+          <div class="time-readout" id="timeReadout">0.00s</div>
+        </div>
+      </div>
+
+      <div class="row fine-row wrap" style="margin-top:6px;">
+        <button class="small" data-seek="-1">−1秒</button>
+        <button class="small" data-seek="-0.1">−0.1秒</button>
+        <button class="small" data-seek="0.1">+0.1秒</button>
+        <button class="small" data-seek="1">+1秒</button>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <button class="ghost" id="playPauseBtn">▶ 再生</button>
+        <button class="primary grow" id="addFreezeBtn">＋ フリーズ追加</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. フリーズ編集（描画モード） -->
+  <section id="editorSection" hidden>
+    <div class="card">
+      <h2 id="editorTitle">フリーズを編集</h2>
+
+      <div class="field">
+        <label>ブラシ太さ <span class="brush-slider-value" id="brushWidthValue">0.12</span></label>
+        <input type="range" id="brushWidthSlider" min="0.05" max="0.25" step="0.01" value="0.12">
+      </div>
+
+      <div class="row wrap" style="margin-bottom:10px;">
+        <button class="small" id="undoStrokeBtn">↩ 元に戻す</button>
+        <button class="small danger" id="clearStrokesBtn">🗑 全消去</button>
+        <button class="small grow" id="previewBtn">▶ プレビュー</button>
+      </div>
+
+      <div class="field">
+        <label>名前テロップ</label>
+        <input type="text" id="nameInput" placeholder="例：山田 太郎">
+      </div>
+
+      <div class="row wrap">
+        <div class="field grow">
+          <label>効果音</label>
+          <select id="sfxSelect">
+            <option value="shakin">shakin（上昇音）</option>
+            <option value="don">don（低音）</option>
+            <option value="">なし</option>
+          </select>
+        </div>
+        <div class="field grow">
+          <label>背景処理</label>
+          <select id="backgroundSelect">
+            <option value="mono">mono（モノクロ）</option>
+            <option value="dark">dark（減光）</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:6px;">
+        <button class="ghost grow" id="cancelFreezeBtn">キャンセル</button>
+        <button class="primary grow" id="commitFreezeBtn">完了</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. フリーズ一覧 -->
+  <section id="listSection">
+    <h2>フリーズ一覧</h2>
+    <div id="freezeList"></div>
+    <div class="muted" id="freezeListEmpty">まだフリーズがありません。動画の好きな位置で「＋ フリーズ追加」を押してください。</div>
+  </section>
+
+  <!-- 6. 全体設定 -->
+  <details class="card" id="settingsSection">
+    <summary>全体設定</summary>
+    <div class="body stack">
+      <div class="field">
+        <label>freeze_sec（フリーズ全体の長さ・秒）</label>
+        <input type="number" id="freezeSecInput" min="0.5" max="10" step="0.1" value="2.5">
+      </div>
+      <div class="field">
+        <label>brush_anim_sec（ブラシが伸びる時間・秒）</label>
+        <input type="number" id="brushAnimSecInput" min="0.2" max="3" step="0.1" value="0.8">
+      </div>
+      <div class="field">
+        <label>audio_during_freeze（フリーズ中の音声）</label>
+        <select id="audioDuringFreezeSelect">
+          <option value="mute">mute（無音）</option>
+          <option value="keep">keep（直前0.5秒をループ）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>出力解像度</label>
+        <select id="outputModeSelect">
+          <option value="original">元のまま</option>
+          <option value="1080x1920">1080 x 1920</option>
+          <option value="720x1280">720 x 1280</option>
+        </select>
+      </div>
+    </div>
+  </details>
+
+  <!-- 7. 書き出し・読み込み -->
+  <section class="card" id="ioSection">
+    <h2>書き出し・読み込み</h2>
+    <div class="stack">
+      <button class="primary" id="exportBtn">📤 JSONを書き出す</button>
+      <button class="ghost" id="copyJsonBtn">📋 JSONをコピー</button>
+      <button class="ghost" id="loadJsonBtn">📂 JSONを読み込む</button>
+      <input type="file" id="jsonFileInput" accept="application/json,.json" hidden>
+      <div class="status-line" id="ioStatus"></div>
+      <details>
+        <summary class="muted" style="cursor:pointer;">JSONプレビュー</summary>
+        <textarea id="jsonPreviewArea" readonly></textarea>
+      </details>
+    </div>
+  </section>
+
+  <footer class="muted" style="padding:0 4px;">
+    書き出した project.json と動画ファイルを同じフォルダに置いて、
+    <code>colab.ipynb</code> の「本番用」セクションに渡すと <code>render.py</code> でMP4を作れます。
+  </footer>
+
+</main>
+
+<!-- ============================================================
+     コアロジック（DOM非依存・純粋関数のみ）
+     Node.js からこのブロックだけを取り出してユニットテストできる。
+     ============================================================ -->
+<script id="core-logic">
+"use strict";
+
+var DEFAULT_FONT_PATH = "assets/fonts/NotoSansJP-Bold.ttf";
+var DEFAULT_STYLE = {
+  freeze_sec: 2.5,
+  brush_anim_sec: 0.8,
+  brush_width: 0.12,
+  background: "mono",
+  font: DEFAULT_FONT_PATH,
+  audio_during_freeze: "mute"
+};
+var OUTPUT_PRESETS = {
+  "original": null,
+  "1080x1920": { width: 1080, height: 1920 },
+  "720x1280": { width: 720, height: 1280 }
+};
+
+function round(n, decimals) {
+  var p = Math.pow(10, decimals);
+  return Math.round((Number(n) + Number.EPSILON) * p) / p;
+}
+
+function clamp01(v) {
+  return Math.min(1, Math.max(0, v));
+}
+
+function numOr(v, fallback) {
+  var n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * object-fit:contain のとき、box(boxW x boxH) の中で実際に動画が
+ * 表示される矩形（レターボックスを除いた領域）を求める。
+ */
+function computeContentRect(boxW, boxH, videoW, videoH) {
+  if (!videoW || !videoH || !boxW || !boxH) {
+    return { left: 0, top: 0, width: boxW || 0, height: boxH || 0 };
+  }
+  var boxRatio = boxW / boxH;
+  var videoRatio = videoW / videoH;
+  var width, height;
+  if (videoRatio > boxRatio) {
+    width = boxW;
+    height = boxW / videoRatio;
+  } else {
+    width = boxH * videoRatio;
+    height = boxH;
+  }
+  return { left: (boxW - width) / 2, top: (boxH - height) / 2, width: width, height: height };
+}
+
+/** クライアント座標を rect（内容矩形。CSSピクセル単位）基準の0〜1比率に変換する */
+function ratioFromRect(clientX, clientY, rect) {
+  if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
+  return {
+    x: clamp01((clientX - rect.left) / rect.width),
+    y: clamp01((clientY - rect.top) / rect.height)
+  };
+}
+
+/** 直前の点から表示幅基準で十分離れているときだけ true（点の間引き） */
+function shouldAddPoint(lastPt, newPt, dispW, dispH, minRatio) {
+  minRatio = (minRatio == null) ? 0.005 : minRatio;
+  if (!lastPt) return true;
+  var dx = (newPt.x - lastPt.x) * dispW;
+  var dy = (newPt.y - lastPt.y) * dispH;
+  return Math.hypot(dx, dy) >= minRatio * dispW;
+}
+
+function sortFreezesByTime(freezes) {
+  return (freezes || []).slice().sort(function (a, b) { return a.time - b.time; });
+}
+
+function strokeToJSON(st) {
+  return {
+    width: round(numOr(st.width, DEFAULT_STYLE.brush_width), 4),
+    points: (st.points || []).map(function (p) { return [round(p[0], 4), round(p[1], 4)]; })
+  };
+}
+
+function freezeToJSON(fz) {
+  var out = {
+    time: round(numOr(fz.time, 0), 2),
+    name: fz.name || "",
+    background: fz.background === "dark" ? "dark" : "mono",
+    strokes: (fz.strokes || []).map(strokeToJSON)
+  };
+  if (fz.sfx) out.sfx = fz.sfx;
+  return out;
+}
+
+/** エディタの内部状態から render.py 契約どおりのプロジェクトJSONを作る */
+function buildProjectJSON(state) {
+  var preset = OUTPUT_PRESETS[state.outputMode] || null;
+  var project = {
+    version: 1,
+    video: state.videoFileName || "",
+    style: {
+      freeze_sec: round(numOr(state.freezeSec, DEFAULT_STYLE.freeze_sec), 2),
+      brush_anim_sec: round(numOr(state.brushAnimSec, DEFAULT_STYLE.brush_anim_sec), 2),
+      brush_width: DEFAULT_STYLE.brush_width,
+      background: DEFAULT_STYLE.background,
+      font: DEFAULT_FONT_PATH,
+      audio_during_freeze: state.audioDuringFreeze === "keep" ? "keep" : "mute"
+    },
+    freezes: sortFreezesByTime(state.freezes).map(freezeToJSON)
+  };
+  if (preset) {
+    project.output = { width: preset.width, height: preset.height, fps: 30 };
+  }
+  return project;
+}
+
+function matchOutputPreset(output) {
+  if (!output || !output.width || !output.height) return "original";
+  var keys = Object.keys(OUTPUT_PRESETS);
+  for (var i = 0; i < keys.length; i++) {
+    var preset = OUTPUT_PRESETS[keys[i]];
+    if (preset && preset.width === output.width && preset.height === output.height) return keys[i];
+  }
+  return "original";
+}
+
+/**
+ * プロジェクトJSON（外部ファイル）を読み込んでエディタの内部状態に変換する。
+ * render.py の load_project と同じく、未知のキーは無視し style を既定値にマージする。
+ */
+function parseProjectJSON(json) {
+  json = json || {};
+  var style = Object.assign({}, DEFAULT_STYLE, json.style || {});
+  var freezes = (json.freezes || []).map(function (fz, i) {
+    return {
+      id: "loaded-" + i + "-" + Date.now(),
+      time: numOr(fz.time, 0),
+      name: fz.name || "",
+      sfx: fz.sfx || "",
+      background: fz.background === "dark" ? "dark" : "mono",
+      strokes: (fz.strokes || []).map(function (st) {
+        return {
+          width: numOr(st.width, style.brush_width),
+          points: (st.points || []).map(function (p) { return [Number(p[0]) || 0, Number(p[1]) || 0]; })
+        };
+      })
+    };
+  });
+  return {
+    videoFileName: json.video || "",
+    outputMode: matchOutputPreset(json.output),
+    freezeSec: numOr(style.freeze_sec, DEFAULT_STYLE.freeze_sec),
+    brushAnimSec: numOr(style.brush_anim_sec, DEFAULT_STYLE.brush_anim_sec),
+    audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
+    freezes: sortFreezesByTime(freezes)
+  };
+}
+
+/* ---- render.py と同じ考え方のブラシ・ジオメトリ計算（プレビュー用） ---- */
+
+function buildStrokeGeometry(strokes, W, H, defaultWidthRatio) {
+  var geo = [];
+  (strokes || []).forEach(function (st) {
+    var ptsRatio = st.points || [];
+    var pts = ptsRatio.filter(function (p) { return p && p.length >= 2; })
+      .map(function (p) { return [p[0] * W, p[1] * H]; });
+    if (pts.length === 0) return;
+    var widthRatio = numOr(st.width, defaultWidthRatio);
+    var thick = Math.max(1, Math.round(widthRatio * W));
+    var seglens = [];
+    for (var i = 0; i < pts.length - 1; i++) {
+      seglens.push(Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]));
+    }
+    var length = seglens.reduce(function (a, b) { return a + b; }, 0);
+    geo.push({ pts: pts, seglens: seglens, thick: thick, length: length, cost: Math.max(length, thick) });
+  });
+  var total = geo.reduce(function (a, g) { return a + g.cost; }, 0);
+  return { geo: geo, total: total };
+}
+
+/**
+ * 累積長 startLen〜endLen の範囲を、描くべきポリライン（点列＋太さ）の配列として返す。
+ * 1点だけ（ゼロ長）のストロークは同じ点を2つ並べた線分として返す（丸として描画される）。
+ */
+function trimGeometryToLength(geo, startLen, endLen) {
+  var out = [];
+  var offset = 0;
+  geo.forEach(function (g) {
+    var s = Math.max(startLen - offset, 0);
+    var e = Math.min(endLen - offset, g.cost);
+    offset += g.cost;
+    if (e <= 0 || e <= s) return;
+
+    if (g.length <= 0) {
+      out.push({ pts: [g.pts[0], g.pts[0]], thick: g.thick });
+      return;
+    }
+
+    var pts = [];
+    var acc = 0;
+    for (var i = 0; i < g.pts.length - 1; i++) {
+      var seg = g.seglens[i];
+      if (seg <= 0) continue;
+      var a0 = acc, a1 = acc + seg;
+      acc = a1;
+      var lo = Math.max(s, a0), hi = Math.min(e, a1);
+      if (hi <= lo) continue;
+      var t0 = (lo - a0) / seg, t1 = (hi - a0) / seg;
+      var p0 = g.pts[i], p1 = g.pts[i + 1];
+      var q0 = [p0[0] + (p1[0] - p0[0]) * t0, p0[1] + (p1[1] - p0[1]) * t0];
+      var q1 = [p0[0] + (p1[0] - p0[0]) * t1, p0[1] + (p1[1] - p0[1]) * t1];
+      if (pts.length === 0) pts.push(q0);
+      pts.push(q1);
+    }
+    if (pts.length >= 2) out.push({ pts: pts, thick: g.thick });
+  });
+  return out;
+}
+
+function clampByte(v) {
+  return Math.min(255, Math.max(0, Math.round(v)));
+}
+
+/** render.py の make_background と同じ計算（1画素分） */
+function computeBgPixel(r, g, b, mode) {
+  if (mode === "dark") {
+    return [clampByte(r * 0.3), clampByte(g * 0.3), clampByte(b * 0.3)];
+  }
+  var gray = clampByte(0.299 * r + 0.587 * g + 0.114 * b);
+  return [gray, gray, gray];
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    DEFAULT_STYLE: DEFAULT_STYLE,
+    DEFAULT_FONT_PATH: DEFAULT_FONT_PATH,
+    OUTPUT_PRESETS: OUTPUT_PRESETS,
+    round: round,
+    clamp01: clamp01,
+    numOr: numOr,
+    computeContentRect: computeContentRect,
+    ratioFromRect: ratioFromRect,
+    shouldAddPoint: shouldAddPoint,
+    sortFreezesByTime: sortFreezesByTime,
+    buildProjectJSON: buildProjectJSON,
+    parseProjectJSON: parseProjectJSON,
+    matchOutputPreset: matchOutputPreset,
+    buildStrokeGeometry: buildStrokeGeometry,
+    trimGeometryToLength: trimGeometryToLength,
+    computeBgPixel: computeBgPixel
+  };
+}
+</script>
+
+<!-- ============================================================
+     アプリ本体（DOM操作・イベント配線）
+     上のコアロジックの関数をそのまま使う。
+     ============================================================ -->
+<script>
+"use strict";
+
+/* ---------------- 状態 ---------------- */
+
+var appState = {
+  videoFileName: "",
+  outputMode: "original",
+  freezeSec: DEFAULT_STYLE.freeze_sec,
+  brushAnimSec: DEFAULT_STYLE.brush_anim_sec,
+  audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
+  freezes: []
+};
+
+var draft = null;          // 現在編集中のフリーズ（未保存）
+var draftIsNew = false;    // draft が新規追加か、既存の編集か
+var currentStroke = null;  // 描画中のストローク { widthRatio, points:[[x,y],...] }
+var overlaySize = { width: 0, height: 0 };
+var previewRAF = null;
+
+var els = {};
+
+function $(id) { return document.getElementById(id); }
+
+document.addEventListener("DOMContentLoaded", init);
+
+function init() {
+  [
+    "pickVideoBtn", "videoFileInput", "videoFileName", "restoreStatus",
+    "playerSection", "video", "videoWrap", "drawCanvas", "previewCanvas",
+    "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
+    "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
+    "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
+    "nameInput", "sfxSelect", "backgroundSelect",
+    "cancelFreezeBtn", "commitFreezeBtn",
+    "freezeList", "freezeListEmpty",
+    "freezeSecInput", "brushAnimSecInput", "audioDuringFreezeSelect", "outputModeSelect",
+    "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea"
+  ].forEach(function (id) { els[id] = $(id); });
+
+  els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
+  els.videoFileInput.addEventListener("change", handleVideoFileChange);
+
+  els.video.addEventListener("loadedmetadata", onVideoLoadedMetadata);
+  els.video.addEventListener("timeupdate", onVideoTimeUpdate);
+  els.video.addEventListener("play", function () { els.playPauseBtn.textContent = "⏸ 停止"; });
+  els.video.addEventListener("pause", function () { els.playPauseBtn.textContent = "▶ 再生"; });
+
+  els.seekBar.addEventListener("input", function () {
+    els.video.currentTime = Number(els.seekBar.value);
+  });
+  document.querySelectorAll("[data-seek]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var delta = Number(btn.getAttribute("data-seek"));
+      seekBy(delta);
+    });
+  });
+  els.playPauseBtn.addEventListener("click", function () {
+    if (els.video.paused) els.video.play(); else els.video.pause();
+  });
+
+  els.addFreezeBtn.addEventListener("click", startNewFreeze);
+
+  els.brushWidthSlider.addEventListener("input", function () {
+    els.brushWidthValue.textContent = Number(els.brushWidthSlider.value).toFixed(2);
+  });
+  els.undoStrokeBtn.addEventListener("click", undoLastStroke);
+  els.clearStrokesBtn.addEventListener("click", clearAllStrokes);
+  els.previewBtn.addEventListener("click", togglePreviewPlayback);
+  els.cancelFreezeBtn.addEventListener("click", cancelFreezeEdit);
+  els.commitFreezeBtn.addEventListener("click", commitFreezeEdit);
+
+  els.freezeSecInput.addEventListener("change", function () {
+    appState.freezeSec = numOr(els.freezeSecInput.value, DEFAULT_STYLE.freeze_sec);
+    saveToLocalStorage();
+  });
+  els.brushAnimSecInput.addEventListener("change", function () {
+    appState.brushAnimSec = numOr(els.brushAnimSecInput.value, DEFAULT_STYLE.brush_anim_sec);
+    saveToLocalStorage();
+  });
+  els.audioDuringFreezeSelect.addEventListener("change", function () {
+    appState.audioDuringFreeze = els.audioDuringFreezeSelect.value;
+    saveToLocalStorage();
+  });
+  els.outputModeSelect.addEventListener("change", function () {
+    appState.outputMode = els.outputModeSelect.value;
+    saveToLocalStorage();
+  });
+
+  els.exportBtn.addEventListener("click", exportProjectJSON);
+  els.copyJsonBtn.addEventListener("click", copyProjectJSON);
+  els.loadJsonBtn.addEventListener("click", function () { els.jsonFileInput.click(); });
+  els.jsonFileInput.addEventListener("change", handleJsonFileChange);
+
+  wireDrawCanvasTouch();
+  window.addEventListener("resize", function () {
+    if (draft) layoutOverlayCanvases();
+  });
+
+  renderFreezeList();
+  updateJsonPreview();
+}
+
+/* ---------------- 動画読み込み ---------------- */
+
+function handleVideoFileChange(e) {
+  var file = e.target.files && e.target.files[0];
+  if (!file) return;
+  appState.videoFileName = file.name;
+  els.videoFileName.textContent = "選択中: " + file.name;
+
+  var url = URL.createObjectURL(file);
+  els.video.src = url;
+  els.playerSection.hidden = false;
+
+  var restored = loadFromLocalStorage(file.name);
+  if (restored) {
+    els.restoreStatus.textContent = "前回の編集内容を復元しました（フリーズ " + appState.freezes.length + " 件）";
+  } else {
+    appState.freezes = [];
+    els.restoreStatus.textContent = "";
+  }
+  applySettingsToInputs();
+  renderFreezeList();
+  updateJsonPreview();
+}
+
+function onVideoLoadedMetadata() {
+  els.seekBar.max = String(els.video.duration || 0);
+  els.seekBar.step = "0.01";
+  updateTimeReadout();
+}
+
+function onVideoTimeUpdate() {
+  els.seekBar.value = String(els.video.currentTime);
+  updateTimeReadout();
+}
+
+function updateTimeReadout() {
+  els.timeReadout.textContent = (els.video.currentTime || 0).toFixed(2) + "s";
+}
+
+function seekBy(delta) {
+  var t = els.video.currentTime + delta;
+  t = Math.max(0, Math.min(els.video.duration || t, t));
+  els.video.currentTime = t;
+}
+
+/** currentTime を設定し、iOS でも確実にそのフレームが描画済みになってから解決する */
+function seekAndWait(t) {
+  return new Promise(function (resolve) {
+    var done = false;
+    function onSeeked() {
+      if (done) return;
+      done = true;
+      els.video.removeEventListener("seeked", onSeeked);
+      resolve();
+    }
+    els.video.addEventListener("seeked", onSeeked);
+    els.video.currentTime = t;
+    // 一部環境で seeked が発火しない場合の保険
+    setTimeout(onSeeked, 500);
+  });
+}
+
+/* ---------------- フリーズ編集（描画モード） ---------------- */
+
+function startNewFreeze() {
+  els.video.pause();
+  draftIsNew = true;
+  draft = {
+    id: "fz-" + Date.now(),
+    time: els.video.currentTime,
+    name: "",
+    sfx: "shakin",
+    background: "mono",
+    strokes: []
+  };
+  enterDrawMode();
+}
+
+function editFreeze(id) {
+  var fz = appState.freezes.filter(function (f) { return f.id === id; })[0];
+  if (!fz) return;
+  els.video.pause();
+  draftIsNew = false;
+  draft = JSON.parse(JSON.stringify(fz));
+  seekAndWait(draft.time).then(enterDrawMode);
+}
+
+function enterDrawMode() {
+  els.editorTitle.textContent = draftIsNew ? "フリーズを追加" : "フリーズを編集（" + draft.time.toFixed(2) + "s）";
+  els.nameInput.value = draft.name || "";
+  els.sfxSelect.value = draft.sfx || "";
+  els.backgroundSelect.value = draft.background || "mono";
+  els.brushWidthSlider.value = "0.12";
+  els.brushWidthValue.textContent = "0.12";
+
+  els.editorSection.hidden = false;
+  els.videoWrap.classList.add("editing");
+  els.videoWrap.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  layoutOverlayCanvases();
+  redrawStrokesOverlay();
+}
+
+function exitDrawMode() {
+  els.editorSection.hidden = true;
+  els.videoWrap.classList.remove("editing");
+  els.videoWrap.classList.remove("previewing");
+  stopPreviewPlayback();
+  draft = null;
+  currentStroke = null;
+}
+
+function cancelFreezeEdit() {
+  exitDrawMode();
+}
+
+function commitFreezeEdit() {
+  draft.name = els.nameInput.value.trim();
+  draft.sfx = els.sfxSelect.value;
+  draft.background = els.backgroundSelect.value;
+
+  captureThumbnail(draft).then(function () {
+    if (draftIsNew) {
+      appState.freezes.push(draft);
+    } else {
+      var idx = appState.freezes.findIndex(function (f) { return f.id === draft.id; });
+      if (idx >= 0) appState.freezes[idx] = draft;
+    }
+    exitDrawMode();
+    renderFreezeList();
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+}
+
+/* ---------------- キャンバスの配置とタッチ描画 ---------------- */
+
+function layoutOverlayCanvases() {
+  var rect = els.video.getBoundingClientRect();
+  var content = computeContentRect(rect.width, rect.height, els.video.videoWidth || rect.width, els.video.videoHeight || rect.height);
+  var dpr = window.devicePixelRatio || 1;
+
+  [els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
+    canvas.style.left = content.left + "px";
+    canvas.style.top = content.top + "px";
+    canvas.style.width = content.width + "px";
+    canvas.style.height = content.height + "px";
+    canvas.width = Math.max(1, Math.round(content.width * dpr));
+    canvas.height = Math.max(1, Math.round(content.height * dpr));
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  });
+
+  overlaySize = { width: content.width, height: content.height };
+}
+
+function wireDrawCanvasTouch() {
+  var canvas = els.drawCanvas;
+  canvas.addEventListener("touchstart", function (e) {
+    if (!draft) return;
+    e.preventDefault();
+    var t = e.touches[0];
+    beginStroke(t.clientX, t.clientY);
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", function (e) {
+    if (!draft || !currentStroke) return;
+    e.preventDefault();
+    var t = e.touches[0];
+    extendStroke(t.clientX, t.clientY);
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", function (e) {
+    if (!draft) return;
+    e.preventDefault();
+    endStroke();
+  }, { passive: false });
+
+  // マウスでも確認できるように（デスクトップ確認用）
+  var mouseDown = false;
+  canvas.addEventListener("mousedown", function (e) {
+    if (!draft) return;
+    mouseDown = true;
+    beginStroke(e.clientX, e.clientY);
+  });
+  canvas.addEventListener("mousemove", function (e) {
+    if (!draft || !mouseDown || !currentStroke) return;
+    extendStroke(e.clientX, e.clientY);
+  });
+  window.addEventListener("mouseup", function () {
+    if (mouseDown) { mouseDown = false; if (draft) endStroke(); }
+  });
+}
+
+function beginStroke(clientX, clientY) {
+  var widthRatio = Number(els.brushWidthSlider.value);
+  currentStroke = { width: widthRatio, points: [] };
+  extendStroke(clientX, clientY, true);
+}
+
+function extendStroke(clientX, clientY, force) {
+  var rect = els.drawCanvas.getBoundingClientRect();
+  var pt = ratioFromRect(clientX, clientY, rect);
+  var pts = currentStroke.points;
+  var last = pts.length ? { x: pts[pts.length - 1][0], y: pts[pts.length - 1][1] } : null;
+  if (!force && !shouldAddPoint(last, pt, overlaySize.width, overlaySize.height)) return;
+
+  var ctx = els.drawCanvas.getContext("2d");
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = currentStroke.width * overlaySize.width;
+
+  if (last) {
+    ctx.beginPath();
+    ctx.moveTo(last.x * overlaySize.width, last.y * overlaySize.height);
+    ctx.lineTo(pt.x * overlaySize.width, pt.y * overlaySize.height);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(pt.x * overlaySize.width, pt.y * overlaySize.height, Math.max(1, currentStroke.width * overlaySize.width / 2), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  pts.push([pt.x, pt.y]);
+}
+
+function endStroke() {
+  if (currentStroke && currentStroke.points.length > 0) {
+    draft.strokes.push(currentStroke);
+  }
+  currentStroke = null;
+}
+
+function undoLastStroke() {
+  if (!draft || draft.strokes.length === 0) return;
+  draft.strokes.pop();
+  redrawStrokesOverlay();
+}
+
+function clearAllStrokes() {
+  if (!draft) return;
+  draft.strokes = [];
+  redrawStrokesOverlay();
+}
+
+function redrawStrokesOverlay() {
+  var ctx = els.drawCanvas.getContext("2d");
+  ctx.clearRect(0, 0, overlaySize.width, overlaySize.height);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  (draft.strokes || []).forEach(function (st) {
+    ctx.lineWidth = st.width * overlaySize.width;
+    var pts = st.points;
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0][0] * overlaySize.width, pts[0][1] * overlaySize.height, Math.max(1, st.width * overlaySize.width / 2), 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0] * overlaySize.width, pts[0][1] * overlaySize.height);
+    for (var i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0] * overlaySize.width, pts[i][1] * overlaySize.height);
+    }
+    ctx.stroke();
+  });
+}
+
+/* ---------------- サムネイル生成 ---------------- */
+
+function captureThumbnail(fz) {
+  return seekAndWait(fz.time).then(function () {
+    var vw = els.video.videoWidth, vh = els.video.videoHeight;
+    if (!vw || !vh) { fz.thumb = ""; return; }
+    var tw = 92, th = Math.round(tw * vh / vw);
+    var c = document.createElement("canvas");
+    c.width = tw; c.height = th;
+    var ctx = c.getContext("2d");
+    ctx.drawImage(els.video, 0, 0, tw, th);
+    try {
+      fz.thumb = c.toDataURL("image/jpeg", 0.6);
+    } catch (err) {
+      fz.thumb = "";
+    }
+  });
+}
+
+/* ---------------- フリーズ一覧 ---------------- */
+
+function renderFreezeList() {
+  appState.freezes = sortFreezesByTime(appState.freezes);
+  els.freezeList.innerHTML = "";
+  els.freezeListEmpty.hidden = appState.freezes.length > 0;
+
+  appState.freezes.forEach(function (fz) {
+    var card = document.createElement("div");
+    card.className = "freeze-card";
+
+    var thumb = document.createElement("div");
+    thumb.className = "thumb";
+    if (fz.thumb) thumb.style.backgroundImage = "url(" + fz.thumb + ")";
+    thumb.addEventListener("click", function () { els.video.currentTime = fz.time; });
+
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML =
+      '<div class="t">' + fz.time.toFixed(2) + 's</div>' +
+      '<div class="n">' + escapeHtml(fz.name || "(名前未設定)") + '</div>' +
+      '<div class="s">ストローク ' + (fz.strokes ? fz.strokes.length : 0) + ' 本 ・ ' +
+      (fz.sfx ? fz.sfx : "SFXなし") + ' ・ ' + fz.background + '</div>';
+    meta.addEventListener("click", function () { els.video.currentTime = fz.time; });
+
+    var actions = document.createElement("div");
+    actions.className = "actions stack";
+    var editBtn = document.createElement("button");
+    editBtn.className = "small"; editBtn.textContent = "編集";
+    editBtn.addEventListener("click", function (e) { e.stopPropagation(); editFreeze(fz.id); });
+    var delBtn = document.createElement("button");
+    delBtn.className = "small danger"; delBtn.textContent = "削除";
+    delBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (confirm('「' + (fz.name || fz.time.toFixed(2) + 's') + '」を削除しますか？')) {
+        appState.freezes = appState.freezes.filter(function (f) { return f.id !== fz.id; });
+        renderFreezeList();
+        saveToLocalStorage();
+        updateJsonPreview();
+      }
+    });
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+
+    card.appendChild(thumb);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    els.freezeList.appendChild(card);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+/* ---------------- 簡易プレビュー再生 ---------------- */
+
+function togglePreviewPlayback() {
+  if (previewRAF) { stopPreviewPlayback(); return; }
+  startPreviewPlayback();
+}
+
+function stopPreviewPlayback() {
+  if (previewRAF) cancelAnimationFrame(previewRAF);
+  previewRAF = null;
+  els.videoWrap.classList.remove("previewing");
+  els.previewBtn.textContent = "▶ プレビュー";
+}
+
+function startPreviewPlayback() {
+  var vw = els.video.videoWidth, vh = els.video.videoHeight;
+  if (!vw || !vh) return;
+
+  var W = overlaySize.width, H = overlaySize.height;
+  var frameCanvas = document.createElement("canvas");
+  frameCanvas.width = W; frameCanvas.height = H;
+  var fctx = frameCanvas.getContext("2d");
+  fctx.drawImage(els.video, 0, 0, W, H);
+
+  var bgCanvas = document.createElement("canvas");
+  bgCanvas.width = W; bgCanvas.height = H;
+  buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background);
+
+  var geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
+
+  els.videoWrap.classList.add("previewing");
+  els.previewBtn.textContent = "■ 停止";
+
+  var pctx = els.previewCanvas.getContext("2d");
+  var HOLD = 0.3, BRUSH = appState.brushAnimSec, REST = 1.0;
+  var start = performance.now();
+
+  document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
+
+  function frame(now) {
+    var elapsed = (now - start) / 1000;
+    pctx.clearRect(0, 0, W, H);
+    pctx.drawImage(bgCanvas, 0, 0, W, H);
+
+    if (elapsed >= HOLD) {
+      var progress = geoInfo.total > 0 ? Math.min(1, (elapsed - HOLD) / BRUSH) : 1;
+      drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H);
+      if (elapsed >= HOLD + BRUSH) {
+        var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
+        drawTelop(pctx, draft.name, W, H, fade);
+      }
+    }
+
+    if (elapsed < HOLD + BRUSH + REST) {
+      previewRAF = requestAnimationFrame(frame);
+    } else {
+      previewRAF = null;
+      els.previewBtn.textContent = "▶ プレビュー";
+    }
+  }
+  previewRAF = requestAnimationFrame(frame);
+}
+
+function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
+  var w = srcCanvas.width, h = srcCanvas.height;
+  var sctx = srcCanvas.getContext("2d");
+  var dctx = dstCanvas.getContext("2d");
+  var img = sctx.getImageData(0, 0, w, h);
+  var data = img.data;
+  for (var i = 0; i < data.length; i += 4) {
+    var px = computeBgPixel(data[i], data[i + 1], data[i + 2], mode);
+    data[i] = px[0]; data[i + 1] = px[1]; data[i + 2] = px[2];
+  }
+  dctx.putImageData(img, 0, 0);
+}
+
+function strokePolylines(ctx, polylines) {
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  polylines.forEach(function (poly) {
+    ctx.lineWidth = poly.thick;
+    ctx.beginPath();
+    ctx.moveTo(poly.pts[0][0], poly.pts[0][1]);
+    for (var i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0], poly.pts[i][1]);
+    ctx.stroke();
+  });
+}
+
+function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H) {
+  if (geoInfo.total <= 0) return;
+  var head = geoInfo.total * progress;
+
+  var maskCanvas = document.createElement("canvas");
+  maskCanvas.width = W; maskCanvas.height = H;
+  var mctx = maskCanvas.getContext("2d");
+  mctx.filter = "blur(2px)";
+  mctx.strokeStyle = "#fff";
+  strokePolylines(mctx, trimGeometryToLength(geoInfo.geo, 0, head));
+
+  var colorCanvas = document.createElement("canvas");
+  colorCanvas.width = W; colorCanvas.height = H;
+  var cctx = colorCanvas.getContext("2d");
+  cctx.drawImage(frameCanvas, 0, 0);
+  cctx.globalCompositeOperation = "destination-in";
+  cctx.drawImage(maskCanvas, 0, 0);
+
+  pctx.drawImage(colorCanvas, 0, 0);
+
+  if (progress < 1) {
+    var maxThick = Math.max.apply(null, geoInfo.geo.map(function (g) { return g.thick; }));
+    var tail = Math.max(2 * maxThick, geoInfo.total * 0.12);
+    pctx.save();
+    pctx.globalAlpha = 0.85;
+    pctx.strokeStyle = "#fff";
+    strokePolylines(pctx, trimGeometryToLength(geoInfo.geo, Math.max(head - tail, 0), head));
+    pctx.restore();
+  }
+}
+
+function drawTelop(ctx, name, W, H, fade) {
+  if (!name || fade <= 0) return;
+  var size = Math.max(8, Math.round(H * 0.06));
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, fade);
+  ctx.font = "700 " + size + 'px "SpotlightJP", -apple-system, sans-serif';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, Math.round(size / 12)) * 2;
+  ctx.strokeStyle = "#000";
+  ctx.fillStyle = "#fff";
+  var x = W / 2, y = H * 0.78;
+  ctx.strokeText(name, x, y);
+  ctx.fillText(name, x, y);
+  ctx.restore();
+}
+
+/* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
+
+function applySettingsToInputs() {
+  els.freezeSecInput.value = appState.freezeSec;
+  els.brushAnimSecInput.value = appState.brushAnimSec;
+  els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
+  els.outputModeSelect.value = appState.outputMode;
+}
+
+/* ---------------- localStorage ---------------- */
+
+function storageKey(name) { return "spotlightReel:v1:" + name; }
+
+function saveToLocalStorage() {
+  if (!appState.videoFileName) return;
+  try {
+    var payload = {
+      freezeSec: appState.freezeSec,
+      brushAnimSec: appState.brushAnimSec,
+      audioDuringFreeze: appState.audioDuringFreeze,
+      outputMode: appState.outputMode,
+      freezes: appState.freezes
+    };
+    localStorage.setItem(storageKey(appState.videoFileName), JSON.stringify(payload));
+  } catch (e) { /* 容量超過などは無視 */ }
+  updateJsonPreview();
+}
+
+function loadFromLocalStorage(videoFileName) {
+  try {
+    var raw = localStorage.getItem(storageKey(videoFileName));
+    if (!raw) return false;
+    var data = JSON.parse(raw);
+    appState.freezeSec = numOr(data.freezeSec, DEFAULT_STYLE.freeze_sec);
+    appState.brushAnimSec = numOr(data.brushAnimSec, DEFAULT_STYLE.brush_anim_sec);
+    appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
+    appState.outputMode = data.outputMode || "original";
+    appState.freezes = data.freezes || [];
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ---------------- 書き出し・読み込み ---------------- */
+
+function updateJsonPreview() {
+  var project = buildProjectJSON(appState);
+  els.jsonPreviewArea.value = JSON.stringify(project, null, 2);
+}
+
+function currentProjectJSONText() {
+  return JSON.stringify(buildProjectJSON(appState), null, 2);
+}
+
+function exportProjectJSON() {
+  var text = currentProjectJSONText();
+  var blob = new Blob([text], { type: "application/json" });
+  var file = new File([blob], "project.json", { type: "application/json" });
+
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file], title: "project.json" }).catch(function () {});
+    return;
+  }
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "project.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  els.ioStatus.textContent = "project.json をダウンロードしました";
+}
+
+function copyProjectJSON() {
+  var text = currentProjectJSONText();
+  function ok() { els.ioStatus.textContent = "JSONをコピーしました"; }
+  function fail() {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { document.execCommand("copy"); ok(); } catch (e) { els.ioStatus.textContent = "コピーに失敗しました"; }
+    ta.remove();
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok).catch(fail);
+  } else {
+    fail();
+  }
+}
+
+function handleJsonFileChange(e) {
+  var file = e.target.files && e.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    try {
+      var json = JSON.parse(String(reader.result));
+      var loaded = parseProjectJSON(json);
+      appState.freezeSec = loaded.freezeSec;
+      appState.brushAnimSec = loaded.brushAnimSec;
+      appState.audioDuringFreeze = loaded.audioDuringFreeze;
+      appState.outputMode = loaded.outputMode;
+      appState.freezes = loaded.freezes;
+      applySettingsToInputs();
+      renderFreezeList();
+      updateJsonPreview();
+      saveToLocalStorage();
+      var note = "JSONを読み込みました（フリーズ " + appState.freezes.length + " 件）。";
+      if (loaded.videoFileName && loaded.videoFileName !== appState.videoFileName) {
+        note += " 動画「" + loaded.videoFileName + "」を選び直してください。";
+      }
+      els.ioStatus.textContent = note;
+    } catch (err) {
+      els.ioStatus.textContent = "JSONの読み込みに失敗しました: " + err.message;
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+</script>
+</body>
+</html>
