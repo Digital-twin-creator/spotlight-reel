@@ -25,7 +25,8 @@ spotlight-reel/
 ├── examples/
 │   └── sample.json         # make_dummy.py が生成するサンプル
 ├── tests/
-│   └── editor_logic.test.js # index.html のJSON生成ロジックのユニットテスト（Node実行）
+│   ├── editor_logic.test.js       # index.html のJSON生成ロジックのユニットテスト（依存なし）
+│   └── player_ui.playwright.test.mjs # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 ├── colab.ipynb             # Colab用ノートブック
 └── README.md
 ```
@@ -171,7 +172,12 @@ python render.py examples/sample.json --out examples/out.mp4
 ffprobe examples/out.mp4   # 長さ・音声トラックを確認
 python render.py examples/sample.json --preview examples/preview.png
 
-node tests/editor_logic.test.js   # index.html のJSON生成ロジックのユニットテスト
+node tests/editor_logic.test.js   # index.html のJSON生成ロジックのユニットテスト（依存なし）
+
+# 任意：再生/停止・シークのUI回帰テスト（playwright-coreとChromiumが必要）
+npm install --no-save playwright-core
+python3 -m http.server 8794 &   # index.html をどこかで配信しておく
+node tests/player_ui.playwright.test.mjs
 ```
 
 ## GitHub Pages の有効化

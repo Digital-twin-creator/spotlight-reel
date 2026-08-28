@@ -1070,28 +1070,46 @@ function startPlayerRenderLoop() {
 }
 
 /**
- * iOS Safari 対策：動画に対する最初のユーザー操作の中で必ず
- * play()→pause() を一度実行しておく（無音動画でも、実際に play() を
- * 一度成功させておかないと、その後の描画やシークが不安定になる端末があるため）。
+ * iOS Safari 対策：動画に対する最初のユーザー操作の中で一度だけ
+ * play()→pause() の初期化を試みる。
  *
- * 重要: play() の Promise 解決を待たずに、同じ同期処理の中で即 pause() まで
- * 呼び切ること。video.paused は play()/pause() 呼び出し時点で同期的に
- * 更新される仕様のため、ここで非同期に pause() すると「▶ 再生」ボタン自身の
- * タップ（pointerdown → このハンドラ → click → ボタンのトグル処理、の順で
- * 発火する）が届いた時点で paused が false のままになり、ボタンの
- * 「一時停止のつもりで pause() を呼ぶ」誤動作を招く（＝タップしても
- * 再生されない不具合の原因になる）。
+ * 実機での不具合調査の結果、以前の実装（play() の Promise 解決を待たずに
+ * 同期で即 pause() する版）が、実機iOS Safariで「一度でも pause() すると
+ * 以後 play() が効かなくなる」不具合の原因になっていたと判明した。
+ * WebKit は play() 呼び出し後、実際に再生が始まるまでを非同期に処理しており、
+ * その初期化の最中に pause() で割り込むと、動画のデコード/再生セッションが
+ * 壊れたまま復帰しないことがある（このアプリで起きていた「停止すると
+ * 二度と再生できない」症状と一致する）。
+ *
+ * そのため、ここでは必ず play() の Promise が解決＝実際に再生が始まった
+ * ことを確認してから pause() する。また、最初のタップが「▶ 再生」ボタン
+ * 自身へのものだった場合は、このハンドラでは何もせず、ボタン側の
+ * click ハンドラが呼ぶ本物の play() だけを実行させる
+ * （pointerdown→このハンドラ→click→ボタンのトグル処理、の順で発火するため、
+ * ここで play()/pause() を動かすとボタン自身のトグル判定と競合してしまう）。
+ * 初期化は一度だけしか行わない（videoUnlockedフラグでガード）。
  */
 var videoUnlocked = false;
-function tryUnlockVideo() {
+function tryUnlockVideo(e) {
   if (videoUnlocked || !els.video.currentSrc) return;
+  if (e && e.target && els.playPauseBtn.contains(e.target)) {
+    // 再生ボタン自身の最初のタップは、そのタップ自体を初期化とみなす
+    videoUnlocked = true;
+    return;
+  }
   videoUnlocked = true;
+  var p;
   try {
-    var p = els.video.play();
-    els.video.pause();
-    if (p && typeof p.catch === "function") p.catch(function () { /* 無視 */ });
+    p = els.video.play();
   } catch (err) {
-    // 無視（失敗してもアプリの動作自体は継続する）
+    return;
+  }
+  if (p && typeof p.then === "function") {
+    p.then(function () {
+      els.video.pause();
+    }).catch(function () {
+      // 再生自体に失敗した場合は無理にpauseしない（何もしない）
+    });
   }
 }
 
