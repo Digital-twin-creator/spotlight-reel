@@ -4,11 +4,14 @@
 指でなぞった軌跡を**太いブラシのストロークアニメーション**でカラー化し、
 **名前テロップ**と**効果音**を合成する動画レンダラーです。
 
-編集操作はスマホのブラウザ上のエディタ（`index.html`、GitHub Pagesで公開）で行い、
-その結果を**プロジェクトJSON**として受け取ります。
-このリポジトリの `render.py` が、そのJSONと元動画からMP4を生成します。
+編集操作はスマホのブラウザ上のエディタ（`index.html`、GitHub Pagesで公開）で行います。
+エディタの「🎬 動画を作る」を押すだけで、非公開の処理専用リポジトリ
+[`spotlight-jobs`](#動画を作るgithub-actionsでの自動レンダリング) 上の GitHub Actions が
+`render.py` を実行し、完成した動画を GitHub の Release ページから保存できます
+（GitHub無料枠のみで完結し、追加のサーバー・課金は不要です）。
 
-実行環境は **Google Colab**（Python 3.10以上、ffmpeg あり）を想定しています。
+ネットワークが使えない場合や動作確認用に、書き出した **プロジェクトJSON** を
+**Google Colab**（Python 3.10以上、ffmpeg あり）で処理する手動フローも引き続き使えます。
 
 ## リポジトリ構成
 
@@ -25,13 +28,18 @@ spotlight-reel/
 ├── examples/
 │   └── sample.json         # make_dummy.py が生成するサンプル
 ├── tests/
-│   ├── editor_logic.test.js                    # index.html のJSON生成ロジックのユニットテスト（依存なし）
+│   ├── editor_logic.test.js                    # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
-│   └── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
-├── colab.ipynb             # Colab用ノートブック
+│   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
+│   └── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
+├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
 └── README.md
 ```
+
+処理専用の非公開リポジトリ `spotlight-jobs`（GitHub Actionsワークフローのみを置く）は
+別リポジトリです。詳細は [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)
+を参照してください。
 
 ## スマホ用エディタ（index.html）
 
@@ -50,11 +58,41 @@ spotlight-reel/
 3. 表示された静止フレームの上を指でなぞって軌跡を描き、名前・効果音・背景処理を選んで「完了」。
    「▶ プレビュー」で演出の雰囲気をその場で確認できる。
 4. 必要なだけフリーズを追加したら（一覧のカードから編集・削除・シークが可能）、
-   「📤 JSONを書き出す」で `project.json` を保存する（共有シート対応時はそのままファイル/ドライブへ、
-   非対応ブラウザではダウンロードになる。「📋 JSONをコピー」でクリップボードにも取れる）。
+   「⑦ 動画を作る」の「🎬 動画を作る」を押す（初回のみ下記のGitHub連携設定が必要）。
+   進捗（アップロード％→レンダリング中→完了）が画面に表示され、完了すると
+   GitHubのReleaseページを開くボタンが出るので、そこから完成動画を保存する。
+   うまくいかない場合は「⑧ 書き出し・読み込み」の「📤 JSONを書き出す」で
+   `project.json` を書き出し、Colabへの手動受け渡し（後述）にフォールバックできる
+   （共有シート対応時はそのままファイル/ドライブへ、非対応ブラウザではダウンロードになる。
+   「📋 JSONをコピー」でクリップボードにも取れる）。
 
 編集内容は動画ファイル名をキーに端末の `localStorage` に自動保存されるため、途中でリロードしても
 同じ動画ファイルを選び直せば復元されます（動画そのものは保存されないので、再選択が必要です）。
+
+### 動画を作る（GitHub Actionsでの自動レンダリング）
+
+初回だけ、エディタの「⑦ 動画を作る」内の「GitHub連携の設定」に、以下の3つを入力して保存します。
+
+- **GitHubユーザー名（組織名）**: `Digital-twin-creator`
+- **処理用リポジトリ名**: `spotlight-jobs`（既定値のままでOK）
+- **Personal Access Token**: `spotlight-jobs` だけにアクセスできる
+  Fine-grained PAT（**Contents: Read and write** / **Actions: Read and write**）。
+  発行手順は [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)
+  に記載しています。トークンはこの端末の `localStorage` にのみ保存され、
+  `api.github.com` / `uploads.github.com` 以外には送信されません（画面上はマスク表示、
+  👁ボタンで表示切り替え可能）。
+
+保存後は、動画を選んでフリーズを編集したあと「🎬 動画を作る」を押すだけです。内部では、
+
+1. 動画・`project.json` を `spotlight-jobs` の新しいRelease（タグ `job-YYYYMMDD-HHMMSS`）に
+   アセットとしてアップロードする（大きな動画でも進捗％が表示されます）。
+2. `spotlight-jobs` の GitHub Actions ワークフロー（`render.yml`）を起動する。
+3. ワークフローの完了をポーリングで待つ（ページを閉じずにお待ちください）。
+4. 成功したら、同じReleaseに追加された `output.mp4` を確認し、Releaseページを開くボタンを表示する
+   （ダウンロードはGitHub自身のページから行うため、その端末のブラウザで **GitHubにログインしている必要があります**）。
+5. 失敗した場合は、画面にエラー内容を表示します（GitHub Actionsのログ・ジョブサマリーも参照できます）。
+
+処理済みのRelease（動画・JSON・出力）は `spotlight-jobs` 側で7日後に自動削除されます。
 
 ### 動画が再生・シークできないときは（diag.html）
 
@@ -65,7 +103,9 @@ https://digital-twin-creator.github.io/spotlight-reel/diag.html を開いてく�
 「📋 結果をコピー」で全文をコピーできるので、不具合報告の際に貼り付けてください。
 自分の動画ファイルを選んで同じ診断を行うこともできます。
 
-### Colabへの受け渡し手順
+### Colabへの受け渡し手順（手動フォールバック）
+
+「動画を作る」が使えない・失敗する場合の代替手段です。
 
 1. `colab.ipynb` を Colab で開く（GitHub連携から直接開くか、`File > Upload notebook`）。
 2. スマホで書き出した `project.json` と、元の動画ファイルを、Googleドライブの
@@ -180,14 +220,15 @@ python render.py examples/sample.json --out examples/out.mp4
 ffprobe examples/out.mp4   # 長さ・音声トラックを確認
 python render.py examples/sample.json --preview examples/preview.png
 
-node tests/editor_logic.test.js   # index.html のJSON生成ロジックのユニットテスト（依存なし）
+node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 
-# 任意：再生/停止・シークのUI回帰テスト（playwright-coreとChromiumが必要）
+# 任意：UI回帰テスト（playwright-coreとChromiumが必要）
 npm install --no-save playwright-core
 python3 -m http.server 8794 &   # index.html をどこかで配信しておく
 node tests/player_ui.playwright.test.mjs
 node tests/freeze_black_screen.playwright.test.mjs
 node tests/resize_scroll_black_screen.playwright.test.mjs
+node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
 ```
 
 ## GitHub Pages の有効化
@@ -204,3 +245,6 @@ node tests/resize_scroll_black_screen.playwright.test.mjs
 
 - スマホ用エディタ（`index.html`）の実機（iPhone Safari / Android Chrome）での最終確認
 - エディタから書き出したJSONを使った、より長い実動画でのレンダリング確認
+- 「動画を作る」ボタンの実機・実GitHub環境での確認
+  （`uploads.github.com` へのブラウザからのアップロードがCORS的に問題なく通るかは、
+  現時点ではモックテストのみで確認済みで、実環境での確認がまだ済んでいません）

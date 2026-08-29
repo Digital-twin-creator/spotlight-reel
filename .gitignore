@@ -6,3 +6,6 @@ examples/preview.png
 
 __pycache__/
 *.pyc
+
+# `npm install --no-save playwright-core` でPlaywright回帰テストを実行した際に生成される
+node_modules/

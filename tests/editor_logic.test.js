@@ -285,6 +285,109 @@ test("isFrameInvalid: サンプルが1点も取れなければ無効", () => {
   assert.strictEqual(core.isFrameInvalid([]), true);
 });
 
+/* ---- makeJobTag ---- */
+test("makeJobTag: job-YYYYMMDD-HHMMSS 形式（UTC基準）になる", () => {
+  const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5)); // 2026-08-29T15:30:05Z
+  assert.strictEqual(core.makeJobTag(d), "job-20260829-153005");
+});
+test("makeJobTag: 各要素が2桁ゼロ埋めされる", () => {
+  const d = new Date(Date.UTC(2026, 0, 5, 3, 4, 9));
+  assert.strictEqual(core.makeJobTag(d), "job-20260105-030409");
+});
+
+/* ---- videoAssetName ---- */
+test("videoAssetName: 拡張子を保ったまま video.<ext> にする", () => {
+  assert.strictEqual(core.videoAssetName("IMG_1234.MOV"), "video.mov");
+  assert.strictEqual(core.videoAssetName("input.mp4"), "video.mp4");
+});
+test("videoAssetName: 拡張子が無ければ video.mp4 にフォールバックする", () => {
+  assert.strictEqual(core.videoAssetName("no_extension"), "video.mp4");
+  assert.strictEqual(core.videoAssetName(""), "video.mp4");
+});
+
+/* ---- guessContentType ---- */
+test("guessContentType: 主要な拡張子を判定できる", () => {
+  assert.strictEqual(core.guessContentType("video.mp4"), "video/mp4");
+  assert.strictEqual(core.guessContentType("video.mov"), "video/quicktime");
+  assert.strictEqual(core.guessContentType("project.json"), "application/json");
+});
+test("guessContentType: 未知の拡張子は application/octet-stream", () => {
+  assert.strictEqual(core.guessContentType("video.xyz"), "application/octet-stream");
+});
+
+/* ---- buildReleasePayload / buildDispatchPayload ---- */
+test("buildReleasePayload: tag_name/name にタグを設定し draft/prerelease はfalse", () => {
+  const p = core.buildReleasePayload("job-20260829-153005");
+  assert.strictEqual(p.tag_name, "job-20260829-153005");
+  assert.strictEqual(p.name, "job-20260829-153005");
+  assert.strictEqual(p.draft, false);
+  assert.strictEqual(p.prerelease, false);
+});
+test("buildDispatchPayload: refとinputs.tagを含む", () => {
+  const p = core.buildDispatchPayload("main", "job-20260829-153005");
+  assert.deepStrictEqual(p, { ref: "main", inputs: { tag: "job-20260829-153005" } });
+});
+
+/* ---- buildUploadUrl ---- */
+test("buildUploadUrl: RFC6570テンプレート部分を除去してname付きURLにする", () => {
+  const tmpl = "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}";
+  const url = core.buildUploadUrl(tmpl, "video.mp4");
+  assert.strictEqual(url, "https://uploads.github.com/repos/o/r/releases/123/assets?name=video.mp4");
+});
+test("buildUploadUrl: アセット名はURLエンコードされる", () => {
+  const tmpl = "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}";
+  const url = core.buildUploadUrl(tmpl, "my video.mp4");
+  assert.strictEqual(url, "https://uploads.github.com/repos/o/r/releases/123/assets?name=my%20video.mp4");
+});
+
+/* ---- findMatchingRun ---- */
+test("findMatchingRun: run-name(\"render \"+tag)と完全一致するrunを返す", () => {
+  const runs = [
+    { name: "render job-aaa", created_at: "2026-01-01T00:00:00Z", id: 1 },
+    { name: "render job-bbb", created_at: "2026-01-02T00:00:00Z", id: 2 },
+    { name: "cleanup-old-releases", created_at: "2026-01-03T00:00:00Z", id: 3 }
+  ];
+  const found = core.findMatchingRun(runs, "job-bbb");
+  assert.strictEqual(found.id, 2);
+});
+test("findMatchingRun: 一致するrunが無ければnull", () => {
+  assert.strictEqual(core.findMatchingRun([{ name: "render job-aaa" }], "job-zzz"), null);
+  assert.strictEqual(core.findMatchingRun([], "job-zzz"), null);
+});
+test("findMatchingRun: 複数一致した場合は最も新しいものを返す", () => {
+  const runs = [
+    { name: "render job-aaa", created_at: "2026-01-01T00:00:00Z", id: "old" },
+    { name: "render job-aaa", created_at: "2026-01-05T00:00:00Z", id: "new" }
+  ];
+  assert.strictEqual(core.findMatchingRun(runs, "job-aaa").id, "new");
+});
+
+/* ---- interpretRunStatus ---- */
+test("interpretRunStatus: 未完了(queued/in_progress)はpending", () => {
+  assert.strictEqual(core.interpretRunStatus({ status: "queued" }), "pending");
+  assert.strictEqual(core.interpretRunStatus({ status: "in_progress" }), "pending");
+});
+test("interpretRunStatus: completed かつ conclusion=success は success", () => {
+  assert.strictEqual(core.interpretRunStatus({ status: "completed", conclusion: "success" }), "success");
+});
+test("interpretRunStatus: completed かつ conclusion!=success は failure", () => {
+  assert.strictEqual(core.interpretRunStatus({ status: "completed", conclusion: "failure" }), "failure");
+  assert.strictEqual(core.interpretRunStatus({ status: "completed", conclusion: "cancelled" }), "failure");
+});
+test("interpretRunStatus: run自体が無い場合はpending扱い", () => {
+  assert.strictEqual(core.interpretRunStatus(null), "pending");
+});
+
+/* ---- findReleaseAsset ---- */
+test("findReleaseAsset: 名前が一致するアセットを返す", () => {
+  const assets = [{ name: "project.json", id: 1 }, { name: "output.mp4", id: 2 }];
+  assert.strictEqual(core.findReleaseAsset(assets, "output.mp4").id, 2);
+});
+test("findReleaseAsset: 一致が無ければnull", () => {
+  assert.strictEqual(core.findReleaseAsset([{ name: "a" }], "b"), null);
+  assert.strictEqual(core.findReleaseAsset([], "b"), null);
+});
+
 /* ---- まとめ ---- */
 console.log("");
 console.log(passed + " 件成功 / " + failures + " 件失敗");

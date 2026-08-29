@@ -204,6 +204,23 @@
     border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px;
     font-family:ui-monospace,Menlo,Consolas,monospace;
   }
+
+  /* --- GitHub連携・ジョブ進捗 --- */
+  .token-row{display:flex; gap:6px;}
+  .token-row input{flex:1;}
+  .progress-track{
+    width:100%; height:10px; border-radius:999px; background:var(--panel3);
+    border:1px solid var(--line); overflow:hidden;
+  }
+  .progress-fill{height:100%; width:0%; background:var(--accent); transition:width .2s;}
+  .job-status-line{font-size:13px; color:var(--text); min-height:18px; line-height:1.5; word-break:break-word;}
+  .job-status-line.err{color:var(--danger);}
+  .job-status-line.ok{color:var(--ok);}
+  a.link-btn{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-height:44px; border-radius:10px; background:var(--ok); color:#04241a;
+    font-size:14px; font-weight:700; text-decoration:none; padding:10px 14px;
+  }
 </style>
 </head>
 <body>
@@ -370,9 +387,55 @@
     </div>
   </details>
 
-  <!-- 7. 書き出し・読み込み -->
+  <!-- 7. 動画を作る（GitHub Actions 自動レンダリング） -->
+  <section class="card" id="makeVideoSection">
+    <h2><span class="step-badge">⑦</span>動画を作る</h2>
+    <div class="stack">
+      <p class="muted">
+        ボタン1つで、動画・設定を非公開の処理用リポジトリに送り、GitHub Actions上で
+        <code>render.py</code> を実行します。完成したら GitHub の Release ページから
+        ダウンロードできます。
+      </p>
+
+      <details id="ghSettingsDetails">
+        <summary class="muted" style="cursor:pointer;">GitHub連携の設定</summary>
+        <div class="body stack">
+          <div class="field">
+            <label>GitHubユーザー名（組織名）</label>
+            <input type="text" id="ghUserInput" placeholder="例: Digital-twin-creator" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>処理用リポジトリ名</label>
+            <input type="text" id="ghRepoInput" placeholder="spotlight-jobs" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>Personal Access Token（Fine-grained、spotlight-jobs 限定）</label>
+            <div class="token-row">
+              <input type="password" id="ghTokenInput" placeholder="github_pat_..." autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <button class="ghost small icon" id="ghTokenToggleBtn" type="button" title="表示切り替え">👁</button>
+            </div>
+            <p class="muted" style="margin-top:6px;">
+              トークンはこの端末の localStorage にのみ保存され、GitHub API 以外には送信されません。
+            </p>
+          </div>
+          <button class="ghost" id="ghSettingsSaveBtn">💾 設定を保存</button>
+          <div class="status-line" id="ghSettingsStatus"></div>
+        </div>
+      </details>
+
+      <button class="primary" id="makeVideoBtn">🎬 動画を作る</button>
+
+      <div id="jobProgressWrap" hidden>
+        <div class="progress-track"><div class="progress-fill" id="jobProgressFill"></div></div>
+      </div>
+      <div class="job-status-line" id="jobStatusLine"></div>
+      <a class="link-btn" id="jobResultLink" href="#" target="_blank" rel="noopener" hidden>✅ Releaseページを開いて保存</a>
+    </div>
+  </section>
+
+  <!-- 8. 書き出し・読み込み -->
   <section class="card" id="ioSection">
-    <h2><span class="step-badge">⑦</span>書き出し・読み込み</h2>
+    <h2><span class="step-badge">⑧</span>書き出し・読み込み（手動運用）</h2>
     <div class="stack">
       <button class="primary" id="exportBtn">📤 JSONを書き出す</button>
       <button class="ghost" id="copyJsonBtn">📋 JSONをコピー</button>
@@ -387,7 +450,7 @@
   </section>
 
   <footer class="muted" style="padding:0 4px;">
-    書き出した project.json と動画ファイルを同じフォルダに置いて、
+    「動画を作る」が使えない場合は、書き出した project.json と動画ファイルを同じフォルダに置いて、
     <code>colab.ipynb</code> の「本番用」セクションに渡すと <code>render.py</code> でMP4を作れます。
   </footer>
 
@@ -653,6 +716,98 @@ function isFrameInvalid(samples) {
   return (maxR - minR) <= 3 && (maxG - minG) <= 3 && (maxB - minB) <= 3;
 }
 
+/* ========================================================================
+ * GitHub Actions ジョブ連携（「動画を作る」ボタン）まわりの純粋関数。
+ * fetch/XHR等の実際の通信は行わず、リクエストの組み立てとレスポンスの解釈だけを担う。
+ * ======================================================================== */
+
+/** "job-YYYYMMDD-HHMMSS" 形式のタグ名を作る（UTC基準。端末のタイムゾーンに依存させない） */
+function makeJobTag(date) {
+  function pad(n) { return String(n).padStart(2, "0"); }
+  var y = date.getUTCFullYear();
+  var mo = pad(date.getUTCMonth() + 1);
+  var d = pad(date.getUTCDate());
+  var h = pad(date.getUTCHours());
+  var mi = pad(date.getUTCMinutes());
+  var s = pad(date.getUTCSeconds());
+  return "job-" + y + mo + d + "-" + h + mi + s;
+}
+
+/** 元動画のファイル名から、Releaseアセット名 "video.<拡張子>" を作る（無ければ.mp4扱い） */
+function videoAssetName(originalFileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
+  var ext = m ? m[1].toLowerCase() : "mp4";
+  return "video." + ext;
+}
+
+/** ファイル名から素朴にContent-Typeを推定する（アップロード時のヘッダー用） */
+function guessContentType(fileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(fileName || "");
+  var ext = m ? m[1].toLowerCase() : "";
+  var table = {
+    mp4: "video/mp4", m4v: "video/x-m4v", mov: "video/quicktime",
+    webm: "video/webm", mkv: "video/x-matroska", avi: "video/x-msvideo",
+    json: "application/json"
+  };
+  return table[ext] || "application/octet-stream";
+}
+
+/** GitHub Release作成APIに送るボディを組み立てる */
+function buildReleasePayload(tag) {
+  return {
+    tag_name: tag,
+    name: tag,
+    body: "spotlight-reel editor が自動作成したジョブです。",
+    draft: false,
+    prerelease: false
+  };
+}
+
+/** workflow_dispatch APIに送るボディを組み立てる */
+function buildDispatchPayload(ref, tag) {
+  return { ref: ref, inputs: { tag: tag } };
+}
+
+/**
+ * Release作成レスポンスの upload_url（RFC6570テンプレート、例:
+ * "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}"）から、
+ * 指定アセット名でアップロードする実URLを組み立てる。
+ */
+function buildUploadUrl(uploadUrlTemplate, assetName) {
+  var base = String(uploadUrlTemplate || "").replace(/\{[^}]*\}$/, "");
+  return base + "?name=" + encodeURIComponent(assetName);
+}
+
+/**
+ * /actions/workflows/{id}/runs の一覧から、自分が起動したrunを
+ * run-name（"render " + tag）の完全一致で特定する。
+ * workflow_dispatch はrun idを直接返さないAPI仕様のための埋め合わせ。
+ * 複数一致した場合は最も新しい(created_atが新しい)ものを返す。
+ */
+function findMatchingRun(runs, tag) {
+  var expectedName = "render " + tag;
+  var matches = (runs || []).filter(function (r) { return r && r.name === expectedName; });
+  if (matches.length === 0) return null;
+  matches.sort(function (a, b) {
+    return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+  });
+  return matches[0];
+}
+
+/**
+ * ワークフローrunオブジェクト({status, conclusion})から、
+ * "pending" | "success" | "failure" のいずれかを返す。
+ */
+function interpretRunStatus(run) {
+  if (!run || run.status !== "completed") return "pending";
+  return run.conclusion === "success" ? "success" : "failure";
+}
+
+/** Releaseのassets配列から、指定した名前のアセットを探す（無ければnull） */
+function findReleaseAsset(assets, name) {
+  return (assets || []).filter(function (a) { return a && a.name === name; })[0] || null;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DEFAULT_STYLE: DEFAULT_STYLE,
@@ -671,7 +826,16 @@ if (typeof module !== "undefined" && module.exports) {
     buildStrokeGeometry: buildStrokeGeometry,
     trimGeometryToLength: trimGeometryToLength,
     computeBgPixel: computeBgPixel,
-    isFrameInvalid: isFrameInvalid
+    isFrameInvalid: isFrameInvalid,
+    makeJobTag: makeJobTag,
+    videoAssetName: videoAssetName,
+    guessContentType: guessContentType,
+    buildReleasePayload: buildReleasePayload,
+    buildDispatchPayload: buildDispatchPayload,
+    buildUploadUrl: buildUploadUrl,
+    findMatchingRun: findMatchingRun,
+    interpretRunStatus: interpretRunStatus,
+    findReleaseAsset: findReleaseAsset
   };
 }
 </script>
@@ -687,6 +851,7 @@ if (typeof module !== "undefined" && module.exports) {
 
 var appState = {
   videoFileName: "",
+  videoFile: null,
   outputMode: "original",
   freezeSec: DEFAULT_STYLE.freeze_sec,
   brushAnimSec: DEFAULT_STYLE.brush_anim_sec,
@@ -724,7 +889,10 @@ function init() {
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
     "freezeSecInput", "brushAnimSecInput", "audioDuringFreezeSelect", "outputModeSelect",
-    "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea"
+    "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
+    "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
+    "ghSettingsSaveBtn", "ghSettingsStatus",
+    "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobResultLink"
   ].forEach(function (id) { els[id] = $(id); });
 
   wireGlobalErrorHandling();
@@ -805,6 +973,11 @@ function init() {
   els.loadJsonBtn.addEventListener("click", function () { els.jsonFileInput.click(); });
   els.jsonFileInput.addEventListener("change", handleJsonFileChange);
   els.errorBannerClose.addEventListener("click", hideError);
+
+  loadGhSettings();
+  els.ghSettingsSaveBtn.addEventListener("click", saveGhSettingsFromInputs);
+  els.ghTokenToggleBtn.addEventListener("click", toggleGhTokenVisibility);
+  els.makeVideoBtn.addEventListener("click", startMakeVideoJob);
 
   wireDrawCanvasTouch();
   window.addEventListener("resize", handleWindowResize);
@@ -911,6 +1084,7 @@ function loadSampleVideo() {
 }
 
 function loadVideoFile(file) {
+  appState.videoFile = file;
   appState.videoFileName = file.name;
   els.videoFileName.textContent = "選択中: " + file.name;
   setVideoStatus("読み込み中…");
@@ -1839,6 +2013,289 @@ function loadFromLocalStorage(videoFileName) {
   } catch (e) {
     return false;
   }
+}
+
+/* ---------------- GitHub連携・動画を作るジョブ ---------------- */
+
+var GH_SETTINGS_KEY = "spotlightReel.ghSettings.v1";
+
+function loadGhSettings() {
+  var saved = null;
+  try {
+    var raw = localStorage.getItem(GH_SETTINGS_KEY);
+    if (raw) saved = JSON.parse(raw);
+  } catch (e) { /* 無視 */ }
+  els.ghUserInput.value = (saved && saved.user) || "";
+  els.ghRepoInput.value = (saved && saved.repo) || "spotlight-jobs";
+  els.ghTokenInput.value = (saved && saved.token) || "";
+}
+
+function persistGhSettings(user, repo, token) {
+  try {
+    localStorage.setItem(GH_SETTINGS_KEY, JSON.stringify({ user: user, repo: repo, token: token }));
+  } catch (e) { /* 保存できなくても処理自体は続行する */ }
+}
+
+function saveGhSettingsFromInputs() {
+  var user = els.ghUserInput.value.trim();
+  var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
+  var token = els.ghTokenInput.value.trim();
+  els.ghRepoInput.value = repo;
+  persistGhSettings(user, repo, token);
+  els.ghSettingsStatus.textContent = "設定を保存しました";
+}
+
+function toggleGhTokenVisibility() {
+  var showing = els.ghTokenInput.type === "text";
+  els.ghTokenInput.type = showing ? "password" : "text";
+  els.ghTokenToggleBtn.textContent = showing ? "👁" : "🙈";
+}
+
+function wait(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+function ghApiBase(user, repo) {
+  return "https://api.github.com/repos/" + encodeURIComponent(user) + "/" + encodeURIComponent(repo);
+}
+
+function ghHeaders(token) {
+  return {
+    "Authorization": "Bearer " + token,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
+/** api.github.com への軽量なJSON呼び出し。失敗時はAPIのエラー本文をメッセージに含める */
+function ghFetchJson(url, token, options) {
+  options = options || {};
+  var headers = ghHeaders(token);
+  if (options.headers) { for (var k in options.headers) headers[k] = options.headers[k]; }
+  if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  return fetch(url, { method: options.method || "GET", headers: headers, body: options.body })
+    .then(function (res) {
+      return res.text().then(function (text) {
+        var body = null;
+        try { body = text ? JSON.parse(text) : null; } catch (e) { /* JSON以外の応答（204等） */ }
+        if (!res.ok) {
+          var detail = (body && body.message) ? body.message : (text || ("HTTP " + res.status));
+          throw new Error("GitHub API エラー (" + res.status + "): " + detail);
+        }
+        return body;
+      });
+    });
+}
+
+function ghCreateRelease(user, repo, token, tag) {
+  return ghFetchJson(ghApiBase(user, repo) + "/releases", token, {
+    method: "POST",
+    body: JSON.stringify(buildReleasePayload(tag))
+  });
+}
+
+function ghDispatchWorkflow(user, repo, token, tag) {
+  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/render.yml/dispatches", token, {
+    method: "POST",
+    body: JSON.stringify(buildDispatchPayload("main", tag))
+  });
+}
+
+function ghGetReleaseByTag(user, repo, token, tag) {
+  return ghFetchJson(ghApiBase(user, repo) + "/releases/tags/" + encodeURIComponent(tag), token, {});
+}
+
+function ghListWorkflowRuns(user, repo, token) {
+  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/render.yml/runs?event=workflow_dispatch&per_page=15", token, {})
+    .then(function (data) { return (data && data.workflow_runs) || []; });
+}
+
+function ghGetRun(user, repo, token, runId) {
+  return ghFetchJson(ghApiBase(user, repo) + "/actions/runs/" + runId, token, {});
+}
+
+/**
+ * upload_url テンプレート（RFC6570）へ、XHRでアセットをアップロードする。
+ * 進捗表示（upload.onprogress）と大きな動画ファイルの送信のため、fetchではなくXHRを使う
+ * （iOS Safariはfetchのアップロードストリーミング/進捗サポートが弱いため）。
+ */
+function ghUploadAsset(uploadUrlTemplate, token, name, blob, contentType, onProgress) {
+  var url = buildUploadUrl(uploadUrlTemplate, name);
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    xhr.setRequestHeader("Authorization", "Bearer " + token);
+    xhr.setRequestHeader("Accept", "application/vnd.github+json");
+    xhr.setRequestHeader("Content-Type", contentType || "application/octet-stream");
+    xhr.upload.onprogress = function (e) {
+      if (!onProgress || !e.lengthComputable) return;
+      onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (onProgress) onProgress(100);
+        resolve();
+        return;
+      }
+      var detail = xhr.responseText || ("HTTP " + xhr.status);
+      try {
+        var parsed = JSON.parse(xhr.responseText);
+        if (parsed && parsed.message) detail = parsed.message;
+      } catch (e) { /* JSON以外の応答 */ }
+      reject(new Error("アセット「" + name + "」のアップロードに失敗しました (" + xhr.status + "): " + detail));
+    };
+    xhr.onerror = function () {
+      reject(new Error("アセット「" + name + "」のアップロード中に通信エラーが発生しました（ネットワーク接続を確認してください）"));
+    };
+    xhr.send(blob);
+  });
+}
+
+/** workflow_dispatch はrun idを返さないため、run一覧を数回ポーリングして自分のrunを見つける */
+function pollForRun(user, repo, token, tag) {
+  var maxAttempts = 15;
+  var intervalMs = 2000;
+  function attempt(n) {
+    return ghListWorkflowRuns(user, repo, token).then(function (runs) {
+      var match = findMatchingRun(runs, tag);
+      if (match) return match;
+      if (n >= maxAttempts) {
+        throw new Error("ワークフローの実行が見つかりませんでした（GitHub Actions側の反映が遅れている可能性があります。少し時間をおいて再度お試しください）");
+      }
+      return wait(intervalMs).then(function () { return attempt(n + 1); });
+    });
+  }
+  return attempt(1);
+}
+
+/** run が completed になるまでポーリングする（レンダリングには数分かかりうる） */
+function pollRunUntilDone(user, repo, token, runId) {
+  var maxAttempts = 180; // 5秒間隔 x 180 = 最大15分待つ
+  var intervalMs = 5000;
+  function attempt(n) {
+    return ghGetRun(user, repo, token, runId).then(function (run) {
+      var status = interpretRunStatus(run);
+      if (status !== "pending") return run;
+      if (n >= maxAttempts) {
+        throw new Error("レンダリングの完了確認がタイムアウトしました。GitHubのActionsページで直接ご確認ください: " + (run.html_url || ""));
+      }
+      return wait(intervalMs).then(function () { return attempt(n + 1); });
+    });
+  }
+  return attempt(1);
+}
+
+function setJobButtonBusy(busy) {
+  els.makeVideoBtn.disabled = busy;
+  els.makeVideoBtn.textContent = busy ? "⏳ 処理中…" : "🎬 動画を作る";
+  els.jobProgressWrap.hidden = !busy;
+  if (busy) {
+    els.jobResultLink.hidden = true;
+    els.jobStatusLine.className = "job-status-line";
+  }
+}
+
+function showJobProgress(pct, text) {
+  var clamped = Math.max(0, Math.min(100, pct));
+  els.jobProgressFill.style.width = clamped + "%";
+  els.jobStatusLine.className = "job-status-line";
+  els.jobStatusLine.textContent = text;
+}
+
+function showJobError(msg) {
+  els.jobStatusLine.className = "job-status-line err";
+  els.jobStatusLine.textContent = msg;
+}
+
+function showJobSuccess(msg) {
+  els.jobStatusLine.className = "job-status-line ok";
+  els.jobStatusLine.textContent = msg;
+}
+
+function showJobResultLink(url) {
+  if (!url) return;
+  els.jobResultLink.href = url;
+  els.jobResultLink.hidden = false;
+}
+
+function startMakeVideoJob() {
+  hideError();
+  if (!appState.videoFile) {
+    showJobError("先に動画を選んでください");
+    return;
+  }
+
+  var user = els.ghUserInput.value.trim();
+  var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
+  var token = els.ghTokenInput.value.trim();
+  if (!user || !token) {
+    showJobError("GitHub連携の設定（ユーザー名・トークン）を入力してください");
+    els.ghSettingsDetails.open = true;
+    return;
+  }
+  persistGhSettings(user, repo, token);
+
+  var tag = makeJobTag(new Date());
+  var videoFile = appState.videoFile;
+  var jsonBlob = new Blob([currentProjectJSONText()], { type: "application/json" });
+  var releaseInfo = null;
+
+  setJobButtonBusy(true);
+  showJobProgress(2, "リリースを作成中…");
+
+  ghCreateRelease(user, repo, token, tag)
+    .then(function (release) {
+      releaseInfo = release;
+      showJobProgress(8, "project.json をアップロード中…");
+      return ghUploadAsset(release.upload_url, token, "project.json", jsonBlob, "application/json", function (pct) {
+        showJobProgress(8 + pct * 0.12, "project.json をアップロード中… " + pct + "%");
+      });
+    })
+    .then(function () {
+      var videoName = videoAssetName(videoFile.name);
+      showJobProgress(20, "動画をアップロード中… 0%");
+      return ghUploadAsset(releaseInfo.upload_url, token, videoName, videoFile, guessContentType(videoName), function (pct) {
+        showJobProgress(20 + pct * 0.6, "動画をアップロード中… " + pct + "%");
+      });
+    })
+    .then(function () {
+      showJobProgress(82, "レンダリングを開始しています…");
+      return ghDispatchWorkflow(user, repo, token, tag);
+    })
+    .then(function () {
+      showJobProgress(85, "実行を確認しています…");
+      return pollForRun(user, repo, token, tag);
+    })
+    .then(function (run) {
+      showJobProgress(90, "レンダリング中…しばらくお待ちください");
+      return pollRunUntilDone(user, repo, token, run.id);
+    })
+    .then(function (finalRun) {
+      var status = interpretRunStatus(finalRun);
+      if (status !== "success") {
+        var logsUrl = finalRun.html_url || ("https://github.com/" + user + "/" + repo + "/actions");
+        throw new Error("レンダリングに失敗しました。ログを確認してください: " + logsUrl);
+      }
+      showJobProgress(97, "完成を確認しています…");
+      return ghGetReleaseByTag(user, repo, token, tag);
+    })
+    .then(function (rel) {
+      var asset = findReleaseAsset(rel.assets, "output.mp4");
+      showJobProgress(100, "完了");
+      if (!asset) {
+        showJobError("レンダリングは成功しましたが output.mp4 が見つかりませんでした。Releaseページを直接確認してください。");
+        showJobResultLink(rel.html_url);
+        return;
+      }
+      showJobSuccess("完成しました！下のボタンからGitHubのReleaseページを開いて保存してください。");
+      showJobResultLink(rel.html_url);
+    })
+    .catch(function (err) {
+      showJobError("動画の作成に失敗しました: " + (err && err.message ? err.message : err));
+    })
+    .then(function () {
+      setJobButtonBusy(false);
+    });
 }
 
 /* ---------------- 書き出し・読み込み ---------------- */
