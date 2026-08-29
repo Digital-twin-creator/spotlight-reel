@@ -305,14 +305,15 @@ test("videoAssetName: 拡張子が無ければ video.mp4 にフォールバッ�
   assert.strictEqual(core.videoAssetName(""), "video.mp4");
 });
 
-/* ---- guessContentType ---- */
-test("guessContentType: 主要な拡張子を判定できる", () => {
-  assert.strictEqual(core.guessContentType("video.mp4"), "video/mp4");
-  assert.strictEqual(core.guessContentType("video.mov"), "video/quicktime");
-  assert.strictEqual(core.guessContentType("project.json"), "application/json");
+/* ---- exceedsBlobLimit ---- */
+test("exceedsBlobLimit: 100MBちょうどは超過ではない", () => {
+  assert.strictEqual(core.exceedsBlobLimit(core.MAX_BLOB_BYTES), false);
 });
-test("guessContentType: 未知の拡張子は application/octet-stream", () => {
-  assert.strictEqual(core.guessContentType("video.xyz"), "application/octet-stream");
+test("exceedsBlobLimit: 100MBを1バイトでも超えたら超過", () => {
+  assert.strictEqual(core.exceedsBlobLimit(core.MAX_BLOB_BYTES + 1), true);
+});
+test("exceedsBlobLimit: 小さいファイルは超過ではない", () => {
+  assert.strictEqual(core.exceedsBlobLimit(1024), false);
 });
 
 /* ---- buildReleasePayload / buildDispatchPayload ---- */
@@ -328,16 +329,31 @@ test("buildDispatchPayload: refとinputs.tagを含む", () => {
   assert.deepStrictEqual(p, { ref: "main", inputs: { tag: "job-20260829-153005" } });
 });
 
-/* ---- buildUploadUrl ---- */
-test("buildUploadUrl: RFC6570テンプレート部分を除去してname付きURLにする", () => {
-  const tmpl = "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}";
-  const url = core.buildUploadUrl(tmpl, "video.mp4");
-  assert.strictEqual(url, "https://uploads.github.com/repos/o/r/releases/123/assets?name=video.mp4");
+/* ---- buildBlobPayload / buildGitTreePayload / buildGitCommitPayload / buildGitRefPayload ---- */
+test("buildBlobPayload: contentとencoding=base64を含む", () => {
+  const p = core.buildBlobPayload("aGVsbG8=");
+  assert.deepStrictEqual(p, { content: "aGVsbG8=", encoding: "base64" });
 });
-test("buildUploadUrl: アセット名はURLエンコードされる", () => {
-  const tmpl = "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}";
-  const url = core.buildUploadUrl(tmpl, "my video.mp4");
-  assert.strictEqual(url, "https://uploads.github.com/repos/o/r/releases/123/assets?name=my%20video.mp4");
+test("buildGitTreePayload: base_treeとtreeエントリ(mode=100644, type=blob)を組み立てる", () => {
+  const p = core.buildGitTreePayload("base-sha", [
+    { path: "project.json", sha: "json-sha" },
+    { path: "video.mp4", sha: "video-sha" }
+  ]);
+  assert.deepStrictEqual(p, {
+    base_tree: "base-sha",
+    tree: [
+      { path: "project.json", mode: "100644", type: "blob", sha: "json-sha" },
+      { path: "video.mp4", mode: "100644", type: "blob", sha: "video-sha" }
+    ]
+  });
+});
+test("buildGitCommitPayload: message/tree/parentsを組み立てる", () => {
+  const p = core.buildGitCommitPayload("job-20260829-153005", "tree-sha", "parent-sha");
+  assert.deepStrictEqual(p, { message: "job-20260829-153005", tree: "tree-sha", parents: ["parent-sha"] });
+});
+test("buildGitRefPayload: refはrefs/heads/<ブランチ名>になる", () => {
+  const p = core.buildGitRefPayload("job-20260829-153005", "commit-sha");
+  assert.deepStrictEqual(p, { ref: "refs/heads/job-20260829-153005", sha: "commit-sha" });
 });
 
 /* ---- findMatchingRun ---- */

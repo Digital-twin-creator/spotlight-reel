@@ -2,9 +2,13 @@
 // -*- coding: utf-8 -*-
 //
 // index.html の「動画を作る」ボタン（GitHub Actions自動レンダリングのジョブ連携）を、
-// api.github.com / uploads.github.com への実際の通信をモックした状態で検証する回帰テスト。
-// 実際のGitHubには一切アクセスしない（Release作成・アセットアップロード・workflow_dispatch・
-// runのポーリング・成功時のReleaseページリンク表示・失敗時のエラー表示、を全てモックで再現する）。
+// api.github.com への実際の通信をモックした状態で検証する回帰テスト。
+// 実際のGitHubには一切アクセスしない（Release作成・Git Data APIでのブランチコミット
+// （blob→tree→commit→ref）・workflow_dispatch・runのポーリング・成功時のReleaseページ
+// リンク表示・失敗時のエラー表示・100MB超過時の中断、を全てモックで再現する）。
+//
+// uploads.github.com は使わない（実機検証でCORS拒否されることが判明したため、
+// project.json/動画は Git Data API 経由でリポジトリのブランチにコミットする方式に変更した）。
 //
 // 実行方法:
 //   npm install --no-save playwright-core
@@ -30,6 +34,13 @@ const CHROMIUM_PATH = process.env.PW_CHROMIUM_PATH || "/opt/pw-browsers/chromium
 const OWNER = "Digital-twin-creator";
 const REPO = "spotlight-jobs";
 const TOKEN = "github_pat_test_dummy_token";
+
+const BASE_COMMIT_SHA = "base-commit-sha";
+const BASE_TREE_SHA = "base-tree-sha";
+const JSON_BLOB_SHA = "json-blob-sha";
+const VIDEO_BLOB_SHA = "video-blob-sha";
+const NEW_TREE_SHA = "new-tree-sha";
+const NEW_COMMIT_SHA = "new-commit-sha";
 
 function prepareTestVideo() {
   if (process.env.PW_VIDEO) return process.env.PW_VIDEO;
@@ -57,7 +68,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 };
 
-/** api.github.com / uploads.github.com 宛のリクエストを全てモックで返すルートハンドラを作る */
+/** api.github.com 宛のリクエストを全てモックで返すルートハンドラを作る */
 function makeGithubMockRouter(mock) {
   return async (route) => {
     const request = route.request();
@@ -73,29 +84,70 @@ function makeGithubMockRouter(mock) {
     const m = /^\/repos\/([^/]+)\/([^/]+)\//.exec(pathname);
     const owner = m ? m[1] : OWNER;
     const repo = m ? m[2] : REPO;
+    const json = (status, obj) => route.fulfill({
+      status, headers: { ...CORS_HEADERS, "content-type": "application/json" }, body: JSON.stringify(obj),
+    });
 
     // POST /repos/{owner}/{repo}/releases  … Release作成
-    if (method === "POST" && new RegExp(`^/repos/${owner}/${repo}/releases$`).test(pathname)) {
-      mock.releaseId += 1;
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/releases`) {
       mock.createReleaseCalls++;
-      const body = JSON.stringify({
-        id: mock.releaseId,
-        tag_name: mock.tag,
+      return json(201, {
+        id: 1, tag_name: mock.tag,
         html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
-        upload_url: `https://uploads.github.com/repos/${owner}/${repo}/releases/${mock.releaseId}/assets{?name,label}`,
       });
-      await route.fulfill({ status: 201, headers: { ...CORS_HEADERS, "content-type": "application/json" }, body });
-      return;
     }
 
-    // POST https://uploads.github.com/repos/{owner}/{repo}/releases/{id}/assets?name=...  … アセットアップロード
-    if (url.hostname === "uploads.github.com" && method === "POST" && /\/assets$/.test(pathname)) {
-      mock.uploadedAssetNames.push(url.searchParams.get("name"));
-      await route.fulfill({
-        status: 201, headers: { ...CORS_HEADERS, "content-type": "application/json" },
-        body: JSON.stringify({ name: url.searchParams.get("name") }),
-      });
-      return;
+    // GET /repos/{owner}/{repo}/git/ref/heads/main  … コミット先ブランチの基点
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/git/ref/heads/main`) {
+      mock.getRefCalls++;
+      return json(200, { ref: "refs/heads/main", object: { sha: BASE_COMMIT_SHA, type: "commit" } });
+    }
+
+    // GET /repos/{owner}/{repo}/git/commits/{sha}  … 基点コミットのtree shaを取る
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/git/commits/${BASE_COMMIT_SHA}`) {
+      mock.getCommitCalls++;
+      return json(200, { sha: BASE_COMMIT_SHA, tree: { sha: BASE_TREE_SHA } });
+    }
+
+    // POST /repos/{owner}/{repo}/git/blobs  … project.json / 動画 のblob作成（1回目=json、2回目=動画）
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/blobs`) {
+      mock.blobCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      if (body.encoding !== "base64" || typeof body.content !== "string") {
+        mock.blobPayloadInvalid = true;
+      }
+      const sha = mock.blobCalls === 1 ? JSON_BLOB_SHA : VIDEO_BLOB_SHA;
+      if (mock.blobCalls === 1) mock.jsonBlobContentLength = body.content ? body.content.length : 0;
+      else mock.videoBlobContentLength = body.content ? body.content.length : 0;
+      return json(201, { sha });
+    }
+
+    // POST /repos/{owner}/{repo}/git/trees  … tree作成
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/trees`) {
+      mock.createTreeCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      mock.treePayload = body;
+      return json(201, { sha: NEW_TREE_SHA });
+    }
+
+    // POST /repos/{owner}/{repo}/git/commits  … commit作成
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/commits`) {
+      mock.createCommitCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      mock.commitPayload = body;
+      return json(201, { sha: NEW_COMMIT_SHA });
+    }
+
+    // POST /repos/{owner}/{repo}/git/refs  … job-<tag> ブランチ作成
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/refs`) {
+      mock.createRefCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      mock.refPayload = body;
+      return json(201, { ref: body.ref, object: { sha: body.sha } });
     }
 
     // POST /repos/{owner}/{repo}/actions/workflows/render.yml/dispatches  … workflow_dispatch
@@ -118,11 +170,7 @@ function makeGithubMockRouter(mock) {
             html_url: `https://github.com/${owner}/${repo}/actions/runs/${mock.runId}`,
           }]
         : [];
-      await route.fulfill({
-        status: 200, headers: { ...CORS_HEADERS, "content-type": "application/json" },
-        body: JSON.stringify({ workflow_runs: runs }),
-      });
-      return;
+      return json(200, { workflow_runs: runs });
     }
 
     // GET /repos/{owner}/{repo}/actions/runs/{id}  … runの状態ポーリング
@@ -131,36 +179,55 @@ function makeGithubMockRouter(mock) {
       mock.getRunCalls++;
       const idx = Math.min(mock.getRunCalls - 1, mock.runStatusSequence.length - 1);
       const state = mock.runStatusSequence[idx];
-      await route.fulfill({
-        status: 200, headers: { ...CORS_HEADERS, "content-type": "application/json" },
-        body: JSON.stringify({
-          id: mock.runId, status: state.status, conclusion: state.conclusion,
-          html_url: `https://github.com/${owner}/${repo}/actions/runs/${mock.runId}`,
-        }),
+      return json(200, {
+        id: mock.runId, status: state.status, conclusion: state.conclusion,
+        html_url: `https://github.com/${owner}/${repo}/actions/runs/${mock.runId}`,
       });
-      return;
     }
 
     // GET /repos/{owner}/{repo}/releases/tags/{tag}  … 完成確認
     if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/tags/${mock.tag}`) {
       mock.getReleaseByTagCalls++;
-      const assets = mock.includeOutputAsset
-        ? [{ name: "output.mp4", id: 999 }]
-        : [];
-      await route.fulfill({
-        status: 200, headers: { ...CORS_HEADERS, "content-type": "application/json" },
-        body: JSON.stringify({
-          tag_name: mock.tag,
-          html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
-          assets,
-        }),
+      const assets = mock.includeOutputAsset ? [{ name: "output.mp4", id: 999 }] : [];
+      return json(200, {
+        tag_name: mock.tag,
+        html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
+        assets,
       });
-      return;
     }
 
     console.log("  [警告] モックされていないGitHub APIリクエスト: " + method + " " + pathname);
     await route.fulfill({ status: 404, headers: CORS_HEADERS, body: "{}" });
   };
+}
+
+function makeMock(overrides) {
+  return Object.assign({
+    tag: null, runId: 555001,
+    createReleaseCalls: 0, getRefCalls: 0, getCommitCalls: 0,
+    blobCalls: 0, blobPayloadInvalid: false, jsonBlobContentLength: 0, videoBlobContentLength: 0,
+    createTreeCalls: 0, treePayload: null,
+    createCommitCalls: 0, commitPayload: null,
+    createRefCalls: 0, refPayload: null,
+    dispatchCalls: 0, listRunsCalls: 0, getRunCalls: 0, getReleaseByTagCalls: 0,
+    matchRunAfterCalls: 1,
+    runStatusSequence: [{ status: "completed", conclusion: "success" }],
+    includeOutputAsset: true,
+  }, overrides);
+}
+
+async function routeApiGithub(page, mock) {
+  await page.route("https://api.github.com/**", (route) => {
+    const u = new URL(route.request().url());
+    const isReleaseCreate = /^\/repos\/[^/]+\/[^/]+\/releases$/.test(u.pathname);
+    if (isReleaseCreate && route.request().method() === "POST" && !mock.tag) {
+      try {
+        const body = JSON.parse(route.request().postData() || "{}");
+        mock.tag = body.tag_name;
+      } catch (e) { /* 無視 */ }
+    }
+    return makeGithubMockRouter(mock)(route);
+  });
 }
 
 async function fillGhSettings(page, { user, repo, token }) {
@@ -170,45 +237,33 @@ async function fillGhSettings(page, { user, repo, token }) {
   await page.fill("#ghTokenInput", token);
 }
 
+async function loadVideoAndOpenSettings(page, videoPath) {
+  await page.goto(BASE_URL, { waitUntil: "load" });
+  await page.click("#guideCloseBtn").catch(() => {});
+  await page.setInputFiles("#videoFileInput", videoPath);
+  await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+}
+
 async function main() {
   const videoPath = prepareTestVideo();
   const iphone = devices["iPhone 13"];
   const browser = await chromium.launch({ executablePath: CHROMIUM_PATH, headless: true });
 
-  console.log("=== シナリオ1: 正常系（アップロード → dispatch → ポーリング → 完成リンク表示） ===");
+  console.log("=== シナリオ1: 正常系（Git Data APIでブランチにコミット → dispatch → ポーリング → 完成リンク表示） ===");
   {
     const context = await browser.newContext({ ...iphone });
     const page = await context.newPage();
     const pageErrors = [];
     page.on("pageerror", (e) => pageErrors.push(e.message));
 
-    const mock = {
-      tag: null, releaseId: 0, runId: 555001,
-      createReleaseCalls: 0, dispatchCalls: 0, listRunsCalls: 0, getRunCalls: 0, getReleaseByTagCalls: 0,
-      uploadedAssetNames: [],
+    const mock = makeMock({
+      runId: 555001,
       matchRunAfterCalls: 2, // 1回目は空、2回目でrunが見つかる（ポーリングの実動作を確認）
       runStatusSequence: [{ status: "in_progress", conclusion: null }, { status: "completed", conclusion: "success" }],
-      includeOutputAsset: true,
-    };
-    // タグはクライアント側が時刻から生成するため、初回リクエストのURLから逆算して埋める
-    await page.route("https://api.github.com/**", (route) => {
-      const u = new URL(route.request().url());
-      const m = /^\/repos\/[^/]+\/[^/]+\/releases$/.exec(u.pathname);
-      if (m && route.request().method() === "POST" && !mock.tag) {
-        try {
-          const body = JSON.parse(route.request().postData() || "{}");
-          mock.tag = body.tag_name;
-        } catch (e) { /* 無視 */ }
-      }
-      return makeGithubMockRouter(mock)(route);
     });
-    await page.route("https://uploads.github.com/**", makeGithubMockRouter(mock));
+    await routeApiGithub(page, mock);
 
-    await page.goto(BASE_URL, { waitUntil: "load" });
-    await page.click("#guideCloseBtn").catch(() => {});
-    await page.setInputFiles("#videoFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
-
+    await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
     await page.click("#makeVideoBtn");
 
@@ -237,8 +292,24 @@ async function main() {
     check(btnText.indexOf("動画を作る") >= 0, "完了後、ボタンの表示が元に戻る");
 
     check(mock.createReleaseCalls === 1, "Release作成APIが1回呼ばれる");
-    check(mock.uploadedAssetNames.sort().join(",") === "project.json,video.webm",
-      "project.json と動画（video.webm）の2アセットがアップロードされる: " + mock.uploadedAssetNames.join(","));
+    check(mock.getRefCalls >= 1, "コミット先ブランチの基点(refs/heads/main)を取得する");
+    check(mock.getCommitCalls >= 1, "基点コミットのtree shaを取得する");
+    check(mock.blobCalls === 2, "project.jsonと動画の2つのblobが作成される: " + mock.blobCalls + "回");
+    check(!mock.blobPayloadInvalid, "blob作成リクエストがcontent/encoding=base64の形になっている");
+    check(mock.jsonBlobContentLength > 0 && mock.videoBlobContentLength > mock.jsonBlobContentLength,
+      "動画blobの方がproject.jsonのblobより十分大きい（base64化されている）: json=" +
+      mock.jsonBlobContentLength + "chars, video=" + mock.videoBlobContentLength + "chars");
+    check(mock.createTreeCalls === 1 && mock.treePayload && mock.treePayload.base_tree === BASE_TREE_SHA,
+      "tree作成が基点tree(base_tree)を正しく指定している");
+    check(mock.treePayload && mock.treePayload.tree.some((e) => e.path === "project.json" && e.sha === JSON_BLOB_SHA)
+      && mock.treePayload.tree.some((e) => e.path === "video.webm" && e.sha === VIDEO_BLOB_SHA),
+      "treeにproject.jsonとvideo.webmの両方が正しいshaで含まれる");
+    check(mock.createCommitCalls === 1 && mock.commitPayload && mock.commitPayload.tree === NEW_TREE_SHA
+      && JSON.stringify(mock.commitPayload.parents) === JSON.stringify([BASE_COMMIT_SHA]),
+      "commit作成が新しいtreeと親コミット(基点)を正しく指定している");
+    check(mock.createRefCalls === 1 && mock.refPayload && mock.refPayload.sha === NEW_COMMIT_SHA
+      && mock.refPayload.ref === "refs/heads/" + mock.tag,
+      "ref作成でjob-<tag>という名前のブランチが新しいコミットを指して作られる: " + (mock.refPayload && mock.refPayload.ref));
     check(mock.dispatchCalls === 1, "workflow_dispatchが1回呼ばれる");
     check(mock.listRunsCalls >= 2, "run一覧のポーリングが複数回行われる（空→一致、の動作を確認）: " + mock.listRunsCalls + "回");
     check(mock.getRunCalls >= 2, "runステータスのポーリングが複数回行われる（pending→success、の動作を確認）: " + mock.getRunCalls + "回");
@@ -255,32 +326,14 @@ async function main() {
     const pageErrors = [];
     page.on("pageerror", (e) => pageErrors.push(e.message));
 
-    const mock = {
-      tag: null, releaseId: 0, runId: 555002,
-      createReleaseCalls: 0, dispatchCalls: 0, listRunsCalls: 0, getRunCalls: 0, getReleaseByTagCalls: 0,
-      uploadedAssetNames: [],
-      matchRunAfterCalls: 1, // すぐrunが見つかる
+    const mock = makeMock({
+      runId: 555002,
       runStatusSequence: [{ status: "completed", conclusion: "failure" }],
       includeOutputAsset: false,
-    };
-    await page.route("https://api.github.com/**", (route) => {
-      const u = new URL(route.request().url());
-      const m = /^\/repos\/[^/]+\/[^/]+\/releases$/.exec(u.pathname);
-      if (m && route.request().method() === "POST" && !mock.tag) {
-        try {
-          const body = JSON.parse(route.request().postData() || "{}");
-          mock.tag = body.tag_name;
-        } catch (e) { /* 無視 */ }
-      }
-      return makeGithubMockRouter(mock)(route);
     });
-    await page.route("https://uploads.github.com/**", makeGithubMockRouter(mock));
+    await routeApiGithub(page, mock);
 
-    await page.goto(BASE_URL, { waitUntil: "load" });
-    await page.click("#guideCloseBtn").catch(() => {});
-    await page.setInputFiles("#videoFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
-
+    await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
     await page.click("#makeVideoBtn");
 
@@ -309,17 +362,11 @@ async function main() {
     const pageErrors = [];
     page.on("pageerror", (e) => pageErrors.push(e.message));
 
-    // どのGitHub APIも一切呼ばれないはず（呼ばれたらテスト失敗として検出する）
     let calledUnexpectedly = false;
     await page.route("https://api.github.com/**", (route) => { calledUnexpectedly = true; route.abort(); });
-    await page.route("https://uploads.github.com/**", (route) => { calledUnexpectedly = true; route.abort(); });
 
-    await page.goto(BASE_URL, { waitUntil: "load" });
-    await page.click("#guideCloseBtn").catch(() => {});
-    await page.setInputFiles("#videoFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+    await loadVideoAndOpenSettings(page, videoPath);
 
-    // ユーザー名・トークンを空のまま押す
     await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
     await page.fill("#ghUserInput", "");
     await page.fill("#ghTokenInput", "");
@@ -334,6 +381,43 @@ async function main() {
     check(statusText.indexOf("設定") >= 0, "エラーメッセージが設定不足を示す: " + statusText);
     check(settingsOpen === true, "GitHub連携の設定パネルが自動的に開く");
     check(calledUnexpectedly === false, "設定未入力の場合、GitHub APIへは一切通信しない");
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ4: 動画が100MBを超える場合は通信せず中断する ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    let calledUnexpectedly = false;
+    await page.route("https://api.github.com/**", (route) => { calledUnexpectedly = true; route.abort(); });
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+
+    // 実ファイルを100MB超に差し替える代わりに、読み込み済みFileの.sizeだけを偽装する
+    // （exceedsBlobLimitはFileを読む前にsizeプロパティだけを見て中断するため、これで十分再現できる）
+    await page.evaluate(() => {
+      Object.defineProperty(appState.videoFile, "size", { value: 200 * 1024 * 1024, configurable: true });
+    });
+
+    await page.click("#makeVideoBtn");
+    await page.waitForTimeout(300);
+
+    const statusText = await page.evaluate(() => document.getElementById("jobStatusLine").textContent);
+    const statusClass = await page.evaluate(() => document.getElementById("jobStatusLine").className);
+    const btnDisabled = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
+
+    check(statusClass.indexOf("err") >= 0, "100MB超の動画でタップするとエラー表示になる");
+    check(statusText.indexOf("大きすぎます") >= 0 && statusText.indexOf("100MB") >= 0,
+      "エラーメッセージが上限(100MB)を示す: " + statusText);
+    check(calledUnexpectedly === false, "100MB超の場合、GitHub APIへは一切通信しない（変換すら始めない）");
+    check(btnDisabled === false, "中断後、ボタンが押せる状態のまま（処理中で固まらない）");
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
     await context.close();

@@ -740,16 +740,15 @@ function videoAssetName(originalFileName) {
   return "video." + ext;
 }
 
-/** ファイル名から素朴にContent-Typeを推定する（アップロード時のヘッダー用） */
-function guessContentType(fileName) {
-  var m = /\.([A-Za-z0-9]+)$/.exec(fileName || "");
-  var ext = m ? m[1].toLowerCase() : "";
-  var table = {
-    mp4: "video/mp4", m4v: "video/x-m4v", mov: "video/quicktime",
-    webm: "video/webm", mkv: "video/x-matroska", avi: "video/x-msvideo",
-    json: "application/json"
-  };
-  return table[ext] || "application/octet-stream";
+/**
+ * Git Data API（blobs）が1ファイルあたり受け付ける上限バイト数。
+ * これを超える動画はアップロード前に中断し、大きすぎる旨をユーザーに表示する。
+ */
+var MAX_BLOB_BYTES = 100 * 1024 * 1024;
+
+/** ファイルサイズがGit Data APIのblob上限を超えているか */
+function exceedsBlobLimit(sizeBytes) {
+  return (sizeBytes || 0) > MAX_BLOB_BYTES;
 }
 
 /** GitHub Release作成APIに送るボディを組み立てる */
@@ -768,14 +767,32 @@ function buildDispatchPayload(ref, tag) {
   return { ref: ref, inputs: { tag: tag } };
 }
 
+/** Git Data API の blob 作成に送るボディを組み立てる（contentは生のbase64文字列、data:プレフィックス無し） */
+function buildBlobPayload(base64Content) {
+  return { content: base64Content, encoding: "base64" };
+}
+
 /**
- * Release作成レスポンスの upload_url（RFC6570テンプレート、例:
- * "https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}"）から、
- * 指定アセット名でアップロードする実URLを組み立てる。
+ * Git Data API の tree 作成に送るボディを組み立てる。
+ * entries: [{path, sha}, ...]（modeは常に通常ファイル100644、typeはblob固定）
  */
-function buildUploadUrl(uploadUrlTemplate, assetName) {
-  var base = String(uploadUrlTemplate || "").replace(/\{[^}]*\}$/, "");
-  return base + "?name=" + encodeURIComponent(assetName);
+function buildGitTreePayload(baseTreeSha, entries) {
+  return {
+    base_tree: baseTreeSha,
+    tree: (entries || []).map(function (e) {
+      return { path: e.path, mode: "100644", type: "blob", sha: e.sha };
+    })
+  };
+}
+
+/** Git Data API の commit 作成に送るボディを組み立てる */
+function buildGitCommitPayload(message, treeSha, parentSha) {
+  return { message: message, tree: treeSha, parents: [parentSha] };
+}
+
+/** Git Data API の ref（ブランチ）作成に送るボディを組み立てる */
+function buildGitRefPayload(branchName, commitSha) {
+  return { ref: "refs/heads/" + branchName, sha: commitSha };
 }
 
 /**
@@ -829,10 +846,14 @@ if (typeof module !== "undefined" && module.exports) {
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
     videoAssetName: videoAssetName,
-    guessContentType: guessContentType,
+    MAX_BLOB_BYTES: MAX_BLOB_BYTES,
+    exceedsBlobLimit: exceedsBlobLimit,
     buildReleasePayload: buildReleasePayload,
     buildDispatchPayload: buildDispatchPayload,
-    buildUploadUrl: buildUploadUrl,
+    buildBlobPayload: buildBlobPayload,
+    buildGitTreePayload: buildGitTreePayload,
+    buildGitCommitPayload: buildGitCommitPayload,
+    buildGitRefPayload: buildGitRefPayload,
     findMatchingRun: findMatchingRun,
     interpretRunStatus: interpretRunStatus,
     findReleaseAsset: findReleaseAsset
@@ -2115,18 +2136,77 @@ function ghGetRun(user, repo, token, runId) {
 }
 
 /**
- * upload_url テンプレート（RFC6570）へ、XHRでアセットをアップロードする。
- * 進捗表示（upload.onprogress）と大きな動画ファイルの送信のため、fetchではなくXHRを使う
- * （iOS Safariはfetchのアップロードストリーミング/進捗サポートが弱いため）。
+ * uploads.github.com へのブラウザからの直接アップロードはCORSで拒否される（実機で確認済み）ため、
+ * 動画・project.jsonは Git Data API（blob → tree → commit → ref）で spotlight-jobs 自体の
+ * ブランチにコミットする。api.github.com はCORSに対応しているため、こちらは通る。
  */
-function ghUploadAsset(uploadUrlTemplate, token, name, blob, contentType, onProgress) {
-  var url = buildUploadUrl(uploadUrlTemplate, name);
+function ghGetRef(user, repo, token, ref) {
+  return ghFetchJson(ghApiBase(user, repo) + "/git/ref/" + ref, token, {});
+}
+
+function ghGetCommit(user, repo, token, sha) {
+  return ghFetchJson(ghApiBase(user, repo) + "/git/commits/" + sha, token, {});
+}
+
+function ghCreateTree(user, repo, token, baseTreeSha, entries) {
+  return ghFetchJson(ghApiBase(user, repo) + "/git/trees", token, {
+    method: "POST",
+    body: JSON.stringify(buildGitTreePayload(baseTreeSha, entries))
+  });
+}
+
+function ghCreateCommit(user, repo, token, message, treeSha, parentSha) {
+  return ghFetchJson(ghApiBase(user, repo) + "/git/commits", token, {
+    method: "POST",
+    body: JSON.stringify(buildGitCommitPayload(message, treeSha, parentSha))
+  });
+}
+
+function ghCreateBranchRef(user, repo, token, branchName, commitSha) {
+  return ghFetchJson(ghApiBase(user, repo) + "/git/refs", token, {
+    method: "POST",
+    body: JSON.stringify(buildGitRefPayload(branchName, commitSha))
+  });
+}
+
+/**
+ * ファイル（Blob/File）を、data:プレフィックスを除いた生のbase64文字列に変換する。
+ * FileReader.readAsDataURL はブラウザネイティブで非同期・大きなファイルでも安全に動く
+ * （手動でbtoa(String.fromCharCode(...))すると大きな動画でスタック/メモリを壊しうるため避ける）。
+ */
+function blobToBase64(blob, onProgress) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onprogress = function (e) {
+      if (!onProgress || !e.lengthComputable) return;
+      onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    reader.onload = function () {
+      var result = String(reader.result || "");
+      var idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = function () {
+      reject(new Error("ファイルの読み込みに失敗しました"));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Git Data API へ、base64化済みのファイル内容をblobとして送る。
+ * 動画は最大100MB（≒base64化後133MB程度）になりうる単一の大きなJSON POSTのため、
+ * fetchではなくXHRを使い upload.onprogress で進捗を表示する。
+ */
+function ghCreateBlob(user, repo, token, base64Content, onProgress) {
+  var url = ghApiBase(user, repo) + "/git/blobs";
+  var body = JSON.stringify(buildBlobPayload(base64Content));
   return new Promise(function (resolve, reject) {
     var xhr = new XMLHttpRequest();
     xhr.open("POST", url, true);
     xhr.setRequestHeader("Authorization", "Bearer " + token);
     xhr.setRequestHeader("Accept", "application/vnd.github+json");
-    xhr.setRequestHeader("Content-Type", contentType || "application/octet-stream");
+    xhr.setRequestHeader("Content-Type", "application/json");
     xhr.upload.onprogress = function (e) {
       if (!onProgress || !e.lengthComputable) return;
       onProgress(Math.round((e.loaded / e.total) * 100));
@@ -2134,7 +2214,8 @@ function ghUploadAsset(uploadUrlTemplate, token, name, blob, contentType, onProg
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         if (onProgress) onProgress(100);
-        resolve();
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { reject(new Error("アップロード結果の解析に失敗しました")); }
         return;
       }
       var detail = xhr.responseText || ("HTTP " + xhr.status);
@@ -2142,12 +2223,12 @@ function ghUploadAsset(uploadUrlTemplate, token, name, blob, contentType, onProg
         var parsed = JSON.parse(xhr.responseText);
         if (parsed && parsed.message) detail = parsed.message;
       } catch (e) { /* JSON以外の応答 */ }
-      reject(new Error("アセット「" + name + "」のアップロードに失敗しました (" + xhr.status + "): " + detail));
+      reject(new Error("ファイルのアップロードに失敗しました (" + xhr.status + "): " + detail));
     };
     xhr.onerror = function () {
-      reject(new Error("アセット「" + name + "」のアップロード中に通信エラーが発生しました（ネットワーク接続を確認してください）"));
+      reject(new Error("ファイルのアップロード中に通信エラーが発生しました（ネットワーク接続を確認してください）"));
     };
-    xhr.send(blob);
+    xhr.send(body);
   });
 }
 
@@ -2225,6 +2306,12 @@ function startMakeVideoJob() {
     return;
   }
 
+  var videoFile = appState.videoFile;
+  if (exceedsBlobLimit(videoFile.size)) {
+    showJobError("動画が大きすぎます（上限100MB）。短くするか解像度を下げてください");
+    return;
+  }
+
   var user = els.ghUserInput.value.trim();
   var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
   var token = els.ghTokenInput.value.trim();
@@ -2236,38 +2323,69 @@ function startMakeVideoJob() {
   persistGhSettings(user, repo, token);
 
   var tag = makeJobTag(new Date());
-  var videoFile = appState.videoFile;
+  var videoName = videoAssetName(videoFile.name);
   var jsonBlob = new Blob([currentProjectJSONText()], { type: "application/json" });
-  var releaseInfo = null;
+  var baseCommitSha = null;
+  var jsonBlobSha = null;
+  var videoBlobSha = null;
 
   setJobButtonBusy(true);
   showJobProgress(2, "リリースを作成中…");
 
   ghCreateRelease(user, repo, token, tag)
-    .then(function (release) {
-      releaseInfo = release;
-      showJobProgress(8, "project.json をアップロード中…");
-      return ghUploadAsset(release.upload_url, token, "project.json", jsonBlob, "application/json", function (pct) {
-        showJobProgress(8 + pct * 0.12, "project.json をアップロード中… " + pct + "%");
+    .then(function () {
+      showJobProgress(5, "コミット先ブランチの情報を取得中…");
+      return ghGetRef(user, repo, token, "heads/main");
+    })
+    .then(function (refInfo) {
+      baseCommitSha = refInfo.object.sha;
+      showJobProgress(8, "project.json をBase64に変換中…");
+      return blobToBase64(jsonBlob);
+    })
+    .then(function (jsonBase64) {
+      showJobProgress(10, "project.json をコミット準備中…");
+      return ghCreateBlob(user, repo, token, jsonBase64);
+    })
+    .then(function (blob) {
+      jsonBlobSha = blob.sha;
+      showJobProgress(14, "動画をBase64に変換中… 0%");
+      return blobToBase64(videoFile, function (pct) {
+        showJobProgress(14 + pct * 0.36, "動画をBase64に変換中… " + pct + "%");
       });
     })
-    .then(function () {
-      var videoName = videoAssetName(videoFile.name);
-      showJobProgress(20, "動画をアップロード中… 0%");
-      return ghUploadAsset(releaseInfo.upload_url, token, videoName, videoFile, guessContentType(videoName), function (pct) {
-        showJobProgress(20 + pct * 0.6, "動画をアップロード中… " + pct + "%");
+    .then(function (videoBase64) {
+      showJobProgress(50, "動画をアップロード中… 0%");
+      return ghCreateBlob(user, repo, token, videoBase64, function (pct) {
+        showJobProgress(50 + pct * 0.35, "動画をアップロード中… " + pct + "%");
       });
     })
+    .then(function (blob) {
+      videoBlobSha = blob.sha;
+      showJobProgress(86, "コミットを作成中…");
+      return ghGetCommit(user, repo, token, baseCommitSha);
+    })
+    .then(function (baseCommit) {
+      return ghCreateTree(user, repo, token, baseCommit.tree.sha, [
+        { path: "project.json", sha: jsonBlobSha },
+        { path: videoName, sha: videoBlobSha }
+      ]);
+    })
+    .then(function (tree) {
+      return ghCreateCommit(user, repo, token, "spotlight-reel editor: " + tag, tree.sha, baseCommitSha);
+    })
+    .then(function (commit) {
+      return ghCreateBranchRef(user, repo, token, tag, commit.sha);
+    })
     .then(function () {
-      showJobProgress(82, "レンダリングを開始しています…");
+      showJobProgress(90, "レンダリングを開始しています…");
       return ghDispatchWorkflow(user, repo, token, tag);
     })
     .then(function () {
-      showJobProgress(85, "実行を確認しています…");
+      showJobProgress(92, "実行を確認しています…");
       return pollForRun(user, repo, token, tag);
     })
     .then(function (run) {
-      showJobProgress(90, "レンダリング中…しばらくお待ちください");
+      showJobProgress(94, "レンダリング中…しばらくお待ちください");
       return pollRunUntilDone(user, repo, token, run.id);
     })
     .then(function (finalRun) {

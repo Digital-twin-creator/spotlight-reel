@@ -32,7 +32,8 @@ spotlight-reel/
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
-│   └── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
+│   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
+│   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
 └── README.md
 ```
@@ -79,20 +80,27 @@ spotlight-reel/
   Fine-grained PAT（**Contents: Read and write** / **Actions: Read and write**）。
   発行手順は [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)
   に記載しています。トークンはこの端末の `localStorage` にのみ保存され、
-  `api.github.com` / `uploads.github.com` 以外には送信されません（画面上はマスク表示、
+  `api.github.com` 以外には送信されません（画面上はマスク表示、
   👁ボタンで表示切り替え可能）。
 
 保存後は、動画を選んでフリーズを編集したあと「🎬 動画を作る」を押すだけです。内部では、
 
-1. 動画・`project.json` を `spotlight-jobs` の新しいRelease（タグ `job-YYYYMMDD-HHMMSS`）に
-   アセットとしてアップロードする（大きな動画でも進捗％が表示されます）。
-2. `spotlight-jobs` の GitHub Actions ワークフロー（`render.yml`）を起動する。
-3. ワークフローの完了をポーリングで待つ（ページを閉じずにお待ちください）。
-4. 成功したら、同じReleaseに追加された `output.mp4` を確認し、Releaseページを開くボタンを表示する
+1. 動画・`project.json` を、`spotlight-jobs` の一時ブランチ（`job-YYYYMMDD-HHMMSS`）に
+   Git Data API（`api.github.com`）経由でコミットする（大きな動画でも進捗％が表示されます）。
+   **動画は1本100MBまで**です。超える場合はアップロード前にエラーを表示して中断します
+   （実機で `uploads.github.com` へのブラウザからの直接アップロードがCORSで拒否されることが
+   判明したため、この方式にしています）。
+2. `spotlight-jobs` に空のReleaseを作成する（タグは同じ `job-YYYYMMDD-HHMMSS`）。
+3. `spotlight-jobs` の GitHub Actions ワークフロー（`render.yml`）を起動する。
+   ワークフロー側は先のブランチをcheckoutしてrender.pyを実行し、`output.mp4` を
+   同じReleaseにアップロード（Actions側からのアップロードなのでCORSの影響を受けません）、
+   最後に一時ブランチを削除する。
+4. ワークフローの完了をポーリングで待つ（ページを閉じずにお待ちください）。
+5. 成功したら、Releaseに追加された `output.mp4` を確認し、Releaseページを開くボタンを表示する
    （ダウンロードはGitHub自身のページから行うため、その端末のブラウザで **GitHubにログインしている必要があります**）。
-5. 失敗した場合は、画面にエラー内容を表示します（GitHub Actionsのログ・ジョブサマリーも参照できます）。
+6. 失敗した場合は、画面にエラー内容を表示します（GitHub Actionsのログ・ジョブサマリーも参照できます）。
 
-処理済みのRelease（動画・JSON・出力）は `spotlight-jobs` 側で7日後に自動削除されます。
+処理済みのRelease（出力動画）は `spotlight-jobs` 側で7日後に自動削除されます。
 
 ### 動画が再生・シークできないときは（diag.html）
 
@@ -229,6 +237,9 @@ node tests/player_ui.playwright.test.mjs
 node tests/freeze_black_screen.playwright.test.mjs
 node tests/resize_scroll_black_screen.playwright.test.mjs
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
+
+# 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）
+SPOTLIGHT_LIVE_PAT=github_pat_xxxx node tests/make_video_job_live_cors.playwright.test.mjs
 ```
 
 ## GitHub Pages の有効化
@@ -245,6 +256,10 @@ node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタン
 
 - スマホ用エディタ（`index.html`）の実機（iPhone Safari / Android Chrome）での最終確認
 - エディタから書き出したJSONを使った、より長い実動画でのレンダリング確認
-- 「動画を作る」ボタンの実機・実GitHub環境での確認
-  （`uploads.github.com` へのブラウザからのアップロードがCORS的に問題なく通るかは、
-  現時点ではモックテストのみで確認済みで、実環境での確認がまだ済んでいません）
+- 「動画を作る」ボタンの、実トークンを使ったブラウザからの `api.github.com` 呼び出し
+  （Git Data API でのblob作成含む）がCORS的に問題なく通ることの実機確認。
+  新方式（`job-<tag>` ブランチへのコミット）自体は git 経由でエンドツーエンドの
+  動作確認済み（ブランチコミット→render.yml起動→output.mp4のRelease追加→ブランチ自動削除）
+  だが、それはブラウザのfetch/XHRを経由した確認ではないため、実機での最終確認が必要。
+  モック無しの検証用テスト（`tests/make_video_job_live_cors.playwright.test.mjs`、
+  実トークンを環境変数 `SPOTLIGHT_LIVE_PAT` で渡して実行）を用意済み。
