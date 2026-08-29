@@ -5,10 +5,14 @@
 // api.github.com への実際の通信をモックした状態で検証する回帰テスト。
 // 実際のGitHubには一切アクセスしない（Release作成・Git Data APIでのブランチコミット
 // （blob→tree→commit→ref）・workflow_dispatch・runのポーリング・成功時のReleaseページ
-// リンク表示・失敗時のエラー表示・100MB超過時の中断、を全てモックで再現する）。
+// リンク表示・失敗時のエラー表示・100MB超過時の中断・GitHub連携設定の保存表示・
+// runが自動確認できなかった場合の案内表示、を全てモックで再現する）。
 //
 // uploads.github.com は使わない（実機検証でCORS拒否されることが判明したため、
 // project.json/動画は Git Data API 経由でリポジトリのブランチにコミットする方式に変更した）。
+//
+// 注意: シナリオ6は「workflow_dispatch後、runが90秒間見つからない」ケースを
+// 実際に90秒待って検証するため、このファイル全体の実行に2分半程度かかる。
 //
 // 実行方法:
 //   npm install --no-save playwright-core
@@ -418,6 +422,95 @@ async function main() {
       "エラーメッセージが上限(100MB)を示す: " + statusText);
     check(calledUnexpectedly === false, "100MB超の場合、GitHub APIへは一切通信しない（変換すら始めない）");
     check(btnDisabled === false, "中断後、ボタンが押せる状態のまま（処理中で固まらない）");
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ5: GitHub連携設定の「保存済み」表示 ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
+
+    const initialStatus = await page.evaluate(() => document.getElementById("ghSettingsStatus").textContent);
+    check(initialStatus.indexOf("未設定") >= 0, "未保存の初期状態では「未設定」と表示される: " + initialStatus);
+
+    await page.fill("#ghUserInput", OWNER);
+    await page.fill("#ghRepoInput", REPO);
+    await page.fill("#ghTokenInput", TOKEN);
+    await page.click("#ghSettingsSaveBtn");
+
+    const savedStatus = await page.evaluate(() => document.getElementById("ghSettingsStatus").textContent);
+    check(savedStatus.indexOf("保存済み") >= 0 && savedStatus.indexOf(TOKEN.slice(-4)) >= 0,
+      "保存後は「保存済み（トークン末尾 …xxxx）」の形式で表示される（トークン本体は表示しない）: " + savedStatus);
+    check(savedStatus.indexOf(TOKEN) < 0, "トークン全体は画面のテキストに現れない: " + savedStatus);
+
+    // リロード後もlocalStorageから復元され、保存済み状態・入力値ともに保持される
+    await page.reload({ waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
+
+    const reloadedUser = await page.inputValue("#ghUserInput");
+    const reloadedRepo = await page.inputValue("#ghRepoInput");
+    const reloadedStatus = await page.evaluate(() => document.getElementById("ghSettingsStatus").textContent);
+
+    check(reloadedUser === OWNER, "リロード後もユーザー名が保存値のまま表示される: " + reloadedUser);
+    check(reloadedRepo === REPO, "リロード後もリポジトリ名が保存値のまま表示される: " + reloadedRepo);
+    check(reloadedStatus.indexOf("保存済み") >= 0 && reloadedStatus.indexOf(TOKEN.slice(-4)) >= 0,
+      "リロード後も「保存済み」表示が復元される（再入力なしで分かる）: " + reloadedStatus);
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ6: 90秒待ってもrunが見つからない場合、エラーにせずGitHub側の確認リンクを出す ===");
+  console.log("（このシナリオは実際に90秒以上待つため、他のシナリオより時間がかかります）");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    const mock = makeMock({
+      runId: 555003,
+      matchRunAfterCalls: 999, // 19回のポーリング（最低90秒）の間、一度も一致させない
+    });
+    await routeApiGithub(page, mock);
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+    await page.click("#makeVideoBtn");
+
+    // 90秒のポーリングが終わり、情報表示（エラーではない）に切り替わるまで待つ
+    await page.waitForFunction(
+      () => document.getElementById("jobStatusLine").textContent.indexOf("自動確認できませんでした") >= 0,
+      null, { timeout: 2 * 60 * 1000 }
+    );
+
+    const statusText = await page.evaluate(() => document.getElementById("jobStatusLine").textContent);
+    const statusClass = await page.evaluate(() => document.getElementById("jobStatusLine").className);
+    const actionsLinkHidden = await page.evaluate(() => document.getElementById("jobActionsLink").hidden);
+    const actionsLinkHref = await page.getAttribute("#jobActionsLink", "href");
+    const resultLinkHidden = await page.evaluate(() => document.getElementById("jobResultLink").hidden);
+    const resultLinkHref = await page.getAttribute("#jobResultLink", "href");
+    const btnDisabled = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
+
+    check(statusClass.indexOf("err") < 0, "runが見つからなくてもエラー(err)扱いにはならない: " + statusClass);
+    check(statusText.indexOf("自動確認できませんでした") >= 0, "自動確認できなかった旨のメッセージが表示される: " + statusText);
+    check(!actionsLinkHidden && actionsLinkHref && actionsLinkHref.indexOf("/actions/workflows/render.yml") >= 0,
+      "Actionsページへのリンクが表示される: " + actionsLinkHref);
+    check(!resultLinkHidden && resultLinkHref && resultLinkHref.indexOf(`/${OWNER}/${REPO}/releases/tag/`) >= 0,
+      "（事前に作成済みの）Releaseページへのリンクも表示される: " + resultLinkHref);
+    check(btnDisabled === false, "自動確認できなかった後も、ボタンが再度押せる状態に戻る");
+    check(mock.listRunsCalls >= 19, "run一覧を最低19回（90秒相当）ポーリングしてから諦める: " + mock.listRunsCalls + "回");
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
     await context.close();

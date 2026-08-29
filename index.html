@@ -220,7 +220,9 @@
     display:inline-flex; align-items:center; justify-content:center;
     min-height:44px; border-radius:10px; background:var(--ok); color:#04241a;
     font-size:14px; font-weight:700; text-decoration:none; padding:10px 14px;
+    margin-top:6px;
   }
+  a.link-btn.ghost{background:transparent; border:1px solid var(--line); color:var(--text);}
 </style>
 </head>
 <body>
@@ -429,6 +431,7 @@
         <div class="progress-track"><div class="progress-fill" id="jobProgressFill"></div></div>
       </div>
       <div class="job-status-line" id="jobStatusLine"></div>
+      <a class="link-btn ghost" id="jobActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで実行状況を確認</a>
       <a class="link-btn" id="jobResultLink" href="#" target="_blank" rel="noopener" hidden>✅ Releaseページを開いて保存</a>
     </div>
   </section>
@@ -825,6 +828,18 @@ function findReleaseAsset(assets, name) {
   return (assets || []).filter(function (a) { return a && a.name === name; })[0] || null;
 }
 
+/**
+ * GitHub連携設定の「保存済み」状態を、トークンを画面に出さずに表示するための文言を作る。
+ * トークン本体は表示せず、末尾4文字だけを見せる（本人が「合っているトークンを
+ * 保存できているか」を確認できる程度の情報に留める）。
+ */
+function maskTokenStatus(token) {
+  var t = (token || "").trim();
+  if (!t) return "未設定です。トークンを入力して保存してください。";
+  var tail = t.length >= 4 ? t.slice(-4) : t;
+  return "保存済み（トークン末尾 …" + tail + "）";
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DEFAULT_STYLE: DEFAULT_STYLE,
@@ -856,7 +871,8 @@ if (typeof module !== "undefined" && module.exports) {
     buildGitRefPayload: buildGitRefPayload,
     findMatchingRun: findMatchingRun,
     interpretRunStatus: interpretRunStatus,
-    findReleaseAsset: findReleaseAsset
+    findReleaseAsset: findReleaseAsset,
+    maskTokenStatus: maskTokenStatus
   };
 }
 </script>
@@ -913,7 +929,7 @@ function init() {
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
     "ghSettingsSaveBtn", "ghSettingsStatus",
-    "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobResultLink"
+    "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobActionsLink", "jobResultLink"
   ].forEach(function (id) { els[id] = $(id); });
 
   wireGlobalErrorHandling();
@@ -2049,6 +2065,7 @@ function loadGhSettings() {
   els.ghUserInput.value = (saved && saved.user) || "";
   els.ghRepoInput.value = (saved && saved.repo) || "spotlight-jobs";
   els.ghTokenInput.value = (saved && saved.token) || "";
+  updateGhSettingsStatusDisplay();
 }
 
 function persistGhSettings(user, repo, token) {
@@ -2057,13 +2074,18 @@ function persistGhSettings(user, repo, token) {
   } catch (e) { /* 保存できなくても処理自体は続行する */ }
 }
 
+function updateGhSettingsStatusDisplay() {
+  els.ghSettingsStatus.textContent = maskTokenStatus(els.ghTokenInput.value);
+}
+
 function saveGhSettingsFromInputs() {
   var user = els.ghUserInput.value.trim();
   var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
   var token = els.ghTokenInput.value.trim();
+  els.ghUserInput.value = user;
   els.ghRepoInput.value = repo;
   persistGhSettings(user, repo, token);
-  els.ghSettingsStatus.textContent = "設定を保存しました";
+  updateGhSettingsStatusDisplay();
 }
 
 function toggleGhTokenVisibility() {
@@ -2233,27 +2255,34 @@ function ghCreateBlob(user, repo, token, base64Content, onProgress) {
 }
 
 /** workflow_dispatch はrun idを返さないため、run一覧を数回ポーリングして自分のrunを見つける */
-function pollForRun(user, repo, token, tag) {
-  var maxAttempts = 15;
-  var intervalMs = 2000;
+/**
+ * workflow_dispatch はrun idを直接返さないため、run一覧を数回ポーリングして自分のrunを探す。
+ * GitHub側で新しいrunが一覧に反映されるまでには数十秒かかることがある（実機で30秒では
+ * 不足するケースを確認済み）ため、最低90秒（5秒間隔 x 19回）は待つ。
+ * それでも見つからない場合はエラーにはせず null を返す（GitHub側では実行されている
+ * 可能性が高いため、失敗扱いにしてしまうと誤解を招く）。
+ */
+function pollForRun(user, repo, token, tag, onAttempt) {
+  var maxAttempts = 19; // 5秒間隔 x 19 = 最低90秒待つ
+  var intervalMs = 5000;
   function attempt(n) {
+    if (onAttempt) onAttempt(n, maxAttempts);
     return ghListWorkflowRuns(user, repo, token).then(function (runs) {
       var match = findMatchingRun(runs, tag);
       if (match) return match;
-      if (n >= maxAttempts) {
-        throw new Error("ワークフローの実行が見つかりませんでした（GitHub Actions側の反映が遅れている可能性があります。少し時間をおいて再度お試しください）");
-      }
+      if (n >= maxAttempts) return null;
       return wait(intervalMs).then(function () { return attempt(n + 1); });
     });
   }
   return attempt(1);
 }
 
-/** run が completed になるまでポーリングする（レンダリングには数分かかりうる） */
-function pollRunUntilDone(user, repo, token, runId) {
-  var maxAttempts = 180; // 5秒間隔 x 180 = 最大15分待つ
+/** run が completed になるまでポーリングする（レンダリングには数分かかりうるため最大30分待つ） */
+function pollRunUntilDone(user, repo, token, runId, onAttempt) {
+  var maxAttempts = 360; // 5秒間隔 x 360 = 最大30分待つ
   var intervalMs = 5000;
   function attempt(n) {
+    if (onAttempt) onAttempt(n, maxAttempts);
     return ghGetRun(user, repo, token, runId).then(function (run) {
       var status = interpretRunStatus(run);
       if (status !== "pending") return run;
@@ -2271,6 +2300,7 @@ function setJobButtonBusy(busy) {
   els.makeVideoBtn.textContent = busy ? "⏳ 処理中…" : "🎬 動画を作る";
   els.jobProgressWrap.hidden = !busy;
   if (busy) {
+    els.jobActionsLink.hidden = true;
     els.jobResultLink.hidden = true;
     els.jobStatusLine.className = "job-status-line";
   }
@@ -2293,10 +2323,22 @@ function showJobSuccess(msg) {
   els.jobStatusLine.textContent = msg;
 }
 
+/** エラーでも成功でもない、GitHub側で直接確認してほしい旨の中立な状態を表示する */
+function showJobInfo(msg) {
+  els.jobStatusLine.className = "job-status-line";
+  els.jobStatusLine.textContent = msg;
+}
+
 function showJobResultLink(url) {
   if (!url) return;
   els.jobResultLink.href = url;
   els.jobResultLink.hidden = false;
+}
+
+function showJobActionsLink(url) {
+  if (!url) return;
+  els.jobActionsLink.href = url;
+  els.jobActionsLink.hidden = false;
 }
 
 function startMakeVideoJob() {
@@ -2328,12 +2370,14 @@ function startMakeVideoJob() {
   var baseCommitSha = null;
   var jsonBlobSha = null;
   var videoBlobSha = null;
+  var releaseInfo = null;
 
   setJobButtonBusy(true);
   showJobProgress(2, "リリースを作成中…");
 
   ghCreateRelease(user, repo, token, tag)
-    .then(function () {
+    .then(function (release) {
+      releaseInfo = release;
       showJobProgress(5, "コミット先ブランチの情報を取得中…");
       return ghGetRef(user, repo, token, "heads/main");
     })
@@ -2381,23 +2425,42 @@ function startMakeVideoJob() {
       return ghDispatchWorkflow(user, repo, token, tag);
     })
     .then(function () {
-      showJobProgress(92, "実行を確認しています…");
-      return pollForRun(user, repo, token, tag);
+      showJobProgress(90, "起動を待っています…");
+      return pollForRun(user, repo, token, tag, function (n, max) {
+        showJobProgress(90 + (n / max) * 5, "起動を待っています…（" + n + "/" + max + "）");
+      });
     })
     .then(function (run) {
-      showJobProgress(94, "レンダリング中…しばらくお待ちください");
-      return pollRunUntilDone(user, repo, token, run.id);
+      if (!run) {
+        // 90秒待っても一覧に現れなかった。GitHub側では実行されている可能性が高いため、
+        // 失敗扱いにはせず、本人がGitHub側で直接確認できるようリンクを案内する。
+        var actionsUrl = "https://github.com/" + user + "/" + repo + "/actions/workflows/render.yml";
+        showJobInfo(
+          "ワークフローの起動を自動確認できませんでした。GitHub Actions側では実行されている" +
+          "可能性があります。下のリンクから直接ご確認ください。"
+        );
+        showJobActionsLink(actionsUrl);
+        if (releaseInfo) showJobResultLink(releaseInfo.html_url);
+        return null;
+      }
+      showJobProgress(95, "レンダリング中…しばらくお待ちください");
+      return pollRunUntilDone(user, repo, token, run.id, function (n, max) {
+        var elapsedMin = Math.round((n * 5 / 60) * 10) / 10;
+        showJobProgress(95 + (n / max) * 4, "レンダリング中…（経過約" + elapsedMin + "分）しばらくお待ちください");
+      });
     })
     .then(function (finalRun) {
+      if (!finalRun) return; // 前段で「起動未確認」として案内済み
       var status = interpretRunStatus(finalRun);
       if (status !== "success") {
         var logsUrl = finalRun.html_url || ("https://github.com/" + user + "/" + repo + "/actions");
         throw new Error("レンダリングに失敗しました。ログを確認してください: " + logsUrl);
       }
-      showJobProgress(97, "完成を確認しています…");
+      showJobProgress(99, "完成を確認しています…");
       return ghGetReleaseByTag(user, repo, token, tag);
     })
     .then(function (rel) {
+      if (!rel) return; // 前段で早期終了済み
       var asset = findReleaseAsset(rel.assets, "output.mp4");
       showJobProgress(100, "完了");
       if (!asset) {

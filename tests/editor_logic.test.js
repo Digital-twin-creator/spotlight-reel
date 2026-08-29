@@ -404,6 +404,19 @@ test("findReleaseAsset: 一致が無ければnull", () => {
   assert.strictEqual(core.findReleaseAsset([], "b"), null);
 });
 
+/* ---- maskTokenStatus ---- */
+test("maskTokenStatus: トークンが無ければ未設定メッセージ", () => {
+  assert.strictEqual(core.maskTokenStatus(""), "未設定です。トークンを入力して保存してください。");
+  assert.strictEqual(core.maskTokenStatus(null), "未設定です。トークンを入力して保存してください。");
+  assert.strictEqual(core.maskTokenStatus("   "), "未設定です。トークンを入力して保存してください。");
+});
+test("maskTokenStatus: トークンがあれば末尾4文字だけを表示する", () => {
+  assert.strictEqual(core.maskTokenStatus("github_pat_abcdEFGH1234"), "保存済み（トークン末尾 …1234）");
+});
+test("maskTokenStatus: 4文字未満のトークンはそのまま表示する", () => {
+  assert.strictEqual(core.maskTokenStatus("ab"), "保存済み（トークン末尾 …ab）");
+});
+
 /* ---- まとめ ---- */
 console.log("");
 console.log(passed + " 件成功 / " + failures + " 件失敗");

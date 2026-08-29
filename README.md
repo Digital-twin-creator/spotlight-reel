@@ -81,7 +81,9 @@ spotlight-reel/
   発行手順は [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)
   に記載しています。トークンはこの端末の `localStorage` にのみ保存され、
   `api.github.com` 以外には送信されません（画面上はマスク表示、
-  👁ボタンで表示切り替え可能）。
+  👁ボタンで表示切り替え可能）。保存済みのときは設定欄に
+  「保存済み（トークン末尾 …xxxx）」と表示され、再入力しなくても保存されているかが分かります
+  （ユーザー名・リポジトリ名は保存した値がそのまま入力欄に残ります）。
 
 保存後は、動画を選んでフリーズを編集したあと「🎬 動画を作る」を押すだけです。内部では、
 
@@ -95,10 +97,15 @@ spotlight-reel/
    ワークフロー側は先のブランチをcheckoutしてrender.pyを実行し、`output.mp4` を
    同じReleaseにアップロード（Actions側からのアップロードなのでCORSの影響を受けません）、
    最後に一時ブランチを削除する。
-4. ワークフローの完了をポーリングで待つ（ページを閉じずにお待ちください）。
-5. 成功したら、Releaseに追加された `output.mp4` を確認し、Releaseページを開くボタンを表示する
+4. 起動したワークフローの実行がGitHub Actions側の一覧に現れるまで、最低90秒はポーリングで
+   待つ（「起動を待っています…」と表示）。GitHub側の反映が遅く90秒待っても見つからない場合でも
+   **失敗扱いにはしません**。「自動確認できませんでした」という案内と、GitHubの
+   Actionsページ・Releaseページを直接開くリンクを表示して終わります（実際にはGitHub側で
+   実行・成功していることがあります）。
+5. runが見つかった場合は、完了まで（最大30分）ポーリングで待つ（ページを閉じずにお待ちください）。
+6. 成功したら、Releaseに追加された `output.mp4` を確認し、Releaseページを開くボタンを表示する
    （ダウンロードはGitHub自身のページから行うため、その端末のブラウザで **GitHubにログインしている必要があります**）。
-6. 失敗した場合は、画面にエラー内容を表示します（GitHub Actionsのログ・ジョブサマリーも参照できます）。
+7. 失敗した場合は、画面にエラー内容を表示します（GitHub Actionsのログ・ジョブサマリーも参照できます）。
 
 処理済みのRelease（出力動画）は `spotlight-jobs` 側で7日後に自動削除されます。
 
@@ -256,10 +263,13 @@ SPOTLIGHT_LIVE_PAT=github_pat_xxxx node tests/make_video_job_live_cors.playwrigh
 
 - スマホ用エディタ（`index.html`）の実機（iPhone Safari / Android Chrome）での最終確認
 - エディタから書き出したJSONを使った、より長い実動画でのレンダリング確認
-- 「動画を作る」ボタンの、実トークンを使ったブラウザからの `api.github.com` 呼び出し
-  （Git Data API でのblob作成含む）がCORS的に問題なく通ることの実機確認。
-  新方式（`job-<tag>` ブランチへのコミット）自体は git 経由でエンドツーエンドの
-  動作確認済み（ブランチコミット→render.yml起動→output.mp4のRelease追加→ブランチ自動削除）
-  だが、それはブラウザのfetch/XHRを経由した確認ではないため、実機での最終確認が必要。
-  モック無しの検証用テスト（`tests/make_video_job_live_cors.playwright.test.mjs`、
-  実トークンを環境変数 `SPOTLIGHT_LIVE_PAT` で渡して実行）を用意済み。
+
+### 解決済み（実機確認まで完了）
+
+- 「動画を作る」ボタンの `api.github.com` 呼び出し（Git Data API でのblob作成含む）が
+  実機のブラウザからCORSで拒否されずに通ることを確認済み（実際に動画のアップロードと
+  ワークフローの起動・完了・`output.mp4` のRelease追加まで成功した実行を確認した）。
+- 一方で、workflow_dispatch後にGitHub Actions側の一覧に新しいrunが反映されるまで
+  数十秒かかることがあり、以前の30秒のポーリング上限では「実行が見つかりません」という
+  誤った失敗表示になっていた不具合を修正済み（最低90秒待つ・見つからなくても失敗扱いに
+  せずGitHub側の確認リンクを出す、という挙動に変更）。
