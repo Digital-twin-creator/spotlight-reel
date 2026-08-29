@@ -432,7 +432,7 @@
       </div>
       <div class="job-status-line" id="jobStatusLine"></div>
       <a class="link-btn ghost" id="jobActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで実行状況を確認</a>
-      <a class="link-btn" id="jobResultLink" href="#" target="_blank" rel="noopener" hidden>✅ Releaseページを開いて保存</a>
+      <a class="link-btn" id="jobResultLink" href="#" target="_blank" rel="noopener" hidden>💾 完成動画を保存</a>
     </div>
   </section>
 
@@ -2329,9 +2329,10 @@ function showJobInfo(msg) {
   els.jobStatusLine.textContent = msg;
 }
 
-function showJobResultLink(url) {
+function showJobResultLink(url, label) {
   if (!url) return;
   els.jobResultLink.href = url;
+  els.jobResultLink.textContent = label || "💾 完成動画を保存";
   els.jobResultLink.hidden = false;
 }
 
@@ -2440,7 +2441,7 @@ function startMakeVideoJob() {
           "可能性があります。下のリンクから直接ご確認ください。"
         );
         showJobActionsLink(actionsUrl);
-        if (releaseInfo) showJobResultLink(releaseInfo.html_url);
+        if (releaseInfo) showJobResultLink(releaseInfo.html_url, "📄 Releaseページを確認");
         return null;
       }
       showJobProgress(95, "レンダリング中…しばらくお待ちください");
@@ -2465,11 +2466,14 @@ function startMakeVideoJob() {
       showJobProgress(100, "完了");
       if (!asset) {
         showJobError("レンダリングは成功しましたが output.mp4 が見つかりませんでした。Releaseページを直接確認してください。");
-        showJobResultLink(rel.html_url);
+        showJobResultLink(rel.html_url, "📄 Releaseページを直接確認");
         return;
       }
-      showJobSuccess("完成しました！下のボタンからGitHubのReleaseページを開いて保存してください。");
-      showJobResultLink(rel.html_url);
+      // browser_download_url への直接ナビゲーション（新しいタブを開くだけ）はfetch/XHRではないため
+      // CORSの対象外。GitHubにログイン済みのブラウザなら、そのままoutput.mp4がダウンロードされる
+      // （Releaseページを経由してユーザー自身が探す必要がない）。
+      showJobSuccess("完成しました！下のボタンから完成動画を保存してください。");
+      showJobResultLink(asset.browser_download_url, "💾 完成動画を保存");
     })
     .catch(function (err) {
       showJobError("動画の作成に失敗しました: " + (err && err.message ? err.message : err));

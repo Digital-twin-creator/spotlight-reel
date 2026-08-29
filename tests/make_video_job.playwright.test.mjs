@@ -192,7 +192,12 @@ function makeGithubMockRouter(mock) {
     // GET /repos/{owner}/{repo}/releases/tags/{tag}  … 完成確認
     if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/tags/${mock.tag}`) {
       mock.getReleaseByTagCalls++;
-      const assets = mock.includeOutputAsset ? [{ name: "output.mp4", id: 999 }] : [];
+      const assets = mock.includeOutputAsset
+        ? [{
+            name: "output.mp4", id: 999,
+            browser_download_url: `https://github.com/${owner}/${repo}/releases/download/${mock.tag}/output.mp4`,
+          }]
+        : [];
       return json(200, {
         tag_name: mock.tag,
         html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
@@ -283,13 +288,15 @@ async function main() {
     );
 
     const resultHref = await page.getAttribute("#jobResultLink", "href");
+    const resultText = await page.evaluate(() => document.getElementById("jobResultLink").textContent);
     const statusText = await page.evaluate(() => document.getElementById("jobStatusLine").textContent);
     const statusClass = await page.evaluate(() => document.getElementById("jobStatusLine").className);
     const btnDisabled = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
     const btnText = await page.evaluate(() => document.getElementById("makeVideoBtn").textContent);
 
-    check(resultHref && resultHref.indexOf(`/${OWNER}/${REPO}/releases/tag/`) >= 0,
-      "完成後、Releaseページへのリンクが表示される: " + resultHref);
+    check(resultHref && resultHref.indexOf(`/${OWNER}/${REPO}/releases/download/`) >= 0 && resultHref.indexOf("output.mp4") >= 0,
+      "完成後、output.mp4への直接ダウンロードリンク（browser_download_url）が表示される（Releaseページ経由ではない）: " + resultHref);
+    check(resultText.indexOf("完成動画を保存") >= 0, "リンクのボタン文言が「完成動画を保存」になっている: " + resultText);
     check(statusClass.indexOf("ok") >= 0, "完了メッセージが成功(ok)スタイルで表示される");
     check(statusText.indexOf("完成") >= 0, "完了メッセージに「完成」の文言が含まれる: " + statusText);
     check(btnDisabled === false, "完了後、ボタンが再度有効になる");
