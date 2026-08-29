@@ -108,17 +108,21 @@
     position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
     opacity:0; pointer-events:none;
   }
-  #playerCanvas, #drawCanvas, #previewCanvas{
+  #playerCanvas, #drawCanvas, #telopCanvas, #previewCanvas{
     position:absolute; touch-action:none;
   }
   /* playerCanvas/previewCanvasは最初の描画までの一瞬を黒で埋める。
      drawCanvasは常にplayerCanvas（静止フレーム）の上に重ねる透明な
      ストローク入力用オーバーレイなので、不透明な背景を持たせてはいけない
-     （持たせると、実際のフレームが描けていても画面が真っ黒に見えてしまう）。 */
+     （持たせると、実際のフレームが描けていても画面が真っ黒に見えてしまう）。
+     telopCanvasは編集中だけ表示するテロップの仮表示（drawCanvasより上）。
+     タッチはdrawCanvas側で受けて位置判定するので、pointer-eventsは無効にする。 */
   #playerCanvas, #previewCanvas{ background:#000; }
   #playerCanvas{ z-index:1; }
-  #drawCanvas, #previewCanvas{ z-index:2; }
+  #drawCanvas, #previewCanvas, #telopCanvas{ z-index:2; }
+  #telopCanvas{ pointer-events:none; }
   .video-wrap:not(.editing) #drawCanvas{ display:none; }
+  .video-wrap:not(.editing) #telopCanvas{ display:none; }
   .video-wrap:not(.previewing) #previewCanvas{ display:none; }
 
   .draw-hint{
@@ -285,6 +289,7 @@
         <video id="video" playsinline muted></video>
         <canvas id="playerCanvas"></canvas>
         <canvas id="drawCanvas"></canvas>
+        <canvas id="telopCanvas"></canvas>
         <canvas id="previewCanvas"></canvas>
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
       </div>
@@ -338,6 +343,22 @@
       <div class="field">
         <label><span class="step-badge">⑤</span>名前テロップ</label>
         <input type="text" id="nameInput" placeholder="例：山田 太郎">
+        <div class="muted" id="titleDragHint" style="margin-top:4px;">映像に表示されたテロップを指でドラッグすると位置を変えられます</div>
+      </div>
+
+      <div class="row wrap">
+        <div class="field grow">
+          <label>テロップの大きさ <span class="brush-slider-value" id="titleSizeValue">0.06</span></label>
+          <input type="range" id="titleSizeSlider" min="0.03" max="0.14" step="0.005" value="0.06">
+        </div>
+        <div class="field grow">
+          <label>テロップの寄せ</label>
+          <select id="titleAlignSelect">
+            <option value="left">左寄せ</option>
+            <option value="center">中央</option>
+            <option value="right">右寄せ</option>
+          </select>
+        </div>
       </div>
 
       <div class="row wrap">
@@ -413,6 +434,18 @@
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="titleBounceCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
         <label style="margin:0;" for="titleBounceCheckbox">title_bounce（テロップがはずんで現れる演出）</label>
+      </div>
+      <div class="field">
+        <label>title_size（テロップの大きさ・全体既定） <span class="brush-slider-value" id="titleSizeDefaultValue">0.06</span></label>
+        <input type="range" id="titleSizeDefaultSlider" min="0.03" max="0.14" step="0.005" value="0.06">
+      </div>
+      <div class="field">
+        <label>title_align（テロップの寄せ・全体既定）</label>
+        <select id="titleAlignDefaultSelect">
+          <option value="left">左寄せ</option>
+          <option value="center">中央</option>
+          <option value="right">右寄せ</option>
+        </select>
       </div>
       <div class="field">
         <label>audio_during_freeze（フリーズ中の音声）</label>
@@ -564,8 +597,12 @@ var DEFAULT_STYLE = {
   background: "mono",
   font: DEFAULT_FONT_PATH,
   title_bounce: false,
+  title_pos: [0.5, 0.78],
+  title_size: 0.06,
+  title_align: "center",
   audio_during_freeze: "mute"
 };
+var TITLE_ALIGNS = ["left", "center", "right"];
 var OUTPUT_PRESETS = {
   "original": null,
   "1080x1920": { width: 1080, height: 1920 },
@@ -774,6 +811,10 @@ function freezeToJSON(fz) {
   if (fz.sfx) out.sfx = fz.sfx;
   // フリーズ単位でのフィルム色の上書き（未指定なら省略し、全体設定の film_color を使わせる）
   if (fz.filmColor) out.film_color = fz.filmColor;
+  // テロップ位置・サイズ・寄せ（未指定なら省略し、全体設定 style.title_* を使わせる）
+  if (fz.titlePos) out.title_pos = [round(fz.titlePos[0], 4), round(fz.titlePos[1], 4)];
+  if (fz.titleSize !== null && fz.titleSize !== undefined) out.title_size = round(fz.titleSize, 4);
+  if (fz.titleAlign) out.title_align = resolveTitleAlign(fz.titleAlign);
   return out;
 }
 
@@ -795,6 +836,12 @@ function buildProjectJSON(state) {
       background: DEFAULT_STYLE.background,
       font: DEFAULT_FONT_PATH,
       title_bounce: !!state.titleBounce,
+      title_pos: [
+        round(numOr(state.titlePos && state.titlePos[0], DEFAULT_STYLE.title_pos[0]), 4),
+        round(numOr(state.titlePos && state.titlePos[1], DEFAULT_STYLE.title_pos[1]), 4)
+      ],
+      title_size: round(numOr(state.titleSize, DEFAULT_STYLE.title_size), 4),
+      title_align: resolveTitleAlign(state.titleAlign),
       audio_during_freeze: state.audioDuringFreeze === "keep" ? "keep" : "mute"
     },
     freezes: sortFreezesByTime(state.freezes).map(freezeToJSON)
@@ -840,6 +887,11 @@ function parseProjectJSON(json) {
       background: fz.background === "dark" ? "dark" : "mono",
       brushShape: resolveBrushShape(fz.brush_shape),
       filmColor: fz.film_color || "",
+      titlePos: Array.isArray(fz.title_pos)
+        ? [numOr(fz.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(fz.title_pos[1], DEFAULT_STYLE.title_pos[1])]
+        : null,
+      titleSize: fz.title_size !== undefined && fz.title_size !== null ? numOr(fz.title_size, null) : null,
+      titleAlign: fz.title_align ? resolveTitleAlign(fz.title_align) : null,
       strokes: (fz.strokes || []).map(function (st) {
         return {
           width: numOr(st.width, style.brush_width),
@@ -871,6 +923,11 @@ function parseProjectJSON(json) {
     filmColor: style.film_color || DEFAULT_STYLE.film_color,
     filmAlpha: numOr(style.film_alpha, DEFAULT_STYLE.film_alpha),
     titleBounce: !!style.title_bounce,
+    titlePos: Array.isArray(style.title_pos)
+      ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
+      : DEFAULT_STYLE.title_pos.slice(),
+    titleSize: numOr(style.title_size, DEFAULT_STYLE.title_size),
+    titleAlign: resolveTitleAlign(style.title_align),
     audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
     freezes: sortFreezesByTime(freezes),
     logo: logo
@@ -1021,6 +1078,62 @@ function telopBounceScale(t) {
   t = clamp01(t);
   var eased = 1.0 - Math.pow(1.0 - t, 4);
   return TELOP_BOUNCE_FROM + (1.0 - TELOP_BOUNCE_FROM) * eased;
+}
+
+/** 未知の値は center にフォールバックする（render.py の resolve_title_align と同じ方針） */
+function resolveTitleAlign(align) {
+  return TITLE_ALIGNS.indexOf(align) >= 0 ? align : "center";
+}
+
+/**
+ * draft（フリーズ単位）に対して、title_pos/title_size/title_align の実効値を返す。
+ * フリーズ側が未指定（null/undefined）なら style（全体既定）の値にフォールバックする。
+ * render.py の load_project（style を各freezeにマージする処理）と同じ考え方。
+ */
+function resolveTitleField(draftValue, styleValue) {
+  return draftValue === null || draftValue === undefined ? styleValue : draftValue;
+}
+
+/**
+ * テロップのアンカー位置(px, align基準)・文字サイズ(px)から、
+ * テキストの外接矩形 {left, top, right, bottom} を返す（縦方向は常に中央基準）。
+ * render.py の render_telop_layer（anchor="lm"/"mm"/"rm"）と同じ考え方。
+ */
+function telopBoxFromAnchor(anchorX, anchorY, textWidthPx, textHeightPx, align) {
+  var left, right;
+  if (align === "left") {
+    left = anchorX; right = anchorX + textWidthPx;
+  } else if (align === "right") {
+    left = anchorX - textWidthPx; right = anchorX;
+  } else {
+    left = anchorX - textWidthPx / 2; right = anchorX + textWidthPx / 2;
+  }
+  return { left: left, top: anchorY - textHeightPx / 2, right: right, bottom: anchorY + textHeightPx / 2 };
+}
+
+/**
+ * 外接矩形box=(left,top,right,bottom)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す。
+ * render.py の clamp_box_to_canvas と同じロジック。
+ */
+function clampBoxToCanvas(box, W, H) {
+  var dx = 0, dy = 0;
+  if (box.left < 0) dx = -box.left;
+  else if (box.right > W) dx = W - box.right;
+  if (box.top < 0) dy = -box.top;
+  else if (box.bottom > H) dy = H - box.bottom;
+  return { dx: dx, dy: dy };
+}
+
+/**
+ * pos_ratio=[x,y]（0〜1）・テキスト実測サイズ(px)・alignから、画面外にはみ出さないよう
+ * 内側に寄せた新しいpos_ratioを返す（エディタでのドラッグ・render.py双方で使う考え方を共通化）。
+ */
+function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H) {
+  var ax = (posRatio && posRatio[0] != null ? Number(posRatio[0]) : 0.5) * W;
+  var ay = (posRatio && posRatio[1] != null ? Number(posRatio[1]) : 0.78) * H;
+  var box = telopBoxFromAnchor(ax, ay, textWidthPx, textHeightPx, align);
+  var d = clampBoxToCanvas(box, W, H);
+  return [W ? (ax + d.dx) / W : 0.5, H ? (ay + d.dy) / H : 0.78];
 }
 
 /**
@@ -1222,6 +1335,12 @@ if (typeof module !== "undefined" && module.exports) {
     filmOffsetRatioFromPx: filmOffsetRatioFromPx,
     filmOffsetPxFromRatio: filmOffsetPxFromRatio,
     telopBounceScale: telopBounceScale,
+    TITLE_ALIGNS: TITLE_ALIGNS,
+    resolveTitleAlign: resolveTitleAlign,
+    resolveTitleField: resolveTitleField,
+    telopBoxFromAnchor: telopBoxFromAnchor,
+    clampBoxToCanvas: clampBoxToCanvas,
+    clampTitlePosRatio: clampTitlePosRatio,
     logoAssetName: logoAssetName,
     computeContentRect: computeContentRect,
     parseMp4DisplayRotation: parseMp4DisplayRotation,
@@ -1281,6 +1400,9 @@ var appState = {
   filmColor: DEFAULT_STYLE.film_color,
   filmAlpha: DEFAULT_STYLE.film_alpha,
   titleBounce: DEFAULT_STYLE.title_bounce,
+  titlePos: DEFAULT_STYLE.title_pos.slice(),
+  titleSize: DEFAULT_STYLE.title_size,
+  titleAlign: DEFAULT_STYLE.title_align,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
@@ -1301,6 +1423,8 @@ var overlaySize = { width: 0, height: 0 };
 // 頻発するresizeで）canvasの中身が消えてしまうため、幅かアスペクト比が
 // 実際に変わった時だけ再設定するための比較基準として使う。
 var lastCanvasContentSize = { width: 0, height: 0 };
+var telopDragging = false;               // テロップをドラッグ中か（trueの間はストローク描画を行わない）
+var telopDragOffsetRatio = { x: 0, y: 0 }; // 掴んだ位置とテロップ位置(pos)のズレ（指に位置が飛ばないよう保持する）
 var previewRAF = null;
 var previewLogoObjectURL = null; // 簡易プレビュー中に読み込んだロゴ画像のObjectURL（停止時に必ず解放する）
 
@@ -1315,16 +1439,18 @@ function init() {
     "pickVideoBtn", "useSampleBtn", "videoFileInput", "videoFileName", "restoreStatus",
     "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
     "guideCard", "guideCloseBtn",
-    "playerSection", "playerControls", "video", "videoWrap", "playerCanvas", "drawCanvas", "previewCanvas", "drawHint",
+    "playerSection", "playerControls", "video", "videoWrap", "playerCanvas", "drawCanvas", "telopCanvas", "previewCanvas", "drawHint",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
     "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect", "filmColorOverrideSelect",
+    "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
     "freezeSecInput", "brushAnimSecInput", "monoContrastSlider", "monoContrastValue",
     "filmOffsetSlider", "filmOffsetValue", "filmColorPresetRow", "filmAlphaSlider", "filmAlphaValue",
-    "titleBounceCheckbox", "audioDuringFreezeSelect", "outputModeSelect",
+    "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
+    "audioDuringFreezeSelect", "outputModeSelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
     "logoDurationSlider", "logoDurationValue",
@@ -1408,6 +1534,23 @@ function init() {
     if (!draft) return;
     draft.filmColor = els.filmColorOverrideSelect.value || "";
   });
+  els.nameInput.addEventListener("input", function () {
+    if (!draft) return;
+    // 確定値はcommitFreezeEditでtrimして保存するが、映像上の仮表示にはリアルタイムで反映する
+    draft.name = els.nameInput.value;
+    redrawTelopOverlay();
+  });
+  els.titleSizeSlider.addEventListener("input", function () {
+    if (!draft) return;
+    draft.titleSize = Number(els.titleSizeSlider.value);
+    els.titleSizeValue.textContent = draft.titleSize.toFixed(3);
+    redrawTelopOverlay();
+  });
+  els.titleAlignSelect.addEventListener("change", function () {
+    if (!draft) return;
+    draft.titleAlign = resolveTitleAlign(els.titleAlignSelect.value);
+    redrawTelopOverlay();
+  });
 
   els.freezeSecInput.addEventListener("change", function () {
     appState.freezeSec = numOr(els.freezeSecInput.value, DEFAULT_STYLE.freeze_sec);
@@ -1435,6 +1578,15 @@ function init() {
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
     appState.titleBounce = els.titleBounceCheckbox.checked;
+    saveToLocalStorage();
+  });
+  els.titleSizeDefaultSlider.addEventListener("input", function () {
+    appState.titleSize = Number(els.titleSizeDefaultSlider.value);
+    els.titleSizeDefaultValue.textContent = appState.titleSize.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.titleAlignDefaultSelect.addEventListener("change", function () {
+    appState.titleAlign = resolveTitleAlign(els.titleAlignDefaultSelect.value);
     saveToLocalStorage();
   });
   els.audioDuringFreezeSelect.addEventListener("change", function () {
@@ -1715,6 +1867,9 @@ function startNewFreeze() {
     background: "mono",
     brushShape: "round",
     filmColor: "",
+    titlePos: null,
+    titleSize: null,
+    titleAlign: null,
     strokes: []
   }, true);
 }
@@ -1848,6 +2003,10 @@ function enterDrawMode() {
   els.filmColorOverrideSelect.value = draft.filmColor || "";
   els.brushWidthSlider.value = "0.12";
   els.brushWidthValue.textContent = "0.12";
+  var effTitleSize = resolveTitleField(draft.titleSize, appState.titleSize);
+  els.titleSizeSlider.value = effTitleSize;
+  els.titleSizeValue.textContent = Number(effTitleSize).toFixed(3);
+  els.titleAlignSelect.value = resolveTitleAlign(resolveTitleField(draft.titleAlign, appState.titleAlign));
 
   els.editorSection.hidden = false;
   els.videoWrap.classList.add("editing");
@@ -1861,6 +2020,7 @@ function enterDrawMode() {
   layoutOverlayCanvases();
   paintFrozenFrame();
   redrawStrokesOverlay();
+  redrawTelopOverlay();
   showDrawHint();
   layoutFixedEditorArea();
 }
@@ -1885,6 +2045,7 @@ function exitDrawMode() {
   } finally {
     draft = null;
     currentStroke = null;
+    telopDragging = false;
     frozenFrameCanvas = null;
     document.body.classList.remove("freeze-editing");
     // iOS Safariはposition:fixedの解除後、明示的にレイアウトを読み直させないと
@@ -1912,6 +2073,10 @@ function commitFreezeEdit() {
   draft.sfx = els.sfxSelect.value;
   draft.background = els.backgroundSelect.value;
   draft.brushShape = els.brushShapeSelect.value;
+  // titleSize/titleAlignは、titleSizeSlider/titleAlignSelectの自前のイベントリスナーが
+  // 実際に操作された時だけdraft側へ反映する（filmColorOverrideSelectと同じ方針）。
+  // ここで表示中の値を無条件に書き戻すと、未操作でも「上書きした」ことになり
+  // JSON出力でtitle_size/title_alignキーが常に出てしまう（全体設定の継承ができなくなる）。
 
   var target = draft;
   var isNew = draftIsNew;
@@ -1984,7 +2149,7 @@ function layoutOverlayCanvases() {
   var content = computeContentRect(rect.width, rect.height, dims.width || rect.width, dims.height || rect.height);
   var dpr = window.devicePixelRatio || 1;
 
-  [els.playerCanvas, els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
+  [els.playerCanvas, els.drawCanvas, els.telopCanvas, els.previewCanvas].forEach(function (canvas) {
     canvas.style.left = content.left + "px";
     canvas.style.top = content.top + "px";
     canvas.style.width = content.width + "px";
@@ -2003,7 +2168,7 @@ function layoutOverlayCanvases() {
     return false;
   }
 
-  [els.playerCanvas, els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
+  [els.playerCanvas, els.drawCanvas, els.telopCanvas, els.previewCanvas].forEach(function (canvas) {
     canvas.width = Math.max(1, Math.round(content.width * dpr));
     canvas.height = Math.max(1, Math.round(content.height * dpr));
     var ctx = canvas.getContext("2d");
@@ -2028,6 +2193,7 @@ function handleWindowResize() {
     if (resized) {
       paintFrozenFrame();
       redrawStrokesOverlay();
+      redrawTelopOverlay();
     }
     layoutFixedEditorArea();
   } else if (resized) {
@@ -2168,25 +2334,29 @@ function wireDrawCanvasTouch() {
     if (!draft) return;
     e.preventDefault();
     var t = e.touches[0];
+    if (beginTelopDragIfHit(t.clientX, t.clientY)) return;
     beginStroke(t.clientX, t.clientY);
   }, { passive: false });
 
   canvas.addEventListener("touchmove", function (e) {
     if (!draft) return;
     e.preventDefault();
-    if (!currentStroke) return;
     var t = e.touches[0];
+    if (telopDragging) { updateTelopDrag(t.clientX, t.clientY); return; }
+    if (!currentStroke) return;
     extendStroke(t.clientX, t.clientY);
   }, { passive: false });
 
   canvas.addEventListener("touchend", function (e) {
     if (!draft) return;
     e.preventDefault();
+    if (telopDragging) { endTelopDrag(); return; }
     endStroke();
   }, { passive: false });
   canvas.addEventListener("touchcancel", function (e) {
     if (!draft) return;
     e.preventDefault();
+    if (telopDragging) { endTelopDrag(); return; }
     endStroke();
   }, { passive: false });
 
@@ -2195,14 +2365,20 @@ function wireDrawCanvasTouch() {
   canvas.addEventListener("mousedown", function (e) {
     if (!draft) return;
     mouseDown = true;
+    if (beginTelopDragIfHit(e.clientX, e.clientY)) return;
     beginStroke(e.clientX, e.clientY);
   });
   canvas.addEventListener("mousemove", function (e) {
-    if (!draft || !mouseDown || !currentStroke) return;
+    if (!draft || !mouseDown) return;
+    if (telopDragging) { updateTelopDrag(e.clientX, e.clientY); return; }
+    if (!currentStroke) return;
     extendStroke(e.clientX, e.clientY);
   });
   window.addEventListener("mouseup", function () {
-    if (mouseDown) { mouseDown = false; if (draft) endStroke(); }
+    if (mouseDown) {
+      mouseDown = false;
+      if (draft) { if (telopDragging) endTelopDrag(); else endStroke(); }
+    }
   });
 }
 
@@ -2266,6 +2442,82 @@ function redrawStrokesOverlay() {
   geoInfo.geo.forEach(function (g) {
     drawStampedGeo(ctx, shape, [g], 0, g.cost);
   });
+}
+
+/* ---------------- テロップの仮表示・ドラッグ移動（telopCanvas） ---------------- */
+
+/** telopCanvasへ、draft.name（未入力なら何も描かない）を実効位置・大きさ・寄せで描き直す */
+function redrawTelopOverlay() {
+  if (!els.telopCanvas) return;
+  var ctx = els.telopCanvas.getContext("2d");
+  ctx.clearRect(0, 0, overlaySize.width, overlaySize.height);
+  if (!draft || !draft.name) return;
+  drawTelop(ctx, draft.name, overlaySize.width, overlaySize.height, 1, 1,
+    resolveTitleField(draft.titlePos, appState.titlePos),
+    resolveTitleField(draft.titleSize, appState.titleSize),
+    resolveTitleField(draft.titleAlign, appState.titleAlign));
+}
+
+/**
+ * 現在のdraftから、テロップの実効位置・大きさ・寄せ・外接矩形（overlaySize基準のpx）を計算する。
+ * テロップ未表示（名前未入力・レイアウト未確定）ならnull。
+ * ドラッグ開始時の当たり判定と、ドラッグ中のクランプ計算の両方で使う。
+ */
+function computeEditorTelopBox() {
+  if (!draft || !draft.name || !overlaySize.width || !overlaySize.height) return null;
+  var W = overlaySize.width, H = overlaySize.height;
+  var sizeRatio = resolveTitleField(draft.titleSize, appState.titleSize);
+  var align = resolveTitleAlign(resolveTitleField(draft.titleAlign, appState.titleAlign));
+  var pos = resolveTitleField(draft.titlePos, appState.titlePos) || DEFAULT_STYLE.title_pos;
+  var sizePx = Math.max(8, Math.round(H * sizeRatio));
+  var ctx = els.telopCanvas.getContext("2d");
+  ctx.save();
+  ctx.font = "700 " + sizePx + 'px "SpotlightJP", -apple-system, sans-serif';
+  var textW = ctx.measureText(draft.name).width;
+  ctx.restore();
+  var textH = sizePx * 1.15; // 当たり判定・クランプ用の概算文字高さ（少し余裕を持たせる）
+  var anchorX = pos[0] * W, anchorY = pos[1] * H;
+  return {
+    box: telopBoxFromAnchor(anchorX, anchorY, textW, textH, align),
+    align: align, pos: pos, textW: textW, textH: textH
+  };
+}
+
+/**
+ * touchstart/mousedown位置がテロップの外接矩形内なら、ドラッグ移動モードへ入る。
+ * （ブラシ描画と競合しないよう、テロップの上をタッチした時だけ移動モードにする要件）
+ * 入った場合はtrueを返す（呼び出し側はストローク開始を行わない）。
+ */
+function beginTelopDragIfHit(clientX, clientY) {
+  var info = computeEditorTelopBox();
+  if (!info) return false;
+  var rect = els.drawCanvas.getBoundingClientRect();
+  var pt = ratioFromRect(clientX, clientY, rect);
+  var px = pt.x * overlaySize.width, py = pt.y * overlaySize.height;
+  var box = info.box;
+  if (px < box.left || px > box.right || py < box.top || py > box.bottom) return false;
+  telopDragging = true;
+  telopDragOffsetRatio = { x: pt.x - info.pos[0], y: pt.y - info.pos[1] };
+  hideDrawHint();
+  return true;
+}
+
+/** ドラッグ中の移動先を計算し、画面外に出ないようクランプしてdraft.titlePosへ反映する */
+function updateTelopDrag(clientX, clientY) {
+  if (!draft) return;
+  var rect = els.drawCanvas.getBoundingClientRect();
+  var pt = ratioFromRect(clientX, clientY, rect);
+  var rawPos = [pt.x - telopDragOffsetRatio.x, pt.y - telopDragOffsetRatio.y];
+  var info = computeEditorTelopBox();
+  var align = info ? info.align : "center";
+  var textW = info ? info.textW : 0;
+  var textH = info ? info.textH : 0;
+  draft.titlePos = clampTitlePosRatio(rawPos, textW, textH, align, overlaySize.width, overlaySize.height);
+  redrawTelopOverlay();
+}
+
+function endTelopDrag() {
+  telopDragging = false;
 }
 
 /* ---- ブラシ形状の筆先スタンプ描画（drawCanvasのライブ描画・previewCanvasの合成の両方で使う） ---- */
@@ -2540,7 +2792,10 @@ function startPreviewPlayback() {
         if (elapsed >= HOLD + BRUSH) {
           var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
           var scale = (appState.titleBounce && fade < 1) ? telopBounceScale(fade) : 1;
-          drawTelop(pctx, draft.name, W, H, fade, scale);
+          drawTelop(pctx, draft.name, W, H, fade, scale,
+            resolveTitleField(draft.titlePos, appState.titlePos),
+            resolveTitleField(draft.titleSize, appState.titleSize),
+            resolveTitleField(draft.titleAlign, appState.titleAlign));
           drawLogoIfReady(elapsed - HOLD - BRUSH);
         }
       }
@@ -2633,25 +2888,42 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, f
   }
 }
 
-/** 白太字＋薄い黒ドロップシャドウ。render.pyのrender_telop_layerと同じ見た目。
- *  scale（既定1）を渡すと、テロップ中心を基準に拡大表示する（title_bounce用）。 */
-function drawTelop(ctx, name, W, H, fade, scale) {
+/**
+ * 白太字＋薄い黒ドロップシャドウ。render.pyのrender_telop_layerと同じ見た目。
+ * posRatio=[x,y]（0〜1、既定[0.5,0.78]）・sizeRatio（既定0.06）・align（left/center/right、既定center）で
+ * 位置・大きさ・寄せを指定でき、画面端にはみ出す場合はrender.pyと同じロジックで内側に寄せる。
+ * scale（既定1）を渡すと、テロップの外接矩形の中心を基準に拡大表示する（title_bounce用）。
+ */
+function drawTelop(ctx, name, W, H, fade, scale, posRatio, sizeRatio, align) {
   if (!name || fade <= 0) return;
   scale = scale || 1;
-  var size = Math.max(8, Math.round(H * 0.06));
+  posRatio = posRatio || DEFAULT_STYLE.title_pos;
+  sizeRatio = sizeRatio || DEFAULT_STYLE.title_size;
+  align = resolveTitleAlign(align);
+  var size = Math.max(8, Math.round(H * sizeRatio));
   var shadowOffset = Math.max(1, Math.round(size / 20));
-  var x = W / 2, y = H * 0.78;
+
   ctx.save();
-  ctx.globalAlpha = Math.min(1, fade);
-  ctx.translate(x, y);
-  ctx.scale(scale, scale);
   ctx.font = "700 " + size + 'px "SpotlightJP", -apple-system, sans-serif';
-  ctx.textAlign = "center";
+  var textW = ctx.measureText(name).width;
+  var textH = size * 1.15;
+  var anchorX = posRatio[0] * W, anchorY = posRatio[1] * H;
+  var box = telopBoxFromAnchor(anchorX, anchorY, textW, textH, align);
+  var d = clampBoxToCanvas(box, W, H);
+  anchorX += d.dx; anchorY += d.dy;
+  var centerX = (box.left + box.right) / 2 + d.dx;
+  var centerY = (box.top + box.bottom) / 2 + d.dy;
+
+  ctx.globalAlpha = Math.min(1, fade);
+  ctx.translate(centerX, centerY);
+  ctx.scale(scale, scale);
+  ctx.textAlign = align === "left" ? "left" : align === "right" ? "right" : "center";
   ctx.textBaseline = "middle";
+  var tx = anchorX - centerX, ty = anchorY - centerY;
   ctx.fillStyle = "rgba(0,0,0,0.51)";
-  ctx.fillText(name, shadowOffset, shadowOffset);
+  ctx.fillText(name, tx + shadowOffset, ty + shadowOffset);
   ctx.fillStyle = "#fff";
-  ctx.fillText(name, 0, 0);
+  ctx.fillText(name, tx, ty);
   ctx.restore();
 }
 
@@ -2818,6 +3090,9 @@ function applySettingsToInputs() {
   els.filmAlphaSlider.value = appState.filmAlpha;
   els.filmAlphaValue.textContent = Number(appState.filmAlpha).toFixed(2);
   els.titleBounceCheckbox.checked = !!appState.titleBounce;
+  els.titleSizeDefaultSlider.value = appState.titleSize;
+  els.titleSizeDefaultValue.textContent = Number(appState.titleSize).toFixed(3);
+  els.titleAlignDefaultSelect.value = resolveTitleAlign(appState.titleAlign);
   updateFilmColorPresetSelection();
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.outputModeSelect.value = appState.outputMode;

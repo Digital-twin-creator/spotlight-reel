@@ -477,6 +477,152 @@ test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", 
   assert.strictEqual(loaded.logo.durationSec, 2.0);
 });
 
+/* ---- title_pos / title_size / title_align（フリーズごとのテロップ位置） ---- */
+
+test("DEFAULT_STYLE: title_pos/title_size/title_alignの既定値は従来の固定位置と一致する", () => {
+  assert.deepStrictEqual(core.DEFAULT_STYLE.title_pos, [0.5, 0.78]);
+  assert.strictEqual(core.DEFAULT_STYLE.title_size, 0.06);
+  assert.strictEqual(core.DEFAULT_STYLE.title_align, "center");
+});
+
+test("resolveTitleAlign: 未知の値は center にフォールバックする", () => {
+  assert.strictEqual(core.resolveTitleAlign("left"), "left");
+  assert.strictEqual(core.resolveTitleAlign("right"), "right");
+  assert.strictEqual(core.resolveTitleAlign("center"), "center");
+  assert.strictEqual(core.resolveTitleAlign("nonsense"), "center");
+  assert.strictEqual(core.resolveTitleAlign(undefined), "center");
+});
+
+test("resolveTitleField: フリーズ側がnull/undefinedならstyle側の値にフォールバックする", () => {
+  assert.strictEqual(core.resolveTitleField(null, 0.06), 0.06);
+  assert.strictEqual(core.resolveTitleField(undefined, 0.06), 0.06);
+  assert.strictEqual(core.resolveTitleField(0.1, 0.06), 0.1);
+  assert.strictEqual(core.resolveTitleField(0, 0.06), 0); // 0はフォールバックしない
+});
+
+test("buildProjectJSON: 何も設定しなければstyle.title_pos/size/alignは後方互換の既定値を出力する", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.deepStrictEqual(project.style.title_pos, [0.5, 0.78]);
+  assert.strictEqual(project.style.title_size, 0.06);
+  assert.strictEqual(project.style.title_align, "center");
+});
+
+test("buildProjectJSON: state.titlePos/titleSize/titleAlignをstyleに反映する", () => {
+  const state = sampleState();
+  state.titlePos = [0.2, 0.3];
+  state.titleSize = 0.09;
+  state.titleAlign = "left";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.title_pos, [0.2, 0.3]);
+  assert.strictEqual(project.style.title_size, 0.09);
+  assert.strictEqual(project.style.title_align, "left");
+});
+
+test("freezeToJSON: フリーズにtitlePos等が無ければキーを省略する（全体設定を継承）", () => {
+  const project = core.buildProjectJSON(sampleState());
+  const fz = project.freezes[0];
+  assert.strictEqual("title_pos" in fz, false);
+  assert.strictEqual("title_size" in fz, false);
+  assert.strictEqual("title_align" in fz, false);
+});
+
+test("freezeToJSON: フリーズごとのtitlePos/titleSize/titleAlignの上書きを出力する", () => {
+  const state = sampleState();
+  state.freezes[0].titlePos = [0.1, 0.9];
+  state.freezes[0].titleSize = 0.08;
+  state.freezes[0].titleAlign = "right";
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.deepStrictEqual(fz.title_pos, [0.1, 0.9]);
+  assert.strictEqual(fz.title_size, 0.08);
+  assert.strictEqual(fz.title_align, "right");
+});
+
+test("parseProjectJSON: 旧JSON（title_pos等を含まない）は既定値[0.5,0.78]/0.06/centerに解決される（後方互換）", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    freezes: [{ time: 0, name: "テスト" }]
+  });
+  assert.deepStrictEqual(loaded.titlePos, [0.5, 0.78]);
+  assert.strictEqual(loaded.titleSize, 0.06);
+  assert.strictEqual(loaded.titleAlign, "center");
+  assert.strictEqual(loaded.freezes[0].titlePos, null);
+  assert.strictEqual(loaded.freezes[0].titleSize, null);
+  assert.strictEqual(loaded.freezes[0].titleAlign, null);
+});
+
+test("buildProjectJSON/parseProjectJSON: title_pos/title_size/title_alignを全体・フリーズ単位ともに往復できる", () => {
+  const state = sampleState();
+  state.titlePos = [0.25, 0.4];
+  state.titleSize = 0.07;
+  state.titleAlign = "right";
+  state.freezes[0].titlePos = [0.05, 0.95];
+  state.freezes[0].titleSize = 0.1;
+  state.freezes[0].titleAlign = "left";
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.deepStrictEqual(loaded.titlePos, [0.25, 0.4]);
+  assert.strictEqual(loaded.titleSize, 0.07);
+  assert.strictEqual(loaded.titleAlign, "right");
+  const loadedFz = loaded.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.deepStrictEqual(loadedFz.titlePos, [0.05, 0.95]);
+  assert.strictEqual(loadedFz.titleSize, 0.1);
+  assert.strictEqual(loadedFz.titleAlign, "left");
+  // 上書きの無い方のフリーズは null のまま（全体設定を継承）
+  const otherFz = loaded.freezes.filter(f => f.time !== state.freezes[0].time)[0];
+  assert.strictEqual(otherFz.titlePos, null);
+});
+
+/* ---- テロップの外接矩形計算・画面端クランプ（ドラッグUI・render.pyと同じ考え方） ---- */
+
+test("telopBoxFromAnchor: centerはアンカーを中心に左右へ半分ずつ広がる", () => {
+  const box = core.telopBoxFromAnchor(100, 50, 40, 20, "center");
+  assert.deepStrictEqual(box, { left: 80, top: 40, right: 120, bottom: 60 });
+});
+test("telopBoxFromAnchor: leftはアンカーが左端になる", () => {
+  const box = core.telopBoxFromAnchor(100, 50, 40, 20, "left");
+  assert.strictEqual(box.left, 100);
+  assert.strictEqual(box.right, 140);
+});
+test("telopBoxFromAnchor: rightはアンカーが右端になる", () => {
+  const box = core.telopBoxFromAnchor(100, 50, 40, 20, "right");
+  assert.strictEqual(box.left, 60);
+  assert.strictEqual(box.right, 100);
+});
+
+test("clampBoxToCanvas: はみ出していなければ移動量は0", () => {
+  const d = core.clampBoxToCanvas({ left: 10, top: 10, right: 90, bottom: 90 }, 100, 100);
+  assert.deepStrictEqual(d, { dx: 0, dy: 0 });
+});
+test("clampBoxToCanvas: 左右上下にはみ出す場合は内側に寄せる移動量を返す", () => {
+  const d1 = core.clampBoxToCanvas({ left: -20, top: 10, right: 30, bottom: 40 }, 100, 100);
+  assert.strictEqual(d1.dx, 20);
+  const d2 = core.clampBoxToCanvas({ left: 70, top: 10, right: 120, bottom: 40 }, 100, 100);
+  assert.strictEqual(d2.dx, -20);
+});
+
+test("clampTitlePosRatio: 画面内に収まっていれば位置は変わらない", () => {
+  const pos = core.clampTitlePosRatio([0.5, 0.5], 40, 20, "center", 200, 100);
+  assert.strictEqual(pos[0], 0.5);
+  assert.strictEqual(pos[1], 0.5);
+});
+test("clampTitlePosRatio: 画面外にはみ出す位置は端で止まる（左上端ぎりぎりに寄せる）", () => {
+  const pos = core.clampTitlePosRatio([0, 0], 40, 20, "center", 200, 100);
+  // center align: left=x-20 >= 0 => x>=20, top=y-10 >= 0 => y>=10
+  assert.strictEqual(pos[0], 20 / 200);
+  assert.strictEqual(pos[1], 10 / 100);
+});
+test("clampTitlePosRatio: 右下にはみ出す位置も端で止まる", () => {
+  const pos = core.clampTitlePosRatio([1, 1], 40, 20, "center", 200, 100);
+  assert.strictEqual(pos[0], (200 - 20) / 200);
+  assert.strictEqual(pos[1], (100 - 10) / 100);
+});
+test("clampTitlePosRatio: left寄せでは右側の余白ぶんだけ余計にクランプされる", () => {
+  const pos = core.clampTitlePosRatio([1, 0.5], 40, 20, "left", 200, 100);
+  // left align: right = x+40 <= 200 => x <= 160
+  assert.strictEqual(pos[0], 160 / 200);
+});
+
 /* ---- buildStrokeGeometry / trimGeometryToLength（ブラシのプレビュー計算） ---- */
 test("buildStrokeGeometry: 比率座標をピクセル座標に変換し長さを計算する", () => {
   const strokes = [{ width: 0.1, points: [[0, 0], [1, 0]] }]; // 幅いっぱいの水平線

@@ -50,8 +50,13 @@ DEFAULT_STYLE = {
     # title_font / title_font_jp は省略時 font にフォールバックする（use_style_font()参照）。
     # ここではキー自体を持たせず、未指定であることを判別できるようにする。
     "title_bounce": False,        # テロップ出現時に130%→100%のバウンスを付けるか
+    "title_pos": [0.5, 0.78],     # テロップ中心の位置（出力サイズに対する比率、[x, y]）
+    "title_size": 0.06,           # 文字サイズ（高さに対する比率）
+    "title_align": "center",      # テロップの水平寄せ（left | center | right、title_posのxを基準）
     "audio_during_freeze": "mute",  # mute | keep
 }
+
+TITLE_ALIGNS = ("left", "center", "right")
 
 BRUSH_SHAPES = ("round", "hake", "marker", "spray")
 BRUSH_ASSET_DIR = os.path.join("assets", "brushes")
@@ -68,8 +73,6 @@ BRUSH_STAMP_SPACING = {"round": 0.32, "hake": 0.62, "marker": 0.42, "spray": 0.6
 HOLD_BEFORE_BRUSH_SEC = 0.3   # フリーズ開始からブラシ描き始めまでの静止時間
 TELOP_FADE_SEC = 0.15         # テロップのフェードイン（＝バウンスも同じ時間で行う）
 TELOP_BOUNCE_FROM = 1.3       # title_bounce=true のときの初期スケール（130%→100%）
-TELOP_Y_RATIO = 0.78          # テロップ中心の縦位置（高さ比）
-TELOP_SIZE_RATIO = 0.06       # 文字サイズ（高さ比）
 BRUSH_PAINT_ALPHA = 0.85      # 描いている最中の白い絵の具の不透明度
 DARK_GAIN = 0.30              # background="dark" のときの明るさ倍率
 
@@ -631,36 +634,78 @@ def scale_telop_layer(bgr, alpha, scale, cx, cy):
     return bgr_s, alpha_s[:, :, None]
 
 
-def render_telop_layer(text, W, H, font):
+def resolve_title_align(align):
+    """未知の値は center にフォールバックする（background の扱いと同じ方針）"""
+    align = align or "center"
+    if align not in TITLE_ALIGNS:
+        warn(f"title_align='{align}' は未知の値です。center として扱います。")
+        return "center"
+    return align
+
+
+def clamp_box_to_canvas(bbox, W, H):
+    """外接矩形bbox=(x0,y0,x1,y1)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す"""
+    x0, y0, x1, y1 = bbox
+    dx = 0.0
+    if x0 < 0:
+        dx = -x0
+    elif x1 > W:
+        dx = W - x1
+    dy = 0.0
+    if y0 < 0:
+        dy = -y0
+    elif y1 > H:
+        dy = H - y1
+    return dx, dy
+
+
+def render_telop_layer(text, W, H, font, size_px, pos_ratio=(0.5, 0.78), align="center"):
     """
     テロップを1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
     フェードインは毎フレームこのアルファに係数を掛けるだけで済ませる。
+    pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をテキストのアンカー位置とし、
+    alignに応じて左寄せ/中央/右寄せする。画面端にはみ出す場合は自動で内側に寄せる。
+    戻り値の中心x,yは実際に描画された文字の外接矩形の中心（バウンス演出の基準点）。
     """
     if not text:
         return None, None, 0, 0
 
-    size = max(8, int(round(H * TELOP_SIZE_RATIO)))
-    cx, cy = W // 2, int(round(H * TELOP_Y_RATIO))
-    shadow_offset = max(1, size // 20)
+    align = resolve_title_align(align)
+    px = float(pos_ratio[0]) * W if pos_ratio and len(pos_ratio) > 0 else W * 0.5
+    py = float(pos_ratio[1]) * H if pos_ratio and len(pos_ratio) > 1 else H * 0.78
+    shadow_offset = max(1, size_px // 20)
     shadow_alpha = 130   # 薄い黒ドロップシャドウ（0〜255）
 
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
     if font is not None:
+        anchor = {"left": "lm", "center": "mm", "right": "rm"}[align]
         draw = ImageDraw.Draw(layer)
+        bbox = draw.textbbox((px, py), text, font=font, anchor=anchor)
+        dx, dy = clamp_box_to_canvas(bbox, W, H)
+        px, py = px + dx, py + dy
+        cx, cy = (bbox[0] + dx + bbox[2] + dx) / 2.0, (bbox[1] + dy + bbox[3] + dy) / 2.0
         # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
-        draw.text((cx + shadow_offset, cy + shadow_offset), text, font=font, anchor="mm",
+        draw.text((px + shadow_offset, py + shadow_offset), text, font=font, anchor=anchor,
                   fill=(0, 0, 0, shadow_alpha))
-        draw.text((cx, cy), text, font=font, anchor="mm", fill=(255, 255, 255, 255))
+        draw.text((px, py), text, font=font, anchor=anchor, fill=(255, 255, 255, 255))
         rgba = np.array(layer)
     else:
         # フォントが無い環境向けフォールバック（日本語は表示できない）
         warn("日本語フォントが無いため OpenCV の既定フォントで描画します。")
-        tmp = np.zeros((H, W, 4), np.uint8)
-        scale = size / 30.0
-        thickness = max(2, size // 12)
+        scale = size_px / 30.0
+        thickness = max(2, size_px // 12)
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-        org = (cx - tw // 2, cy + th // 2)
+        if align == "left":
+            ox = px
+        elif align == "right":
+            ox = px - tw
+        else:
+            ox = px - tw / 2.0
+        oy = py + th / 2.0
+        dx, dy = clamp_box_to_canvas((ox, oy - th, ox + tw, oy), W, H)
+        org = (int(round(ox + dx)), int(round(oy + dy)))
+        cx, cy = ox + dx + tw / 2.0, oy + dy - th / 2.0
         shadow_org = (org[0] + shadow_offset, org[1] + shadow_offset)
         shadow_layer = np.zeros((H, W, 4), np.uint8)
         cv2.putText(shadow_layer, text, shadow_org, cv2.FONT_HERSHEY_SIMPLEX, scale,
@@ -1050,10 +1095,16 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
     film_color_bgr = hex_to_bgr(fz.get("film_color"))
     film_alpha = float(fz.get("film_alpha", 0.0))
 
+    title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
+    size_px = max(8, int(round(H * title_size)))
     font_path = resolve_title_font_path(fz, json_dir)
-    if font_path not in font_cache:
-        font_cache[font_path] = load_font(font_path, max(8, int(round(H * TELOP_SIZE_RATIO))))
-    telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(fz.get("name", ""), W, H, font_cache[font_path])
+    font_key = (font_path, size_px)
+    if font_key not in font_cache:
+        font_cache[font_key] = load_font(font_path, size_px)
+    title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
+    title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
+    telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(
+        fz.get("name", ""), W, H, font_cache[font_key], size_px, title_pos, title_align)
     bounce = bool(fz.get("title_bounce"))
 
     # 1) ブラシ開始まで静止
@@ -1118,9 +1169,14 @@ def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
     img = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
                            film_offset, film_color_bgr, film_alpha)
 
+    title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
+    size_px = max(8, int(round(H * title_size)))
     font_path = resolve_title_font_path(fz, json_dir)
-    font = load_font(font_path, max(8, int(round(H * TELOP_SIZE_RATIO))))
-    telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(fz.get("name", ""), W, H, font)
+    font = load_font(font_path, size_px)
+    title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
+    title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
+    telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(
+        fz.get("name", ""), W, H, font, size_px, title_pos, title_align)
     img = blend_telop(img, telop_bgr, telop_alpha, 1.0)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)

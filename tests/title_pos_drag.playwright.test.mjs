@@ -1,0 +1,219 @@
+#!/usr/bin/env node
+// -*- coding: utf-8 -*-
+//
+// フリーズ編集画面で、名前を入力すると映像上にテロップが仮表示され、それを指（マウス）で
+// ドラッグして位置を決められること、サイズスライダー・寄せセレクトの変更、画面端での
+// クランプ、ブラシ描画との競合が起きないこと（テロップ上のタッチだけが移動モードになる）を、
+// headless Chromium + iPhoneデバイスエミュレーションで検証する回帰テスト。
+//
+// 実行方法:
+//   npm install --no-save playwright-core
+//   python3 -m http.server 8794 &
+//   node tests/title_pos_drag.playwright.test.mjs
+//
+// 環境変数 PW_URL / PW_CHROMIUM_PATH / PW_VIDEO は他のPlaywrightテストと同じ。
+
+import { chromium, devices } from "playwright-core";
+import path from "node:path";
+import os from "node:os";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.join(__dirname, "..");
+const BASE_URL = process.env.PW_URL || "http://127.0.0.1:8794/index.html";
+const CHROMIUM_PATH = process.env.PW_CHROMIUM_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
+
+function prepareTestVideo() {
+  if (process.env.PW_VIDEO) return process.env.PW_VIDEO;
+  const src = path.join(REPO_ROOT, "examples", "dummy_input.mp4");
+  const out = path.join(os.tmpdir(), "spotlight_reel_test_vp9.webm");
+  if (!fs.existsSync(out)) {
+    execSync(
+      `ffmpeg -y -v error -i "${src}" -c:v libvpx-vp9 -crf 32 -b:v 0 -c:a libopus "${out}"`,
+      { stdio: "inherit" }
+    );
+  }
+  return out;
+}
+
+let failed = 0;
+let passed = 0;
+function check(cond, label) {
+  if (cond) { passed++; console.log("  ok - " + label); }
+  else { failed++; console.log("  NG - " + label); }
+}
+
+/** テロップの現在の外接矩形の中心を、ページ座標(clientX/clientY)で返す */
+function telopCenterInPage(page) {
+  return page.evaluate(() => {
+    const info = computeEditorTelopBox();
+    if (!info) return null;
+    const rect = document.getElementById("drawCanvas").getBoundingClientRect();
+    const cx = (info.box.left + info.box.right) / 2;
+    const cy = (info.box.top + info.box.bottom) / 2;
+    return {
+      x: rect.left + (cx / overlaySize.width) * rect.width,
+      y: rect.top + (cy / overlaySize.height) * rect.height
+    };
+  });
+}
+
+/** ratio座標(0〜1)を、drawCanvasのページ座標(clientX/clientY)に変換する */
+function ratioToPage(page, rx, ry) {
+  return page.evaluate(({ rx, ry }) => {
+    const rect = document.getElementById("drawCanvas").getBoundingClientRect();
+    return { x: rect.left + rx * rect.width, y: rect.top + ry * rect.height };
+  }, { rx, ry });
+}
+
+async function dragMouse(page, from, to, steps) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    await page.mouse.move(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+  }
+  await page.mouse.up();
+}
+
+async function main() {
+  const videoPath = prepareTestVideo();
+  const iphone = devices["iPhone 13"];
+  const browser = await chromium.launch({ executablePath: CHROMIUM_PATH, headless: true });
+  const context = await browser.newContext({ ...iphone });
+  const page = await context.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (e) => pageErrors.push(e.message));
+
+  await page.goto(BASE_URL, { waitUntil: "load" });
+  await page.click("#guideCloseBtn").catch(() => {});
+  await page.setInputFiles("#videoFileInput", videoPath);
+  await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+
+  console.log("=== フリーズ編集画面で名前を入力すると、テロップが仮表示される ===");
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(300);
+
+  const beforeName = await page.evaluate(() => !!computeEditorTelopBox());
+  check(beforeName === false, "名前未入力の間はテロップ仮表示が無い（computeEditorTelopBoxがnull）");
+
+  await page.fill("#nameInput", "山田太郎");
+  await page.waitForTimeout(100);
+  const afterName = await page.evaluate(() => !!computeEditorTelopBox());
+  check(afterName === true, "名前を入力すると仮表示のテロップが現れる（computeEditorTelopBoxが矩形を返す）");
+
+  const defaultPos = await page.evaluate(() => draft.titlePos);
+  check(defaultPos === null, "ドラッグ前はdraft.titlePosがnull（全体設定[0.5,0.78]を継承）");
+
+  console.log("");
+  console.log("=== テロップをドラッグすると位置(draft.titlePos)が変わり、ストロークは増えない ===");
+  const strokesBefore = await page.evaluate(() => draft.strokes.length);
+  const from = await telopCenterInPage(page);
+  check(from !== null, "テロップの現在位置(ページ座標)を取得できる");
+  const to = await ratioToPage(page, 0.25, 0.3);
+  await dragMouse(page, from, to, 10);
+  await page.waitForTimeout(100);
+
+  const draggedPos = await page.evaluate(() => draft.titlePos);
+  check(Array.isArray(draggedPos), "ドラッグ後、draft.titlePosが配列として設定される: " + JSON.stringify(draggedPos));
+  check(Math.abs(draggedPos[0] - 0.25) < 0.03 && Math.abs(draggedPos[1] - 0.3) < 0.03,
+    "ドラッグ先の比率(0.25, 0.3)付近にdraft.titlePosが反映される: " + JSON.stringify(draggedPos));
+
+  const strokesAfter = await page.evaluate(() => draft.strokes.length);
+  check(strokesAfter === strokesBefore,
+    "テロップをドラッグしてもストロークは増えない（ブラシ描画と競合しない）: " + strokesBefore + " -> " + strokesAfter);
+
+  console.log("");
+  console.log("=== テロップの外（映像の何もない場所）をドラッグすると、通常どおりストロークが描かれる ===");
+  const drawBox = await page.locator("#drawCanvas").boundingBox();
+  // テロップは現在(0.25, 0.3)付近にあるので、離れた右下をなぞる
+  await dragMouse(
+    page,
+    { x: drawBox.x + drawBox.width * 0.7, y: drawBox.y + drawBox.height * 0.75 },
+    { x: drawBox.x + drawBox.width * 0.85, y: drawBox.y + drawBox.height * 0.9 },
+    8
+  );
+  await page.waitForTimeout(100);
+  const strokesAfterDraw = await page.evaluate(() => draft.strokes.length);
+  check(strokesAfterDraw === strokesBefore + 1,
+    "テロップ以外の場所をなぞると通常どおりストロークが1本追加される: " + strokesAfterDraw);
+
+  console.log("");
+  console.log("=== 画面端に向けてドラッグすると、はみ出さないようクランプされる ===");
+  const infoBeforeClamp = await page.evaluate(() => {
+    const info = computeEditorTelopBox();
+    return { textW: info.textW, textH: info.textH, align: info.align };
+  });
+  const cornerFrom = await telopCenterInPage(page);
+  const cornerTo = await ratioToPage(page, 0.0, 0.0);
+  await dragMouse(page, cornerFrom, cornerTo, 10);
+  await page.waitForTimeout(100);
+  const clampedPos = await page.evaluate(() => draft.titlePos);
+  const expectedClamped = await page.evaluate(({ textW, textH, align }) => {
+    return clampTitlePosRatio([0, 0], textW, textH, align, overlaySize.width, overlaySize.height);
+  }, infoBeforeClamp);
+  check(clampedPos[0] >= 0 && clampedPos[0] <= 1 && clampedPos[1] >= 0 && clampedPos[1] <= 1,
+    "画面外に出そうな位置へドラッグしても比率は0〜1の範囲に収まる: " + JSON.stringify(clampedPos));
+  check(Math.abs(clampedPos[0] - expectedClamped[0]) < 0.02 && Math.abs(clampedPos[1] - expectedClamped[1]) < 0.02,
+    "クランプ結果がclampTitlePosRatio（render.pyと同じロジック）の計算どおりになる: " +
+    JSON.stringify(clampedPos) + " ≈ " + JSON.stringify(expectedClamped));
+
+  console.log("");
+  console.log("=== サイズスライダー・寄せセレクトの変更がdraftに反映される ===");
+  await page.fill("#titleSizeSlider", "0.1");
+  await page.dispatchEvent("#titleSizeSlider", "input");
+  const sizeAfter = await page.evaluate(() => draft.titleSize);
+  check(Math.abs(sizeAfter - 0.1) < 1e-6, "titleSizeSliderを動かすとdraft.titleSizeが更新される: " + sizeAfter);
+
+  await page.selectOption("#titleAlignSelect", "left");
+  const alignAfter = await page.evaluate(() => draft.titleAlign);
+  check(alignAfter === "left", "titleAlignSelectで選ぶとdraft.titleAlignが更新される: " + alignAfter);
+
+  console.log("");
+  console.log("=== 完了後、JSONにtitle_pos/title_size/title_alignが反映される ===");
+  await page.click("#commitFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  const project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.freezes.length === 1, "フリーズが1件書き出される: " + project.freezes.length);
+  const fz = project.freezes[0];
+  check(Array.isArray(fz.title_pos) && Math.abs(fz.title_pos[0] - clampedPos[0]) < 0.01 &&
+    Math.abs(fz.title_pos[1] - clampedPos[1]) < 0.01,
+    "書き出したJSONのfreezes[0].title_posがドラッグ後の位置になっている: " + JSON.stringify(fz.title_pos));
+  check(Math.abs(fz.title_size - 0.1) < 1e-6, "freezes[0].title_sizeがスライダーの値になっている: " + fz.title_size);
+  check(fz.title_align === "left", "freezes[0].title_alignがセレクトの値になっている: " + fz.title_align);
+
+  console.log("");
+  console.log("=== 何も操作しなければtitle_pos/size/alignは省略され、全体設定を継承する（後方互換） ===");
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  await page.fill("#nameInput", "位置指定なし");
+  await page.click("#commitFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  const project2 = await page.evaluate(() => buildProjectJSON(appState));
+  const untouchedFz = project2.freezes.filter((f) => f.name === "位置指定なし")[0];
+  check(untouchedFz && !("title_pos" in untouchedFz) && !("title_size" in untouchedFz) && !("title_align" in untouchedFz),
+    "ドラッグ・スライダー操作をしなければ title_pos/title_size/title_align キーは省略される: " +
+    JSON.stringify(untouchedFz));
+  check(JSON.stringify(project2.style.title_pos) === JSON.stringify([0.5, 0.78]) &&
+    project2.style.title_size === 0.06 && project2.style.title_align === "center",
+    "全体設定(style)は既定値[0.5,0.78]/0.06/centerのまま（後方互換）: " + JSON.stringify(project2.style));
+
+  check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+  await context.close();
+  await browser.close();
+
+  console.log("");
+  console.log(passed + " 件成功 / " + failed + " 件失敗");
+  if (failed > 0) process.exit(1);
+}
+
+main().catch((err) => {
+  console.error("テスト実行中に例外:", err);
+  process.exit(1);
+});

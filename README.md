@@ -67,6 +67,11 @@ spotlight-reel/
    ブラシ形状（round/hake/marker/spray）・フィルム縁取り色（このフリーズだけ全体設定の
    色を上書きしたい場合）を選んで「完了」。
    ブラシ形状は描いている途中で切り替えると、その場でストロークの見た目が変わる。
+   名前を入力すると映像の上にテロップが仮表示され、それを指でドラッグすると
+   このフリーズだけの表示位置（`title_pos`）を指定できる（テロップの上をタッチした時だけ
+   移動モードになるので、ブラシ描画とは干渉しない。画面外に出ないよう端で止まる）。
+   大きさは小さなスライダー、寄せ（左/中央/右）はセレクトで調整でき、どちらも
+   「▶ プレビュー」の簡易再生に反映される。
    「▶ プレビュー」で、フィルム縁取り・テロップのバウンス・（ラストフリーズなら）ロゴの
    着地とスイープ演出も含めた雰囲気をその場で確認できる。
 4. 「全体設定」でフリーズの長さ・フィルム縁取り（ズレ量・色プリセット・不透明度）・
@@ -201,6 +206,9 @@ python render.py examples/sample.json --preview preview.png             # 確認
     "title_font": "assets/fonts/Anton-Regular.ttf",
     "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
     "title_bounce": true,
+    "title_pos": [0.5, 0.78],
+    "title_size": 0.06,
+    "title_align": "center",
     "audio_during_freeze": "mute"
   },
   "freezes": [
@@ -210,6 +218,9 @@ python render.py examples/sample.json --preview preview.png             # 確認
       "sfx": "shakin",
       "brush_shape": "hake",
       "film_color": "#00C8FF",
+      "title_pos": [0.15, 0.15],
+      "title_size": 0.08,
+      "title_align": "left",
       "strokes": [
         { "width": 0.12, "points": [[0.42, 0.31], [0.44, 0.45], [0.43, 0.60]] }
       ]
@@ -231,8 +242,16 @@ python render.py examples/sample.json --preview preview.png             # 確認
   `x` は幅、`y` は高さ、`width` は幅を基準にします。
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
-  `film_color` / `film_alpha` / `background` / `font` / `audio_during_freeze` を個別上書き可能。
+  `film_color` / `film_alpha` / `background` / `font` / `audio_during_freeze` /
+  `title_pos` / `title_size` / `title_align` を個別上書き可能。
   `film_offset` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
+- `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
+  既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
+  `x` はそれぞれテロップの左端／右端の位置として扱われる（`center` のときのみ中心）。
+  画面端にはみ出す場合は自動で内側に寄せられる。
+- `title_size`：文字サイズ（出力の高さに対する比率）。既定 `0.06`。
+- `title_align`：テロップの水平寄せ。`left` / `center`（既定） / `right`。
+  不明な値は `center` として扱われる。
 - `brush_shape` は `round`（丸筆・既定値）/ `hake`（ハケ）/ `marker`（平筆マーカー）/
   `spray`（スプレー）のいずれか。未指定・不明な値は `round` として扱われます
   （後方互換：この項目が無い既存のJSONもそのまま動きます）。
@@ -240,8 +259,9 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
 - 新しいキー（`mono_contrast` / `film_offset` / `film_color` / `film_alpha` / `title_font` /
-  `title_font_jp` / `title_bounce` / `logo`）はすべて省略可能で、省略時は旧バージョンの
-  `render.py` と同じ見た目で動きます（後方互換。詳細は次項）。
+  `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo`）は
+  すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
+  （後方互換。詳細は次項）。
 
 ### 演出仕様（1フリーズあたり）
 
@@ -262,11 +282,14 @@ python render.py examples/sample.json --preview preview.png             # 確認
      `film_color` で個別に上書きできる。`film_offset` が `[0, 0]`（既定値）のときは
      人物カラーの真下に完全に隠れるため、見た目には現れない（＝後方互換）
    - 複数ストロークがある場合は合計時間 `brush_anim_sec` の中で順番に描く
-3. **ブラシ完了時点**：名前テロップ（高さ78%あたり、中央揃え、日本語を含む名前は
-   `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら `font` にフォール
-   バックする、文字サイズは高さの6%、白文字＋薄い黒ドロップシャドウ）を0.15秒でフェード
+3. **ブラシ完了時点**：名前テロップ（位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、
+   寄せは `title_align`・既定 `center`、文字サイズは `title_size`・既定は高さの6%。
+   日本語を含む名前は `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら
+   `font` にフォールバックする。白文字＋薄い黒ドロップシャドウ。`title_pos` が画面端に
+   はみ出す位置を指しても、自動で内側に寄せられ画面外に出ない）を0.15秒でフェード
    インさせ、効果音 `sfx`（`assets/sfx/{sfx}.wav`）を鳴らす。`title_bounce: true` なら
    フェードインと同じ0.15秒の間に130%→100%へ急停止イージングで縮む「はずむ」演出になる
+   （このときテロップの外接矩形の中心を基準に拡大縮小する）
 4. **残り時間**：`freeze_sec` になるまでカラー化＋テロップを保持
    （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの保持時間が
    ラストロゴの表示に必要な長さを満たすよう自動的に延長される。詳細は次項）
