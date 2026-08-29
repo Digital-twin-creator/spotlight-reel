@@ -59,47 +59,47 @@ def log(msg):
 # ダミー動画
 # ---------------------------------------------------------------------------
 
-def circle_positions(t):
+def circle_positions(t, w=W, h=H):
     """「人物」役の円2つの中心座標(t秒時点)を返す。左右にゆっくり往復する。"""
-    cx1 = W * 0.30 + math.sin(t * 0.6) * W * 0.10
-    cy1 = H * 0.35 + math.cos(t * 0.4) * H * 0.04
-    cx2 = W * 0.70 + math.sin(t * 0.5 + 1.5) * W * 0.10
-    cy2 = H * 0.55 + math.cos(t * 0.35 + 1.0) * H * 0.04
+    cx1 = w * 0.30 + math.sin(t * 0.6) * w * 0.10
+    cy1 = h * 0.35 + math.cos(t * 0.4) * h * 0.04
+    cx2 = w * 0.70 + math.sin(t * 0.5 + 1.5) * w * 0.10
+    cy2 = h * 0.55 + math.cos(t * 0.35 + 1.0) * h * 0.04
     return (cx1, cy1), (cx2, cy2)
 
 
-def make_gradient_bg(t):
+def make_gradient_bg(t, w=W, h=H):
     """時間とともにゆっくり変化する背景グラデーションを作る"""
-    yy = np.linspace(0, 1, H, dtype=np.float32).reshape(H, 1)
-    xx = np.linspace(0, 1, W, dtype=np.float32).reshape(1, W)
+    yy = np.linspace(0, 1, h, dtype=np.float32).reshape(h, 1)
+    xx = np.linspace(0, 1, w, dtype=np.float32).reshape(1, w)
     shift = (math.sin(t * 0.3) + 1) / 2
     r = (80 + 100 * yy * (0.5 + 0.5 * shift)).astype(np.float32)
     g = (60 + 80 * xx).astype(np.float32)
     b = (120 + 100 * (1 - yy) * (0.5 + 0.5 * (1 - shift))).astype(np.float32)
-    img = np.zeros((H, W, 3), np.float32)
+    img = np.zeros((h, w, 3), np.float32)
     img[:, :, 0] = b   # B
     img[:, :, 1] = g   # G
     img[:, :, 2] = r   # R
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def render_dummy_video(out_path):
-    """OpenCVで毎フレーム描画し、ffmpegにパイプしてH.264 MP4を作る"""
+def render_dummy_video(out_path, w=W, h=H):
+    """OpenCVで毎フレーム描画し、ffmpegにパイプしてH.264 MP4を作る（既定は縦動画1080x1920）"""
     ffmpeg = "ffmpeg"
     n_frames = DURATION_SEC * FPS
     cmd = [ffmpeg, "-y", "-v", "error",
            "-f", "rawvideo", "-pix_fmt", "bgr24",
-           "-s", f"{W}x{H}", "-r", str(FPS), "-i", "pipe:0",
+           "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",
            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
            "-pix_fmt", "yuv420p", out_path]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     for i in range(n_frames):
         t = i / FPS
-        frame = make_gradient_bg(t)
-        (x1, y1), (x2, y2) = circle_positions(t)
-        cv2.circle(frame, (int(x1), int(y1)), int(W * 0.12), (60, 90, 220), -1, cv2.LINE_AA)
-        cv2.circle(frame, (int(x2), int(y2)), int(W * 0.10), (200, 140, 60), -1, cv2.LINE_AA)
+        frame = make_gradient_bg(t, w, h)
+        (x1, y1), (x2, y2) = circle_positions(t, w, h)
+        cv2.circle(frame, (int(x1), int(y1)), int(w * 0.12), (60, 90, 220), -1, cv2.LINE_AA)
+        cv2.circle(frame, (int(x2), int(y2)), int(w * 0.10), (200, 140, 60), -1, cv2.LINE_AA)
         proc.stdin.write(frame.tobytes())
         if i % 30 == 0:
             print(f"\r  動画生成 {i}/{n_frames}", end="", flush=True)
@@ -480,11 +480,17 @@ def main():
     ensure_font()
     ensure_title_font()
 
-    log("=== ダミー動画を生成 ===")
+    log("=== ダミー動画を生成（縦） ===")
     video_path = os.path.join(EXAMPLES_DIR, "dummy_input.mp4")
     render_dummy_video(video_path)
     mux_audio_into_video(video_path, make_tone_track())
     log(f"  {video_path} を生成しました")
+
+    log("=== ダミー動画を生成（横。iPhone実機の縦動画バグの回帰テスト用） ===")
+    video_path_landscape = os.path.join(EXAMPLES_DIR, "dummy_input_landscape.mp4")
+    render_dummy_video(video_path_landscape, w=H, h=W)  # 縦動画の幅高を入れ替えただけの横動画
+    mux_audio_into_video(video_path_landscape, make_tone_track())
+    log(f"  {video_path_landscape} を生成しました")
 
     log("=== ダミーロゴを生成 ===")
     logo_path = gen_dummy_logo(os.path.join(EXAMPLES_DIR, "store_logo.png"))

@@ -81,6 +81,82 @@ test("computeContentRect: box比率と動画比率が同じならレターボッ
   assert.strictEqual(r.top, 0);
 });
 
+/* ---- parseMp4DisplayRotation / mp4RotationNeedsSwap / resolveEffectiveVideoDims ----
+ * iPhone実機で縦動画が正しく扱えない不具合（videoWidth/videoHeightが回転メタデータを
+ * 反映しない既知のWebKit系の不具合）への対策。ffmpegの-display_rotationで実際に
+ * 書き込まれるtkhdの変換行列と同じバイト構造を手組みして検証する。 */
+
+/** trak(tkhd+mdia>minf>vmhd)だけを持つ最小限のmoovボックスを組み立てる（version 0 tkhd固定） */
+function buildMinimalMp4Moov(a, b) {
+  function box(type, body) {
+    const header = Buffer.alloc(8);
+    header.writeUInt32BE(8 + body.length, 0);
+    header.write(type, 4, 4, "ascii");
+    return Buffer.concat([header, body]);
+  }
+  function makeTkhd(a, b) {
+    const buf = Buffer.alloc(40 + 36 + 8); // version0固定部(40) + matrix(36) + width/height(8)
+    const m = 40;
+    buf.writeInt32BE(Math.round(a * 65536), m);       // a
+    buf.writeInt32BE(Math.round(b * 65536), m + 4);   // b
+    buf.writeInt32BE(0, m + 8);                       // u
+    buf.writeInt32BE(Math.round(-b * 65536), m + 12); // c
+    buf.writeInt32BE(Math.round(a * 65536), m + 16);  // d
+    buf.writeInt32BE(0, m + 20);                      // v
+    buf.writeInt32BE(0, m + 24);                      // x
+    buf.writeInt32BE(0, m + 28);                      // y
+    buf.writeInt32BE(0x40000000, m + 32);              // w = 1.0 (2.30 fixed)
+    return buf;
+  }
+  const tkhd = box("tkhd", makeTkhd(a, b));
+  const vmhd = box("vmhd", Buffer.alloc(12));
+  const minf = box("minf", vmhd);
+  const mdia = box("mdia", minf);
+  const trak = box("trak", Buffer.concat([tkhd, mdia]));
+  return box("moov", trak);
+}
+
+function toArrayBuffer(buf) {
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+test("parseMp4DisplayRotation: 単位行列(無回転)は0を返す", () => {
+  const buf = buildMinimalMp4Moov(1, 0);
+  assert.strictEqual(core.parseMp4DisplayRotation(toArrayBuffer(buf)), 0);
+});
+
+test("parseMp4DisplayRotation: 90度系の行列は90または270を返す(mp4RotationNeedsSwapがtrue)", () => {
+  const buf = buildMinimalMp4Moov(0, 1);
+  const rotation = core.parseMp4DisplayRotation(toArrayBuffer(buf));
+  assert.ok(rotation === 90 || rotation === 270, "実際の値: " + rotation);
+  assert.strictEqual(core.mp4RotationNeedsSwap(rotation), true);
+});
+
+test("parseMp4DisplayRotation: 180度の行列は180を返す(mp4RotationNeedsSwapがfalse)", () => {
+  const buf = buildMinimalMp4Moov(-1, 0);
+  const rotation = core.parseMp4DisplayRotation(toArrayBuffer(buf));
+  assert.strictEqual(rotation, 180);
+  assert.strictEqual(core.mp4RotationNeedsSwap(rotation), false);
+});
+
+test("parseMp4DisplayRotation: moovの無いバイト列はnullを返す", () => {
+  assert.strictEqual(core.parseMp4DisplayRotation(toArrayBuffer(Buffer.from("not an mp4 file"))), null);
+});
+
+test("resolveEffectiveVideoDims: 90度系回転かつ横向き報告のときだけ幅高を入れ替える", () => {
+  // iOSの不具合を模したケース：回転メタデータは90度系なのに、videoWidth/videoHeightが
+  // 回転前（横向き）のまま報告されている → 補正して縦向きにする
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1920, 1080, 90), { width: 1080, height: 1920 });
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1920, 1080, 270), { width: 1080, height: 1920 });
+  // ブラウザが既に正しく縦向きを報告している場合は、二重に入れ替えない
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1080, 1920, 90), { width: 1080, height: 1920 });
+  // 回転なし(0/180)は常にそのまま
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1920, 1080, 0), { width: 1920, height: 1080 });
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1920, 1080, 180), { width: 1920, height: 1080 });
+  // 回転情報が不明(null)なら常にそのまま報告値を使う
+  assert.deepStrictEqual(core.resolveEffectiveVideoDims(1920, 1080, null), { width: 1920, height: 1080 });
+});
+
 /* ---- ratioFromRect ---- */
 test("ratioFromRect: 矩形中央のタッチは(0.5, 0.5)になる", () => {
   const rect = { left: 10, top: 20, width: 100, height: 200 };
@@ -165,6 +241,25 @@ test("buildProjectJSON: strokes の points/width が比率のまま出力され�
   assert.strictEqual(st.width, 0.1);
   assert.ok(st.points[0][0] >= 0 && st.points[0][0] <= 1);
   assert.deepStrictEqual(st.points[0], [0.3, 0.37]);
+});
+
+test("buildProjectJSON: フリーズ一覧(state.freezes)の件数と書き出しJSONのfreezes件数が一致する（3件以上でも欠落しない）", () => {
+  const state = sampleState();
+  // sampleStateの2件に加え、3件目以降を追加して合計5件で検証する
+  for (let i = 0; i < 3; i++) {
+    state.freezes.push({
+      id: "extra-" + i, time: 10 + i, name: "追加" + i, sfx: "", background: "mono",
+      strokes: [{ width: 0.1, points: [[0.1, 0.1], [0.2, 0.2]] }]
+    });
+  }
+  assert.strictEqual(state.freezes.length, 5);
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.freezes.length, state.freezes.length,
+    "一覧の件数(" + state.freezes.length + ")と書き出しJSONのfreezes件数(" + project.freezes.length + ")が一致しない");
+  // 追加した3件の名前がすべてJSONに含まれている（途中で欠落していない）ことも確認する
+  const names = project.freezes.map(f => f.name);
+  assert.ok(["追加0", "追加1", "追加2"].every(n => names.includes(n)),
+    "追加したフリーズの一部がJSONから欠落している: " + JSON.stringify(names));
 });
 
 test("buildProjectJSON: outputMode='original' なら output キーを省略する", () => {

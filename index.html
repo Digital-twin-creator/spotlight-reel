@@ -631,6 +631,109 @@ function computeContentRect(boxW, boxH, videoW, videoH) {
   return { left: (boxW - width) / 2, top: (boxH - height) / 2, width: width, height: height };
 }
 
+/**
+ * MP4/MOVファイルのバイト列(ArrayBuffer)から、映像トラックのtkhd変換行列を読み取り、
+ * 表示上の回転角(0/90/180/270)を返す。解析できない場合は null。
+ *
+ * 一部のiOS Safariでは、90度回転メタデータ付きの縦動画で
+ * HTMLVideoElement.videoWidth/videoHeight が回転前（横向き）のまま返ることがある
+ * （既知のWebKit系の不具合）。videoWidth/videoHeightだけでは正しい表示向きを
+ * 判定できないため、ファイル自体の回転メタデータをJSで直接読み取って補正の材料にする。
+ */
+function parseMp4DisplayRotation(buffer) {
+  if (!buffer || buffer.byteLength < 8) return null;
+  var view = new DataView(buffer);
+  var len = buffer.byteLength;
+
+  function readString(offset, n) {
+    var s = "";
+    for (var i = 0; i < n; i++) s += String.fromCharCode(view.getUint8(offset + i));
+    return s;
+  }
+
+  /** [start, end) の範囲でトップレベルのボックスを探す（見つからなければnull） */
+  function findBox(start, end, targetType) {
+    var offset = start;
+    while (offset + 8 <= end) {
+      var size = view.getUint32(offset, false);
+      var type = readString(offset + 4, 4);
+      var headerSize = 8;
+      if (size === 1) {
+        if (offset + 16 > end) break;
+        var hi = view.getUint32(offset + 8, false);
+        var lo = view.getUint32(offset + 12, false);
+        size = hi * 4294967296 + lo;
+        headerSize = 16;
+      } else if (size === 0) {
+        size = end - offset;
+      }
+      if (size < headerSize || offset + size > end) break;
+      if (type === targetType) return { start: offset + headerSize, end: offset + size };
+      offset += size;
+    }
+    return null;
+  }
+
+  var moov = findBox(0, len, "moov");
+  if (!moov) return null;
+
+  var offset = moov.start;
+  while (offset + 8 <= moov.end) {
+    var size = view.getUint32(offset, false);
+    var type = readString(offset + 4, 4);
+    if (size < 8 || offset + size > moov.end) break;
+    if (type === "trak") {
+      var trakEnd = offset + size;
+      var mdia = findBox(offset + 8, trakEnd, "mdia");
+      var isVideoTrak = false;
+      if (mdia) {
+        var minf = findBox(mdia.start, mdia.end, "minf");
+        if (minf && findBox(minf.start, minf.end, "vmhd")) isVideoTrak = true;
+      }
+      if (isVideoTrak) {
+        var tkhd = findBox(offset + 8, trakEnd, "tkhd");
+        if (tkhd && tkhd.end - tkhd.start >= 44) {
+          var version = view.getUint8(tkhd.start);
+          var matrixOffset = tkhd.start + (version === 1 ? 52 : 40);
+          if (matrixOffset + 8 <= tkhd.end) {
+            var a = view.getInt32(matrixOffset, false) / 65536;
+            var b = view.getInt32(matrixOffset + 4, false) / 65536;
+            if (a === 0 && b === 0) return null;
+            var angle = Math.round(Math.atan2(b, a) * 180 / Math.PI);
+            angle = ((angle % 360) + 360) % 360;
+            return Math.round(angle / 90) * 90 % 360;
+          }
+        }
+        return null;
+      }
+    }
+    offset += size;
+  }
+  return null;
+}
+
+/** 回転が90/270度系（表示時に幅と高さが入れ替わる）かどうか */
+function mp4RotationNeedsSwap(rotation) {
+  return rotation === 90 || rotation === 270;
+}
+
+/**
+ * ブラウザが報告する videoWidth/videoHeight と、ファイルから読み取った回転角を突き合わせ、
+ * 実際に使うべき表示上の幅・高さを決める。
+ *   - mp4Rotationが90/270度系で、かつ reportedW > reportedH（横向きに見える）の場合のみ、
+ *     「ブラウザが回転を反映していない」既知の不具合とみなして幅と高さを入れ替える。
+ *   - それ以外（回転なし、または既にブラウザが正しく縦横を報告している）は、
+ *     reportedW/reportedH をそのまま使う（誤検知で正しい値を壊さないための保守的な条件）。
+ */
+function resolveEffectiveVideoDims(reportedW, reportedH, mp4Rotation) {
+  var w = Number(reportedW) || 0;
+  var h = Number(reportedH) || 0;
+  if (mp4RotationNeedsSwap(mp4Rotation) && w > h) {
+    return { width: h, height: w };
+  }
+  return { width: w, height: h };
+}
+
 /** クライアント座標を rect（内容矩形。CSSピクセル単位）基準の0〜1比率に変換する */
 function ratioFromRect(clientX, clientY, rect) {
   if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
@@ -1121,6 +1224,9 @@ if (typeof module !== "undefined" && module.exports) {
     telopBounceScale: telopBounceScale,
     logoAssetName: logoAssetName,
     computeContentRect: computeContentRect,
+    parseMp4DisplayRotation: parseMp4DisplayRotation,
+    mp4RotationNeedsSwap: mp4RotationNeedsSwap,
+    resolveEffectiveVideoDims: resolveEffectiveVideoDims,
     ratioFromRect: ratioFromRect,
     shouldAddPoint: shouldAddPoint,
     sortFreezesByTime: sortFreezesByTime,
@@ -1184,6 +1290,10 @@ var appState = {
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
 var draftIsNew = false;    // draft が新規追加か、既存の編集か
+// 現在読み込んでいる動画ファイルの、MP4ファイル自体から読み取った回転角(0/90/180/270)。
+// 未確定はnull。videoWidth/videoHeightが回転を反映していないiOSの既知の不具合を
+// 補正するために使う（getEffectiveVideoDims参照）。
+var currentVideoMp4Rotation = null;
 var currentStroke = null;  // 描画中のストローク { widthRatio, points:[[x,y],...] }
 var overlaySize = { width: 0, height: 0 };
 // 直近に実際にcanvasの.width/.heightを再設定したときのCSSピクセルサイズ。
@@ -1235,6 +1345,13 @@ function init() {
   els.useSampleBtn.addEventListener("click", loadSampleVideo);
 
   els.video.addEventListener("loadedmetadata", onVideoLoadedMetadata);
+  // 一部の環境ではloadedmetadata時点でvideoWidth/videoHeightがまだ確定していないことが
+  // あるため、実際にデータが揃うloadeddataでも再計算する（安全側の保険。冪等なので無害）。
+  els.video.addEventListener("loadeddata", function () {
+    if (draft) return;
+    var resized = layoutOverlayCanvases();
+    if (resized) drawPlayerFrameOnce();
+  });
   els.video.addEventListener("timeupdate", onVideoTimeUpdate);
   els.video.addEventListener("play", function () {
     els.playPauseBtn.textContent = "⏸ 停止";
@@ -1497,6 +1614,24 @@ function loadVideoFile(file) {
   // （失敗しても tryUnlockVideo は次のタップで再試行される）
   tryUnlockVideo();
 
+  // ファイル自体から回転メタデータを読み取る（videoWidth/videoHeightがiOSで
+  // 回転を反映しないケースの補正用）。loadedmetadataより後に解決することもあるため、
+  // 解決時にレイアウトを再計算する。読み取れなくても致命的ではないので握りつぶす。
+  currentVideoMp4Rotation = null;
+  var detectingFor = file;
+  file.arrayBuffer().then(function (buf) {
+    if (appState.videoFile !== detectingFor) return; // その間に別の動画へ切り替わっていたら無視
+    try {
+      currentVideoMp4Rotation = parseMp4DisplayRotation(buf);
+    } catch (err) {
+      currentVideoMp4Rotation = null;
+    }
+    if (els.video.videoWidth && !draft) {
+      var resized = layoutOverlayCanvases();
+      if (resized) drawPlayerFrameOnce();
+    }
+  }).catch(function () { /* 読み取れなくても致命的ではないので無視 */ });
+
   var restored = loadFromLocalStorage(file.name);
   if (restored) {
     els.restoreStatus.textContent = "前回の編集内容を復元しました（フリーズ " + appState.freezes.length + " 件）";
@@ -1740,6 +1875,7 @@ function exitDrawMode() {
     els.editorSection.style.top = "";
     els.videoWrap.classList.remove("editing");
     els.videoWrap.classList.remove("previewing");
+    els.videoWrap.style.top = "";
     els.videoWrap.style.width = "";
     els.videoWrap.style.height = "";
     stopPreviewPlayback();
@@ -1751,6 +1887,11 @@ function exitDrawMode() {
     currentStroke = null;
     frozenFrameCanvas = null;
     document.body.classList.remove("freeze-editing");
+    // iOS Safariはposition:fixedの解除後、明示的にレイアウトを読み直させないと
+    // 古い固定位置のまま描画され続けることがある（既知のレンダリング不具合）。
+    // offsetHeightの読み取りで強制的に同期リフローさせ、直後のgetBoundingClientRect
+    // （layoutOverlayCanvases内）が実際の通常レイアウトを反映するようにする。
+    void document.body.offsetHeight;
     layoutOverlayCanvases(); // video-wrapが通常サイズに戻った後のcanvas再配置
     startPlayerRenderLoop(); // 通常のライブ描画を必ず再開する
     setPlayStatus(els.video.paused ? "一時停止中" : "再生中");
@@ -1827,9 +1968,20 @@ function hideDrawHint() {
  *
  * 戻り値: 実際に canvas.width/height を再設定した場合 true。
  */
+/**
+ * 現在の動画の「表示上の」幅・高さを返す。videoWidth/videoHeightをそのまま使うのではなく、
+ * ファイルから読み取った回転メタデータ(currentVideoMp4Rotation)で補正する
+ * （resolveEffectiveVideoDims参照。iOSの一部で縦動画のvideoWidth/videoHeightが
+ * 回転前のまま返る既知の不具合への対策）。
+ */
+function getEffectiveVideoDims() {
+  return resolveEffectiveVideoDims(els.video.videoWidth, els.video.videoHeight, currentVideoMp4Rotation);
+}
+
 function layoutOverlayCanvases() {
   var rect = els.video.getBoundingClientRect();
-  var content = computeContentRect(rect.width, rect.height, els.video.videoWidth || rect.width, els.video.videoHeight || rect.height);
+  var dims = getEffectiveVideoDims();
+  var content = computeContentRect(rect.width, rect.height, dims.width || rect.width, dims.height || rect.height);
   var dpr = window.devicePixelRatio || 1;
 
   [els.playerCanvas, els.drawCanvas, els.previewCanvas].forEach(function (canvas) {
@@ -2543,7 +2695,7 @@ function updateFilmColorPresetSelection() {
 function getReferenceOutputWidth() {
   var preset = OUTPUT_PRESETS[appState.outputMode];
   if (preset) return preset.width;
-  return els.video.videoWidth || 1080;
+  return getEffectiveVideoDims().width || 1080;
 }
 
 /* ---------------- ラストロゴ ---------------- */

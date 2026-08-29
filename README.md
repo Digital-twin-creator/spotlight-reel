@@ -28,6 +28,8 @@ spotlight-reel/
 │   └── brushes/            # round/hake/marker/spray.png（筆先スタンプ画像、白＋アルファ）
 ├── examples/
 │   ├── sample.json         # make_dummy.py が生成するサンプル
+│   ├── dummy_input.mp4     # ダミー動画（縦 1080x1920）
+│   ├── dummy_input_landscape.mp4 # ダミー動画（横 1920x1080。縦横回帰テスト用）
 │   └── store_logo.png      # make_dummy.py が生成するダミーのラストロゴ画像
 ├── tests/
 │   ├── editor_logic.test.js                    # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
@@ -36,6 +38,7 @@ spotlight-reel/
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── brush_shape.playwright.test.mjs         # ブラシ形状選択・筆先スタンプ描画の回帰テスト（任意、要playwright-core）
 │   ├── film_logo_bounce.playwright.test.mjs    # フィルム縁取り・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
+│   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
@@ -323,6 +326,11 @@ python render.py examples/sample.json --preview preview.png             # 確認
   `libx264 / yuv420p / crf 20` でエンコードします（Colabで確実にH.264 MP4を出すため）。
 - 縦動画の回転メタデータを考慮し、表示上の向きでフレームを処理します。
 - 音声の切り貼り・ミックスは numpy で行い、最後に ffmpeg で映像と結合します。
+- `index.html`（エディタ）側は、一部のiOS Safariで `HTMLVideoElement.videoWidth/videoHeight` が
+  回転メタデータを反映しない既知の不具合があるため、選択した動画ファイル自体（MP4/MOVの
+  `tkhd` 変換行列）をJSで直接読み取って補正する（`parseMp4DisplayRotation` /
+  `resolveEffectiveVideoDims`）。playerCanvasのサイズ計算・レターボックス・タッチ座標の
+  正規化はすべてこの補正済みの値を使う。
 
 ## 動作確認
 
@@ -340,6 +348,7 @@ python3 -m http.server 8794 &   # index.html をどこかで配信しておく
 node tests/player_ui.playwright.test.mjs
 node tests/freeze_black_screen.playwright.test.mjs
 node tests/resize_scroll_black_screen.playwright.test.mjs
+node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動画それぞれでフリーズ3件追加→JSON件数一致を確認
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/film_logo_bounce.playwright.test.mjs # フィルム縁取り・テロップバウンス・ラストロゴ設定のE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
