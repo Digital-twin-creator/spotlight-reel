@@ -40,10 +40,23 @@ DEFAULT_STYLE = {
     "freeze_sec": 2.5,            # フリーズ全体の長さ（秒）
     "brush_anim_sec": 0.8,        # ブラシが伸びるアニメーションの長さ（秒）
     "brush_width": 0.12,          # ブラシ太さ（動画幅に対する比率）
+    "brush_shape": "round",       # round | hake | marker | spray
     "background": "mono",         # mono | dark
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     "audio_during_freeze": "mute",  # mute | keep
 }
+
+BRUSH_SHAPES = ("round", "hake", "marker", "spray")
+BRUSH_ASSET_DIR = os.path.join("assets", "brushes")
+# 筆先PNG（assets/brushes/<shape>.png、正方形キャンバス）の中で、実際の絵柄が
+# 占める一辺の比率の逆数。ブラシ太さ(px)からキャンバスサイズを逆算するのに使う。
+# 値は make_dummy.py の gen_*_tip() が生成する図形の実寸と対応しているので、
+# 片方を変えたらもう片方も見た目を確認しながら合わせること。
+BRUSH_TIP_SCALE = {"round": 1.19, "hake": 1.56, "marker": 1.61, "spray": 1.09}
+# 筆先スタンプの間隔 ÷ ブラシ太さ。形状ごとに変える：
+# round/marker は隙間なく滑らかにつながるよう密に、hake/spray は重ねすぎると
+# 質感（毛筋・粒感）が塗りつぶされて消えてしまうので粗めにスタンプする。
+BRUSH_STAMP_SPACING = {"round": 0.32, "hake": 0.62, "marker": 0.42, "spray": 0.68}
 
 HOLD_BEFORE_BRUSH_SEC = 0.3   # フリーズ開始からブラシ描き始めまでの静止時間
 TELOP_FADE_SEC = 0.15         # テロップのフェードイン時間
@@ -328,14 +341,97 @@ def build_stroke_geometry(strokes, W, H, default_width):
     return geo, total
 
 
-def draw_stroke_mask(geo, W, H, start_len, end_len):
+def resolve_brush_shape(shape):
+    """未知の値は round にフォールバックする（background の扱いと同じ方針）"""
+    shape = shape or "round"
+    if shape not in BRUSH_SHAPES:
+        warn(f"brush_shape='{shape}' は未知の値です。round として扱います。")
+        return "round"
+    return shape
+
+
+_TIP_CACHE = {}
+
+
+def get_brush_tip_alpha(shape, size_px):
     """
-    累積長 start_len〜end_len の範囲だけを描いたマスク（0/255）を作る。
-    丸いキャップ・丸いジョイントにするため、区間の端に円を打つ。
+    assets/brushes/<shape>.png を読み込み、size_px四方にリサイズした
+    アルファ値（float32, 0.0〜1.0）の配列を返す。(shape, size_px) 単位でキャッシュする。
     """
-    mask = np.zeros((H, W), np.uint8)
+    size_px = max(2, int(round(size_px)))
+    key = (shape, size_px)
+    cached = _TIP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    path = resolve_path(os.path.join(BRUSH_ASSET_DIR, f"{shape}.png"), [SCRIPT_DIR])
+    if not os.path.exists(path):
+        if shape != "round":
+            warn(f"ブラシ画像が見つかりません（{path}）。round にフォールバックします。")
+            return get_brush_tip_alpha("round", size_px)
+        raise RuntimeError(
+            f"ブラシ画像が見つかりません: {path}\n"
+            "python make_dummy.py を実行して assets/brushes/*.png を生成してください。")
+
+    img = Image.open(path).convert("RGBA").resize((size_px, size_px), Image.LANCZOS)
+    alpha = np.asarray(img, dtype=np.float32)[:, :, 3] / 255.0
+    _TIP_CACHE[key] = alpha
+    return alpha
+
+
+def point_and_angle_at_length(pts, seglens, length):
+    """ポリライン pts 上の累積長 length の位置の座標と、その位置での進行方向（ラジアン）を返す"""
+    acc = 0.0
+    for i, seg in enumerate(seglens):
+        nxt = acc + seg
+        if seg > 0 and (length <= nxt or i == len(seglens) - 1):
+            t = float(np.clip((length - acc) / seg, 0.0, 1.0))
+            p0, p1 = pts[i], pts[i + 1]
+            x = p0[0] + (p1[0] - p0[0]) * t
+            y = p0[1] + (p1[1] - p0[1]) * t
+            angle = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+            return (x, y), angle
+        acc = nxt
+    return pts[-1], 0.0
+
+
+def stamp_tip(accum, tip_alpha, cx, cy, angle_rad, size_px):
+    """
+    accum（H×W, float32, 0〜1の被覆率）に、tip_alphaを angle_rad だけ回転させて
+    (cx, cy) を中心に「over」合成でスタンプする（重なった部分は自然と濃くなる）。
+    """
+    H, W = accum.shape
+    half = size_px / 2.0
+    # cv2.getRotationMatrix2Dは数学的な反時計回りを正とするため、
+    # 画像のY軸が下向き（画面座標）でも進行方向どおりに向くよう符号を反転する。
+    M = cv2.getRotationMatrix2D((half, half), -math.degrees(angle_rad), 1.0)
+    rotated = cv2.warpAffine(tip_alpha, M, (size_px, size_px),
+                              flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+
+    x0, y0 = int(round(cx - half)), int(round(cy - half))
+    x1, y1 = x0 + size_px, y0 + size_px
+    sx0, sy0 = max(0, -x0), max(0, -y0)
+    sx1, sy1 = size_px - max(0, x1 - W), size_px - max(0, y1 - H)
+    dx0, dy0 = max(0, x0), max(0, y0)
+    dx1, dy1 = min(W, x1), min(H, y1)
+    if dx1 <= dx0 or dy1 <= dy0 or sx1 <= sx0 or sy1 <= sy0:
+        return
+
+    patch = rotated[sy0:sy1, sx0:sx1]
+    region = accum[dy0:dy1, dx0:dx1]
+    region += (1.0 - region) * patch
+
+
+def draw_stroke_mask(geo, W, H, start_len, end_len, shape):
+    """
+    累積長 start_len〜end_len の範囲を、shapeの筆先画像を軌跡に沿って
+    一定間隔でスタンプすることで描いたマスク（0〜255, uint8）を作る。
+    筆先は進行方向に合わせて回転させる。
+    """
+    accum = np.zeros((H, W), np.float32)
     if end_len <= start_len:
-        return mask
+        return np.zeros((H, W), np.uint8)
 
     offset = 0.0
     for g in geo:
@@ -346,48 +442,39 @@ def draw_stroke_mask(geo, W, H, start_len, end_len):
             continue
 
         thick = g["thick"]
-        radius = max(1, thick // 2)
+        size_px = max(4, int(round(thick * BRUSH_TIP_SCALE.get(shape, 1.2))))
+        tip_alpha = get_brush_tip_alpha(shape, size_px)
         pts = g["pts"]
 
         if g["length"] <= 0.0:
-            # 1点だけ（またはゼロ長）のストロークは丸い点として描く
-            cv2.circle(mask, (int(round(pts[0][0])), int(round(pts[0][1]))),
-                       radius, 255, -1, cv2.LINE_AA)
+            # 1点だけ（またはゼロ長）のストロークは、その場に1つだけスタンプする
+            stamp_tip(accum, tip_alpha, pts[0][0], pts[0][1], 0.0, size_px)
             continue
 
-        acc = 0.0
-        for i, (p0, p1) in enumerate(zip(pts[:-1], pts[1:])):
-            seg = g["seglens"][i]
-            if seg <= 0:
-                continue
-            a0, a1 = acc, acc + seg
-            acc = a1
-            lo, hi = max(s, a0), min(e, a1)
-            if hi <= lo:
-                continue
-            t0, t1 = (lo - a0) / seg, (hi - a0) / seg
-            q0 = (int(round(p0[0] + (p1[0] - p0[0]) * t0)),
-                  int(round(p0[1] + (p1[1] - p0[1]) * t0)))
-            q1 = (int(round(p0[0] + (p1[0] - p0[0]) * t1)),
-                  int(round(p0[1] + (p1[1] - p0[1]) * t1)))
-            cv2.line(mask, q0, q1, 255, thick, cv2.LINE_AA)
-            cv2.circle(mask, q0, radius, 255, -1, cv2.LINE_AA)   # 丸キャップ/ジョイント
-            cv2.circle(mask, q1, radius, 255, -1, cv2.LINE_AA)
-    return mask
+        spacing = max(1.0, thick * BRUSH_STAMP_SPACING.get(shape, 0.4))
+        pos = s
+        while pos < e:
+            (x, y), ang = point_and_angle_at_length(pts, g["seglens"], pos)
+            stamp_tip(accum, tip_alpha, x, y, ang, size_px)
+            pos += spacing
+        # 区間の終端も必ずスタンプする（spacing間隔の端数で端が欠けないように）
+        (x, y), ang = point_and_angle_at_length(pts, g["seglens"], e)
+        stamp_tip(accum, tip_alpha, x, y, ang, size_px)
 
-
-def feather(mask, W):
-    """マスクの縁を数ピクセルぼかして、カラー部分と背景をなじませる"""
-    k = max(3, int(round(W / 300.0)))
+    mask = np.clip(accum * 255.0, 0, 255).astype(np.uint8)
+    # ごく軽くぼかす：筆先画像そのものの縁は既に滑らかだが、点数の少ないストローク
+    # （角ばったポリラインで曲線を近似している場合など）の継ぎ目を目立たなくする。
+    # カーネルを小さく保ち、ハケの毛筋やスプレーの粒状感を潰さない程度にする。
+    k = max(3, int(round(W / 500.0)))
     if k % 2 == 0:
         k += 1
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 
-def composite_brush(bg, color, geo, total_len, progress, W):
+def composite_brush(bg, color, geo, total_len, progress, W, shape):
     """
     進捗 progress(0〜1) の時点の合成フレームを作る。
-      - 描画済みの領域だけ元のカラーが見える（縁はぼかす）
+      - 描画済みの領域だけ元のカラーが見える（筆先スタンプによるマスクで復元）
       - 描いたばかりの先端付近には白い絵の具（alpha 0.85）が乗り、
         少し後ろでフェードして消える（＝最終的にはカラーだけが残る）
     """
@@ -395,7 +482,7 @@ def composite_brush(bg, color, geo, total_len, progress, W):
         return bg.copy()
 
     head = total_len * float(np.clip(progress, 0.0, 1.0))
-    mask = feather(draw_stroke_mask(geo, W, bg.shape[0], 0.0, head), W)
+    mask = draw_stroke_mask(geo, W, bg.shape[0], 0.0, head, shape)
     m = (mask.astype(np.float32) / 255.0)[:, :, None]
 
     out = bg.astype(np.float32) * (1.0 - m) + color.astype(np.float32) * m
@@ -404,8 +491,7 @@ def composite_brush(bg, color, geo, total_len, progress, W):
         # 先端付近の「まだ乾いていない絵の具」の長さ
         max_thick = max(g["thick"] for g in geo)
         tail = max(2.0 * max_thick, total_len * 0.12)
-        paint = feather(draw_stroke_mask(geo, W, bg.shape[0],
-                                         max(head - tail, 0.0), head), W)
+        paint = draw_stroke_mask(geo, W, bg.shape[0], max(head - tail, 0.0), head, shape)
         pm = (paint.astype(np.float32) / 255.0)[:, :, None] * BRUSH_PAINT_ALPHA
         out = out * (1.0 - pm) + 255.0 * pm
 
@@ -537,6 +623,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir):
     """
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"))
+    shape = resolve_brush_shape(fz.get("brush_shape"))
     geo, total_len = build_stroke_geometry(
         fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
 
@@ -552,10 +639,10 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir):
     # 2) ブラシ描画
     for i in range(plan["n_brush"]):
         progress = (i + 1) / float(plan["n_brush"])
-        yield composite_brush(bg, frame, geo, total_len, progress, W)
+        yield composite_brush(bg, frame, geo, total_len, progress, W, shape)
 
     # 3) 完成状態＋テロップのフェードイン→保持
-    done = composite_brush(bg, frame, geo, total_len, 1.0, W)
+    done = composite_brush(bg, frame, geo, total_len, 1.0, W, shape)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
     for i in range(plan["n_rest"]):
         fade = min(1.0, (i + 1) / float(fade_frames))
@@ -566,9 +653,10 @@ def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
     """--preview 用：ブラシ完了＋テロップ全表示のフレームを1枚PNGで出す"""
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"))
+    shape = resolve_brush_shape(fz.get("brush_shape"))
     geo, total_len = build_stroke_geometry(
         fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
-    img = composite_brush(bg, frame, geo, total_len, 1.0, W)
+    img = composite_brush(bg, frame, geo, total_len, 1.0, W, shape)
 
     font_path = resolve_path(fz.get("font"), [os.getcwd(), json_dir, SCRIPT_DIR])
     font = load_font(font_path, max(8, int(round(H * TELOP_SIZE_RATIO))))

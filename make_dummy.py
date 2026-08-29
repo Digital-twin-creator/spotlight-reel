@@ -24,12 +24,14 @@ import wave
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES_DIR = os.path.join(SCRIPT_DIR, "examples")
 ASSETS_DIR = os.path.join(SCRIPT_DIR, "assets")
 FONT_DIR = os.path.join(ASSETS_DIR, "fonts")
 SFX_DIR = os.path.join(ASSETS_DIR, "sfx")
+BRUSH_DIR = os.path.join(ASSETS_DIR, "brushes")
 
 W, H, FPS, DURATION_SEC = 1080, 1920, 30, 8
 SR = 48000
@@ -256,6 +258,133 @@ def make_sample_json(video_filename):
 
 
 # ---------------------------------------------------------------------------
+# ブラシ筆先画像（assets/brushes/<shape>.png）
+#
+# render.py / index.html の両方が同じPNG（白RGB＋アルファ）を「筆先スタンプ」として使う。
+# 筆先は「進行方向が+X（右向き）」を基準に描いており、render.py側は
+# ストロークの向きに合わせて回転させてから貼り付ける。
+# TIP_SIZE（正方形キャンバスの一辺）に対する実際の絵柄のサイズ比は、
+# render.py の BRUSH_TIP_SCALE と対応関係にあるので、両者を変更するときは
+# 見た目のバランスを見ながら一緒に調整すること。
+# ---------------------------------------------------------------------------
+
+TIP_SIZE = 256      # 生成する筆先PNGの一辺（px）
+TIP_SS = 4          # 縁を滑らかにするためのスーパーサンプリング倍率
+
+
+def _new_alpha_canvas(size):
+    return Image.new("L", (size, size), 0)
+
+
+def _finish_tip(alpha_img):
+    """Lモード（アルファ）画像を TIP_SIZE にリサイズし、白RGB+そのアルファのRGBAにする"""
+    if alpha_img.size[0] != TIP_SIZE:
+        alpha_img = alpha_img.resize((TIP_SIZE, TIP_SIZE), Image.LANCZOS)
+    rgba = Image.new("RGBA", (TIP_SIZE, TIP_SIZE), (255, 255, 255, 0))
+    rgba.putalpha(alpha_img)
+    return rgba
+
+
+def gen_round_tip():
+    """round：柔らかい縁を持つ円（従来の丸キャップの見た目に近い）"""
+    size = TIP_SIZE * TIP_SS
+    img = _new_alpha_canvas(size)
+    draw = ImageDraw.Draw(img)
+    cx = cy = size / 2.0
+    r = size * 0.42
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+    img = img.filter(ImageFilter.GaussianBlur(size * 0.012))
+    return _finish_tip(img)
+
+
+def gen_marker_tip():
+    """marker：角の丸い長方形。縁はくっきり、不透明度は0.82（重なりで自然に濃くなる）"""
+    size = TIP_SIZE * TIP_SS
+    img = _new_alpha_canvas(size)
+    draw = ImageDraw.Draw(img)
+    w, h = size * 0.90, size * 0.62
+    x0, y0 = (size - w) / 2.0, (size - h) / 2.0
+    x1, y1 = x0 + w, y0 + h
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=h * 0.28, fill=255)
+    img = img.filter(ImageFilter.GaussianBlur(size * 0.004))
+    rgba = _finish_tip(img)
+    a = np.asarray(rgba.getchannel("A"), dtype=np.float32) * 0.82
+    rgba.putalpha(Image.fromarray(a.astype(np.uint8)))
+    return rgba
+
+
+def gen_hake_tip():
+    """hake：横長の楕円ベース＋縦方向の毛筋（濃淡バンド）＋縁のギザつき＋わずかな不透明度ムラ"""
+    rng = np.random.default_rng(20260830)
+    size = TIP_SIZE * TIP_SS
+    cx = cy = size / 2.0
+    rx, ry = size * 0.46, size * 0.32
+
+    base = _new_alpha_canvas(size)
+    ImageDraw.Draw(base).ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=255)
+    base_arr = np.asarray(base, dtype=np.float32) / 255.0
+
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+
+    # 縁のギザつき：角度に応じて縁の半径を波打たせ、はみ出た部分を欠けさせる
+    ang = np.arctan2((yy - cy) / ry, (xx - cx) / rx)
+    n_teeth = 40
+    jag = 0.06 * np.sin(ang * n_teeth + rng.uniform(0, 2 * math.pi))
+    rad_norm = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)
+    edge_mask = (rad_norm <= (1.0 + jag)).astype(np.float32)
+    base_arr = base_arr * edge_mask
+
+    # 毛筋：y位置ごとに濃淡が変わる縦バンド（本数はランダムだが再現性のため固定シード）
+    n_bristles = 16
+    band_mul = rng.uniform(0.45, 1.0, size=n_bristles).astype(np.float32)
+    band_idx = np.clip(((yy - (cy - ry)) / (2 * ry) * n_bristles).astype(np.int32),
+                        0, n_bristles - 1)
+    bristle_mul = band_mul[band_idx]
+
+    # わずかな不透明度ムラ
+    noise = 1.0 + 0.08 * rng.standard_normal((size, size)).astype(np.float32)
+
+    alpha = np.clip(base_arr * bristle_mul * noise, 0.0, 1.0)
+    img = Image.fromarray((alpha * 255).astype(np.uint8), mode="L")
+    img = img.filter(ImageFilter.GaussianBlur(size * 0.006))
+    return _finish_tip(img)
+
+
+def gen_spray_tip():
+    """spray：円形範囲にランダムな点をまき散らす（中心寄りにやや密度が高い）"""
+    rng = np.random.default_rng(20260831)
+    size = TIP_SIZE * TIP_SS
+    img = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(img)
+    cx = cy = size / 2.0
+    radius = size * 0.46
+    n_dots = 260
+    for _ in range(n_dots):
+        r = radius * math.sqrt(rng.uniform(0.0, 1.0)) * rng.uniform(0.85, 1.0)
+        theta = rng.uniform(0, 2 * math.pi)
+        x = cx + r * math.cos(theta)
+        y = cy + r * math.sin(theta)
+        dot_r = rng.uniform(size * 0.006, size * 0.022)
+        alpha = int(rng.uniform(90, 235))
+        draw.ellipse([x - dot_r, y - dot_r, x + dot_r, y + dot_r], fill=alpha)
+    return _finish_tip(img)
+
+
+def generate_brush_tips():
+    os.makedirs(BRUSH_DIR, exist_ok=True)
+    generators = {
+        "round": gen_round_tip,
+        "hake": gen_hake_tip,
+        "marker": gen_marker_tip,
+        "spray": gen_spray_tip,
+    }
+    for name, fn in generators.items():
+        path = os.path.join(BRUSH_DIR, f"{name}.png")
+        fn().save(path)
+        log(f"  {path} を生成しました")
+
+
+# ---------------------------------------------------------------------------
 # エントリポイント
 # ---------------------------------------------------------------------------
 
@@ -263,11 +392,15 @@ def main():
     os.makedirs(EXAMPLES_DIR, exist_ok=True)
     os.makedirs(FONT_DIR, exist_ok=True)
     os.makedirs(SFX_DIR, exist_ok=True)
+    os.makedirs(BRUSH_DIR, exist_ok=True)
 
     log("=== 効果音を生成 ===")
     write_wav(os.path.join(SFX_DIR, "shakin.wav"), synth_shakin())
     write_wav(os.path.join(SFX_DIR, "don.wav"), synth_don())
     log("  assets/sfx/shakin.wav, assets/sfx/don.wav を生成しました")
+
+    log("=== ブラシ筆先画像を生成 ===")
+    generate_brush_tips()
 
     log("=== フォントを確認 ===")
     ensure_font()

@@ -348,6 +348,15 @@
             <option value="dark">dark（減光）</option>
           </select>
         </div>
+        <div class="field grow">
+          <label>ブラシ形状</label>
+          <select id="brushShapeSelect">
+            <option value="round">round（丸筆）</option>
+            <option value="hake">hake（ハケ）</option>
+            <option value="marker">marker（平筆マーカー）</option>
+            <option value="spray">spray（スプレー）</option>
+          </select>
+        </div>
       </div>
     </div>
   </section>
@@ -471,6 +480,7 @@ var DEFAULT_STYLE = {
   freeze_sec: 2.5,
   brush_anim_sec: 0.8,
   brush_width: 0.12,
+  brush_shape: "round",
   background: "mono",
   font: DEFAULT_FONT_PATH,
   audio_during_freeze: "mute"
@@ -550,6 +560,7 @@ function freezeToJSON(fz) {
     time: round(numOr(fz.time, 0), 2),
     name: fz.name || "",
     background: fz.background === "dark" ? "dark" : "mono",
+    brush_shape: resolveBrushShape(fz.brushShape),
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
   if (fz.sfx) out.sfx = fz.sfx;
@@ -602,6 +613,7 @@ function parseProjectJSON(json) {
       name: fz.name || "",
       sfx: fz.sfx || "",
       background: fz.background === "dark" ? "dark" : "mono",
+      brushShape: resolveBrushShape(fz.brush_shape),
       strokes: (fz.strokes || []).map(function (st) {
         return {
           width: numOr(st.width, style.brush_width),
@@ -677,6 +689,78 @@ function trimGeometryToLength(geo, startLen, endLen) {
       pts.push(q1);
     }
     if (pts.length >= 2) out.push({ pts: pts, thick: g.thick });
+  });
+  return out;
+}
+
+/* ---- ブラシ形状（筆先スタンプ方式）。render.py と同じ考え方・同じ定数値を使い、
+ *      プレビューと実際のレンダリング結果の見た目を一致させる。 ---- */
+
+var BRUSH_SHAPES = ["round", "hake", "marker", "spray"];
+
+/**
+ * 筆先PNG（正方形キャンバス）の中で、実際の絵柄が占める一辺の比率の逆数。
+ * render.py の BRUSH_TIP_SCALE と同じ値（generate_brush_tips() の実寸に対応）。
+ */
+var BRUSH_TIP_SCALE = { round: 1.19, hake: 1.56, marker: 1.61, spray: 1.09 };
+
+/** 筆先スタンプの間隔 ÷ ブラシ太さ。render.py の BRUSH_STAMP_SPACING と同じ値。 */
+var BRUSH_STAMP_SPACING = { round: 0.32, hake: 0.62, marker: 0.42, spray: 0.68 };
+
+/** 未知の値は round にフォールバックする（render.py の resolve_brush_shape と同じ方針） */
+function resolveBrushShape(shape) {
+  return BRUSH_SHAPES.indexOf(shape) >= 0 ? shape : "round";
+}
+
+/** ポリライン g.pts 上の累積長 length の位置の座標と、その位置での進行方向（ラジアン）を返す */
+function pointAndAngleAtLength(g, length) {
+  var acc = 0;
+  var pts = g.pts, seglens = g.seglens;
+  for (var i = 0; i < seglens.length; i++) {
+    var seg = seglens[i];
+    if (seg <= 0) continue;
+    var nxt = acc + seg;
+    if (length <= nxt || i === seglens.length - 1) {
+      var t = seg <= 0 ? 0 : clamp01((length - acc) / seg);
+      var p0 = pts[i], p1 = pts[i + 1];
+      var x = p0[0] + (p1[0] - p0[0]) * t;
+      var y = p0[1] + (p1[1] - p0[1]) * t;
+      var angle = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
+      return { x: x, y: y, angle: angle, thick: g.thick };
+    }
+    acc = nxt;
+  }
+  var last = pts[pts.length - 1];
+  return { x: last[0], y: last[1], angle: 0, thick: g.thick };
+}
+
+/**
+ * geo（buildStrokeGeometryの出力）の startLen〜endLen の範囲に、shapeに応じた間隔で
+ * スタンプ位置（中心座標・進行方向角度・太さ）を並べる。render.py の
+ * draw_stroke_mask（筆先スタンプのループ部分）と同じロジック。
+ */
+function computeStampPoints(geo, startLen, endLen, shape) {
+  var spacingRatio = BRUSH_STAMP_SPACING[resolveBrushShape(shape)] || 0.4;
+  var out = [];
+  var offset = 0;
+  geo.forEach(function (g) {
+    var s = Math.max(startLen - offset, 0);
+    var e = Math.min(endLen - offset, g.cost);
+    offset += g.cost;
+    if (e <= 0 || e <= s) return;
+
+    if (g.length <= 0) {
+      out.push({ x: g.pts[0][0], y: g.pts[0][1], angle: 0, thick: g.thick });
+      return;
+    }
+
+    var spacing = Math.max(1, g.thick * spacingRatio);
+    var pos = s;
+    while (pos < e) {
+      out.push(pointAndAngleAtLength(g, pos));
+      pos += spacing;
+    }
+    out.push(pointAndAngleAtLength(g, e));
   });
   return out;
 }
@@ -857,6 +941,12 @@ if (typeof module !== "undefined" && module.exports) {
     matchOutputPreset: matchOutputPreset,
     buildStrokeGeometry: buildStrokeGeometry,
     trimGeometryToLength: trimGeometryToLength,
+    BRUSH_SHAPES: BRUSH_SHAPES,
+    BRUSH_TIP_SCALE: BRUSH_TIP_SCALE,
+    BRUSH_STAMP_SPACING: BRUSH_STAMP_SPACING,
+    resolveBrushShape: resolveBrushShape,
+    pointAndAngleAtLength: pointAndAngleAtLength,
+    computeStampPoints: computeStampPoints,
     computeBgPixel: computeBgPixel,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -922,7 +1012,7 @@ function init() {
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
-    "nameInput", "sfxSelect", "backgroundSelect",
+    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
     "freezeSecInput", "brushAnimSecInput", "audioDuringFreezeSelect", "outputModeSelect",
@@ -933,6 +1023,7 @@ function init() {
   ].forEach(function (id) { els[id] = $(id); });
 
   wireGlobalErrorHandling();
+  preloadBrushTipImages();
   initGuideCard();
 
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
@@ -987,6 +1078,11 @@ function init() {
   els.previewBtn.addEventListener("click", togglePreviewPlayback);
   els.cancelFreezeBtn.addEventListener("click", cancelFreezeEdit);
   els.commitFreezeBtn.addEventListener("click", commitFreezeEdit);
+  els.brushShapeSelect.addEventListener("change", function () {
+    if (!draft) return;
+    draft.brushShape = els.brushShapeSelect.value;
+    redrawStrokesOverlay();
+  });
 
   els.freezeSecInput.addEventListener("change", function () {
     appState.freezeSec = numOr(els.freezeSecInput.value, DEFAULT_STYLE.freeze_sec);
@@ -1219,6 +1315,7 @@ function startNewFreeze() {
     name: "",
     sfx: "shakin",
     background: "mono",
+    brushShape: "round",
     strokes: []
   }, true);
 }
@@ -1348,6 +1445,7 @@ function enterDrawMode() {
   els.nameInput.value = draft.name || "";
   els.sfxSelect.value = draft.sfx || "";
   els.backgroundSelect.value = draft.background || "mono";
+  els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
   els.brushWidthSlider.value = "0.12";
   els.brushWidthValue.textContent = "0.12";
 
@@ -1407,6 +1505,7 @@ function commitFreezeEdit() {
   draft.name = els.nameInput.value.trim();
   draft.sfx = els.sfxSelect.value;
   draft.background = els.backgroundSelect.value;
+  draft.brushShape = els.brushShapeSelect.value;
 
   var target = draft;
   var isNew = draftIsNew;
@@ -1705,21 +1804,18 @@ function extendStroke(clientX, clientY, force) {
   if (!force && !shouldAddPoint(last, pt, overlaySize.width, overlaySize.height)) return;
 
   var ctx = els.drawCanvas.getContext("2d");
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "rgba(255,255,255,0.85)";
-  ctx.fillStyle = "rgba(255,255,255,0.85)";
-  ctx.lineWidth = currentStroke.width * overlaySize.width;
+  var shape = resolveBrushShape(draft && draft.brushShape);
+  var thick = Math.max(1, currentStroke.width * overlaySize.width);
+  var p1x = pt.x * overlaySize.width, p1y = pt.y * overlaySize.height;
 
   if (last) {
-    ctx.beginPath();
-    ctx.moveTo(last.x * overlaySize.width, last.y * overlaySize.height);
-    ctx.lineTo(pt.x * overlaySize.width, pt.y * overlaySize.height);
-    ctx.stroke();
+    var p0x = last.x * overlaySize.width, p0y = last.y * overlaySize.height;
+    var seg = Math.hypot(p1x - p0x, p1y - p0y);
+    var g = { pts: [[p0x, p0y], [p1x, p1y]], seglens: [seg], thick: thick, length: seg, cost: Math.max(seg, thick) };
+    drawStampedGeo(ctx, shape, [g], 0, g.cost);
   } else {
-    ctx.beginPath();
-    ctx.arc(pt.x * overlaySize.width, pt.y * overlaySize.height, Math.max(1, currentStroke.width * overlaySize.width / 2), 0, Math.PI * 2);
-    ctx.fill();
+    var g0 = { pts: [[p1x, p1y]], seglens: [], thick: thick, length: 0, cost: thick };
+    drawStampedGeo(ctx, shape, [g0], 0, g0.cost);
   }
   pts.push([pt.x, pt.y]);
 }
@@ -1746,26 +1842,80 @@ function clearAllStrokes() {
 function redrawStrokesOverlay() {
   var ctx = els.drawCanvas.getContext("2d");
   ctx.clearRect(0, 0, overlaySize.width, overlaySize.height);
+  if (!draft) return;
+  var shape = resolveBrushShape(draft.brushShape);
+  var geoInfo = buildStrokeGeometry(draft.strokes, overlaySize.width, overlaySize.height,
+    Number(els.brushWidthSlider.value));
+  geoInfo.geo.forEach(function (g) {
+    drawStampedGeo(ctx, shape, [g], 0, g.cost);
+  });
+}
+
+/* ---- ブラシ形状の筆先スタンプ描画（drawCanvasのライブ描画・previewCanvasの合成の両方で使う） ---- */
+
+var BRUSH_TIP_IMAGES = {};
+
+/** shapeの筆先PNG（<img>）を取得する。初回はロードを開始し、以後は同じ<img>を使い回す */
+function getBrushTipImage(shape) {
+  shape = resolveBrushShape(shape);
+  if (!BRUSH_TIP_IMAGES[shape]) {
+    var img = new Image();
+    img.src = "assets/brushes/" + shape + ".png";
+    BRUSH_TIP_IMAGES[shape] = img;
+  }
+  return BRUSH_TIP_IMAGES[shape];
+}
+
+/** 4種類の筆先画像を先読みしておく（描画モードに入る前に読み込みを終わらせるため） */
+function preloadBrushTipImages() {
+  BRUSH_SHAPES.forEach(function (s) { getBrushTipImage(s); });
+}
+
+/** ctx上の(cx,cy)を中心に、tipImgをangleRadだけ回転させてsizePx四方でスタンプする */
+function drawBrushStamp(ctx, tipImg, cx, cy, angleRad, sizePx) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angleRad);
+  ctx.drawImage(tipImg, -sizePx / 2, -sizePx / 2, sizePx, sizePx);
+  ctx.restore();
+}
+
+/**
+ * geo（buildStrokeGeometry互換の配列）の startLen〜endLen の範囲を、shapeの筆先スタンプで
+ * ctxに描く（render.pyのdraw_stroke_maskと同じロジック・同じ間隔定数）。
+ * 筆先画像がまだ読み込み中の場合は、従来の線描画にフォールバックする。
+ */
+function drawStampedGeo(ctx, shape, geo, startLen, endLen) {
+  var tipImg = getBrushTipImage(shape);
+  if (tipImg && tipImg.complete && tipImg.naturalWidth) {
+    var scale = BRUSH_TIP_SCALE[resolveBrushShape(shape)] || 1.2;
+    computeStampPoints(geo, startLen, endLen, shape).forEach(function (s) {
+      drawBrushStamp(ctx, tipImg, s.x, s.y, s.angle, Math.max(2, s.thick * scale));
+    });
+    return;
+  }
+  // フォールバック：筆先画像の読み込みがまだ終わっていない場合の簡易な線描画
+  ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.fillStyle = "rgba(255,255,255,0.85)";
-  (draft.strokes || []).forEach(function (st) {
-    ctx.lineWidth = st.width * overlaySize.width;
-    var pts = st.points;
-    if (pts.length === 1) {
+  geo.forEach(function (g) {
+    ctx.lineWidth = g.thick;
+    if (g.length <= 0) {
       ctx.beginPath();
-      ctx.arc(pts[0][0] * overlaySize.width, pts[0][1] * overlaySize.height, Math.max(1, st.width * overlaySize.width / 2), 0, Math.PI * 2);
+      ctx.arc(g.pts[0][0], g.pts[0][1], Math.max(1, g.thick / 2), 0, Math.PI * 2);
       ctx.fill();
       return;
     }
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0] * overlaySize.width, pts[0][1] * overlaySize.height);
-    for (var i = 1; i < pts.length; i++) {
-      ctx.lineTo(pts[i][0] * overlaySize.width, pts[i][1] * overlaySize.height);
-    }
-    ctx.stroke();
+    trimGeometryToLength([g], startLen, endLen).forEach(function (poly) {
+      ctx.beginPath();
+      ctx.moveTo(poly.pts[0][0], poly.pts[0][1]);
+      for (var i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0], poly.pts[i][1]);
+      ctx.stroke();
+    });
   });
+  ctx.restore();
 }
 
 /* ---------------- サムネイル生成 ---------------- */
@@ -1913,7 +2063,7 @@ function startPreviewPlayback() {
 
       if (elapsed >= HOLD) {
         var progress = geoInfo.total > 0 ? Math.min(1, (elapsed - HOLD) / BRUSH) : 1;
-        drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H);
+        drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape);
         if (elapsed >= HOLD + BRUSH) {
           var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
           drawTelop(pctx, draft.name, W, H, fade);
@@ -1948,28 +2098,16 @@ function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
   dctx.putImageData(img, 0, 0);
 }
 
-function strokePolylines(ctx, polylines) {
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  polylines.forEach(function (poly) {
-    ctx.lineWidth = poly.thick;
-    ctx.beginPath();
-    ctx.moveTo(poly.pts[0][0], poly.pts[0][1]);
-    for (var i = 1; i < poly.pts.length; i++) ctx.lineTo(poly.pts[i][0], poly.pts[i][1]);
-    ctx.stroke();
-  });
-}
-
-function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H) {
+function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape) {
   if (geoInfo.total <= 0) return;
   var head = geoInfo.total * progress;
+  shape = resolveBrushShape(shape);
 
   var maskCanvas = document.createElement("canvas");
   maskCanvas.width = W; maskCanvas.height = H;
   var mctx = maskCanvas.getContext("2d");
   mctx.filter = "blur(2px)";
-  mctx.strokeStyle = "#fff";
-  strokePolylines(mctx, trimGeometryToLength(geoInfo.geo, 0, head));
+  drawStampedGeo(mctx, shape, geoInfo.geo, 0, head);
 
   var colorCanvas = document.createElement("canvas");
   colorCanvas.width = W; colorCanvas.height = H;
@@ -1985,8 +2123,7 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H) {
     var tail = Math.max(2 * maxThick, geoInfo.total * 0.12);
     pctx.save();
     pctx.globalAlpha = 0.85;
-    pctx.strokeStyle = "#fff";
-    strokePolylines(pctx, trimGeometryToLength(geoInfo.geo, Math.max(head - tail, 0), head));
+    drawStampedGeo(pctx, shape, geoInfo.geo, Math.max(head - tail, 0), head);
     pctx.restore();
   }
 }

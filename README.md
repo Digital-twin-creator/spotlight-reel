@@ -24,7 +24,8 @@ spotlight-reel/
 ├── requirements.txt       # opencv-python-headless, numpy, pillow
 ├── assets/
 │   ├── fonts/             # NotoSansJP-Bold.ttf
-│   └── sfx/                # shakin.wav, don.wav
+│   ├── sfx/                # shakin.wav, don.wav
+│   └── brushes/            # round/hake/marker/spray.png（筆先スタンプ画像、白＋アルファ）
 ├── examples/
 │   └── sample.json         # make_dummy.py が生成するサンプル
 ├── tests/
@@ -32,6 +33,7 @@ spotlight-reel/
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
+│   ├── brush_shape.playwright.test.mjs         # ブラシ形状選択・筆先スタンプ描画の回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
@@ -56,7 +58,9 @@ spotlight-reel/
    （動画はサーバーに送信されず、その場で再生されるだけ）。
 2. シークバーや微調整ボタン（−1秒/−0.1秒/+0.1秒/+1秒）で止めたい瞬間に合わせ、
    「＋ フリーズ追加」をタップする。
-3. 表示された静止フレームの上を指でなぞって軌跡を描き、名前・効果音・背景処理を選んで「完了」。
+3. 表示された静止フレームの上を指でなぞって軌跡を描き、名前・効果音・背景処理・
+   ブラシ形状（round/hake/marker/spray）を選んで「完了」。
+   ブラシ形状は描いている途中で切り替えると、その場でストロークの見た目が変わる。
    「▶ プレビュー」で演出の雰囲気をその場で確認できる。
 4. 必要なだけフリーズを追加したら（一覧のカードから編集・削除・シークが可能）、
    「⑦ 動画を作る」の「🎬 動画を作る」を押す（初回のみ下記のGitHub連携設定が必要）。
@@ -176,6 +180,7 @@ python render.py examples/sample.json --preview preview.png             # 確認
     "freeze_sec": 2.5,
     "brush_anim_sec": 0.8,
     "brush_width": 0.12,
+    "brush_shape": "round",
     "background": "mono",
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     "audio_during_freeze": "mute"
@@ -185,6 +190,7 @@ python render.py examples/sample.json --preview preview.png             # 確認
       "time": 3.4,
       "name": "山田 太郎",
       "sfx": "shakin",
+      "brush_shape": "hake",
       "strokes": [
         { "width": 0.12, "points": [[0.42, 0.31], [0.44, 0.45], [0.43, 0.60]] }
       ]
@@ -198,7 +204,11 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `points` の座標と `width`（太さ）は動画サイズに対する **0〜1の比率** です。
   `x` は幅、`y` は高さ、`width` は幅を基準にします。
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
-  （`freeze_sec` / `brush_anim_sec` / `brush_width` / `background` / `font` / `audio_during_freeze` を個別上書き可能）。
+  （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `background` / `font` /
+  `audio_during_freeze` を個別上書き可能）。
+- `brush_shape` は `round`（丸筆・既定値）/ `hake`（ハケ）/ `marker`（平筆マーカー）/
+  `spray`（スプレー）のいずれか。未指定・不明な値は `round` として扱われます
+  （後方互換：この項目が無い既存のJSONもそのまま動きます）。
 - `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
@@ -209,8 +219,13 @@ python render.py examples/sample.json --preview preview.png             # 確認
    - `mono`：グレースケール化
    - `dark`：元のカラーを30%の明るさに減光
 2. **ブラシ描画（`brush_anim_sec`）**：ストロークが先頭から順に伸びていく
-   - 丸キャップ・丸ジョイントの太線（白、不透明度0.85）
-   - 描画済みの領域だけ元のカラーが見える。マスクの縁は数ピクセルぼかす
+   - `brush_shape` の筆先画像（`assets/brushes/<shape>.png`、白＋アルファ）を軌跡に沿って
+     一定間隔でスタンプする「筆先スタンプ方式」。各スタンプは進行方向に合わせて回転する
+   - `round`：柔らかい縁の丸筆（従来の丸キャップ相当）
+   - `hake`：毛筋（縦方向の濃淡バンド）・縁のギザつき・わずかな不透明度ムラを持つ平たいハケ
+   - `marker`：角の丸い長方形。縁はくっきりしていて、重なった部分は自然と少し濃くなる
+   - `spray`：円形範囲にランダムな点をまき散らしたスプレー
+   - 描画済みの領域（スタンプの被覆範囲）だけ元のカラーが見える
    - 複数ストロークがある場合は合計時間 `brush_anim_sec` の中で順番に描く
 3. **ブラシ完了時点**：名前テロップ（高さ78%あたり、中央揃え、`font`使用、
    文字サイズは高さの6%、白文字＋黒縁取り、0.15秒でフェードイン）を表示し、
@@ -235,10 +250,10 @@ python render.py examples/sample.json --preview preview.png             # 確認
 ## 動作確認
 
 ```bash
-python make_dummy.py
+python make_dummy.py   # assets/brushes/*.png（筆先スタンプ画像）もここで生成される
 python render.py examples/sample.json --out examples/out.mp4
 ffprobe examples/out.mp4   # 長さ・音声トラックを確認
-python render.py examples/sample.json --preview examples/preview.png
+python render.py examples/sample.json --preview examples/preview.png   # brush_shapeはJSON側で指定
 
 node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 
@@ -248,6 +263,7 @@ python3 -m http.server 8794 &   # index.html をどこかで配信しておく
 node tests/player_ui.playwright.test.mjs
 node tests/freeze_black_screen.playwright.test.mjs
 node tests/resize_scroll_black_screen.playwright.test.mjs
+node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
 
 # 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）
