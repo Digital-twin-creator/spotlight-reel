@@ -111,6 +111,68 @@ def render_dummy_video(out_path, w=W, h=H):
     return out_path
 
 
+def render_dummy_video_vfr(out_path, w=W, h=H, base_fps=60, sub=2, duration_sec=DURATION_SEC,
+                            stall_every=15, stall_extra_subframes=3):
+    """
+    iPhoneのスクリーン録画（負荷でフレーム間隔がばらつく、実効fpsが基準よりやや低くなる）を
+    模した、可変フレームレート(VFR)のテスト動画を作る。
+
+    base_fps（見た目上のフレームレート、既定60）の各フレームを、内部的には
+    nominal_fps = base_fps*sub の細かい時間刻みで sub 回ずつ「画素まで完全に同一な」
+    フレームとして複製して書き出す。stall_everyフレームに1回だけ、複製回数を
+    stall_extra_subframes 分だけ余計に増やす（＝負荷で次の絵が描けず、直前のフレームが
+    長く据え置かれた瞬間を模す）。エンコード時に mpdecimate で完全一致フレームの連続を
+    検出・間引きし、-vsync vfr で間引いた分だけ提示間隔を延ばして出力する。
+
+    人物役の円の動きを実時間の何倍も速く進める（大きく・はっきり動かす）ことで、
+    フレームごとの絵の変化を意図的に大きくし、mpdecimateの画素差分ベースの判定が
+    「本当に同一なstallフレーム」と「動きのある通常フレーム」を確実に区別できるようにする
+    （変化がなだらかすぎると、動きのある本来のフレームまで誤って間引かれてしまうため）。
+
+    結果として、
+      - r_frame_rate（コンテナが宣言する基準fps。フレーム間隔の最小公倍数に近い値）は
+        nominal_fps相当になり
+      - avg_frame_rate（配信フレーム数からの実効平均fps）は、stall分だけbase_fpsより
+        わずかに低くなる
+    という、実機VFR録画に典型的な「両者の乖離」を持つファイルになる。
+    """
+    ffmpeg = "ffmpeg"
+    nominal_fps = base_fps * sub
+    n_logical = int(duration_sec * base_fps)
+    motion_speed = 6.0   # 円の動きを速める倍率（フレーム間の絵の変化を大きくするため）
+    cmd = [ffmpeg, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{w}x{h}", "-r", str(nominal_fps), "-i", "pipe:0",
+           "-vf", "mpdecimate",
+           "-vsync", "vfr",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+           "-pix_fmt", "yuv420p", out_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    written = 0
+    for i in range(n_logical):
+        t = i / base_fps
+        frame = make_gradient_bg(t, w, h)
+        (x1, y1), (x2, y2) = circle_positions(t * motion_speed, w, h)
+        cv2.circle(frame, (int(x1), int(y1)), int(w * 0.12), (60, 90, 220), -1, cv2.LINE_AA)
+        cv2.circle(frame, (int(x2), int(y2)), int(w * 0.10), (200, 140, 60), -1, cv2.LINE_AA)
+        hold = sub
+        if stall_every > 0 and i > 0 and i % stall_every == 0:
+            hold += stall_extra_subframes   # 負荷で据え置かれた瞬間を模す（同一フレームを長く複製）
+        payload = frame.tobytes()
+        for _ in range(hold):
+            proc.stdin.write(payload)
+            written += 1
+        if i % 60 == 0:
+            print(f"\r  VFR動画生成 {i}/{n_logical}", end="", flush=True)
+    print(f"\r  VFR動画生成 {n_logical}/{n_logical}（実フレーム書き込み数 {written}）", flush=True)
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("VFRダミー動画の生成に失敗しました（ffmpeg）")
+    return out_path
+
+
 # ---------------------------------------------------------------------------
 # ダミー音声（動画に合成する交互トーン）
 # ---------------------------------------------------------------------------
@@ -183,6 +245,20 @@ def write_wav(path, samples, sr=SR):
         wf.setsampwidth(2)
         wf.setframerate(sr)
         wf.writeframes(pcm.tobytes())
+
+
+def ensure_sfx(path, synth_fn, label):
+    """
+    assets/sfx/ にあるファイルは render.py がそのまま読み込んで使う（合成音は
+    あくまで仮の音）。フリー効果音サイトの音源に差し替えたユーザーのファイルを
+    再実行のたびに上書きしないよう、既に存在する場合はスキップする
+    （ensure_font/ensure_title_fontと同じ方針）。
+    """
+    if os.path.exists(path):
+        log(f"{label}は既に存在します（そのまま使います）: {path}")
+        return
+    write_wav(path, synth_fn())
+    log(f"  仮の効果音（合成音）を生成しました: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +544,9 @@ def main():
     os.makedirs(SFX_DIR, exist_ok=True)
     os.makedirs(BRUSH_DIR, exist_ok=True)
 
-    log("=== 効果音を生成 ===")
-    write_wav(os.path.join(SFX_DIR, "shakin.wav"), synth_shakin())
-    write_wav(os.path.join(SFX_DIR, "don.wav"), synth_don())
-    log("  assets/sfx/shakin.wav, assets/sfx/don.wav を生成しました")
+    log("=== 効果音を確認（無ければ仮の合成音を生成） ===")
+    ensure_sfx(os.path.join(SFX_DIR, "shakin.wav"), synth_shakin, "shakin.wav")
+    ensure_sfx(os.path.join(SFX_DIR, "don.wav"), synth_don, "don.wav")
 
     log("=== ブラシ筆先画像を生成 ===")
     generate_brush_tips()
@@ -491,6 +566,12 @@ def main():
     render_dummy_video(video_path_landscape, w=H, h=W)  # 縦動画の幅高を入れ替えただけの横動画
     mux_audio_into_video(video_path_landscape, make_tone_track())
     log(f"  {video_path_landscape} を生成しました")
+
+    log("=== ダミー動画を生成（縦・可変フレームレート。iPhoneスクリーン録画のVFR回帰テスト用） ===")
+    video_path_vfr = os.path.join(EXAMPLES_DIR, "dummy_input_vfr.mp4")
+    render_dummy_video_vfr(video_path_vfr)
+    mux_audio_into_video(video_path_vfr, make_tone_track())
+    log(f"  {video_path_vfr} を生成しました")
 
     log("=== ダミーロゴを生成 ===")
     logo_path = gen_dummy_logo(os.path.join(EXAMPLES_DIR, "store_logo.png"))

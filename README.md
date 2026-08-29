@@ -24,21 +24,25 @@ spotlight-reel/
 ├── requirements.txt       # opencv-python-headless, numpy, pillow
 ├── assets/
 │   ├── fonts/             # NotoSansJP-Bold.ttf, Anton-Regular.ttf（欧文タイトル用）
-│   ├── sfx/                # shakin.wav, don.wav
+│   ├── sfx/                # shakin.wav, don.wav（差し替え可。後述「効果音を差し替える」参照）
 │   └── brushes/            # round/hake/marker/spray.png（筆先スタンプ画像、白＋アルファ）
 ├── examples/
 │   ├── sample.json         # make_dummy.py が生成するサンプル
 │   ├── dummy_input.mp4     # ダミー動画（縦 1080x1920）
 │   ├── dummy_input_landscape.mp4 # ダミー動画（横 1920x1080。縦横回帰テスト用）
+│   ├── dummy_input_vfr.mp4 # ダミー動画（縦・可変フレームレート。VFR正規化の回帰テスト用）
 │   └── store_logo.png      # make_dummy.py が生成するダミーのラストロゴ画像
 ├── tests/
 │   ├── editor_logic.test.js                    # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
+│   ├── render_quality.test.py                  # render.pyの品質回帰テスト（音声連続性・VFR正規化・テロップ描画・
+│   │                                            #   ブラシの白フェード・フォント読み込み失敗時のエラー終了。要ffmpeg/numpy）
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── brush_shape.playwright.test.mjs         # ブラシ形状選択・筆先スタンプ描画の回帰テスト（任意、要playwright-core）
 │   ├── film_logo_bounce.playwright.test.mjs    # フィルム縁取り・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
 │   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
+│   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
@@ -209,6 +213,7 @@ python render.py examples/sample.json --preview preview.png             # 確認
     "title_pos": [0.5, 0.78],
     "title_size": 0.06,
     "title_align": "center",
+    "brush_fade_sec": 0.3,
     "audio_during_freeze": "mute"
   },
   "freezes": [
@@ -243,7 +248,7 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
   `film_color` / `film_alpha` / `background` / `font` / `audio_during_freeze` /
-  `title_pos` / `title_size` / `title_align` を個別上書き可能。
+  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` を個別上書き可能。
   `film_offset` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
 - `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
@@ -252,6 +257,12 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `title_size`：文字サイズ（出力の高さに対する比率）。既定 `0.06`。
 - `title_align`：テロップの水平寄せ。`left` / `center`（既定） / `right`。
   不明な値は `center` として扱われる。
+- `brush_fade_sec`：ブラシ完了時点でまだ先端に残っている「乾いていない白い絵の具」を、
+  何秒かけてフェードアウトさせるか（既定 `0.3`）。`0` を指定すると従来どおり
+  フェードなし（ブラシ完了と同時に即座に消える）になる。この既定値0.3は、
+  実機で「白いブラシ跡がカラー復元後も不透明のまま残って見える」不具合の
+  修正として導入したもので、他の新キーと異なり**省略時の見た目が旧バージョンの
+  render.pyとは変わる**（旧バージョンは実質 `brush_fade_sec: 0` と同じ挙動だった）。
 - `brush_shape` は `round`（丸筆・既定値）/ `hake`（ハケ）/ `marker`（平筆マーカー）/
   `spray`（スプレー）のいずれか。未指定・不明な値は `round` として扱われます
   （後方互換：この項目が無い既存のJSONもそのまま動きます）。
@@ -261,7 +272,8 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - 新しいキー（`mono_contrast` / `film_offset` / `film_color` / `film_alpha` / `title_font` /
   `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
-  （後方互換。詳細は次項）。
+  （後方互換。詳細は次項）。`brush_fade_sec` だけは例外で、省略時は既定値 `0.3` が
+  使われます（＝白い絵の具がフェードアウトする、見た目の不具合修正が既定で有効）。
 
 ### 演出仕様（1フリーズあたり）
 
@@ -282,12 +294,19 @@ python render.py examples/sample.json --preview preview.png             # 確認
      `film_color` で個別に上書きできる。`film_offset` が `[0, 0]`（既定値）のときは
      人物カラーの真下に完全に隠れるため、見た目には現れない（＝後方互換）
    - 複数ストロークがある場合は合計時間 `brush_anim_sec` の中で順番に描く
-3. **ブラシ完了時点**：名前テロップ（位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、
-   寄せは `title_align`・既定 `center`、文字サイズは `title_size`・既定は高さの6%。
-   日本語を含む名前は `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら
-   `font` にフォールバックする。白文字＋薄い黒ドロップシャドウ。`title_pos` が画面端に
-   はみ出す位置を指しても、自動で内側に寄せられ画面外に出ない）を0.15秒でフェード
-   インさせ、効果音 `sfx`（`assets/sfx/{sfx}.wav`）を鳴らす。`title_bounce: true` なら
+3. **ブラシ完了時点**：ブラシ先端にまだ残っている白い絵の具を `brush_fade_sec`
+   （既定0.3秒）かけてフェードアウトさせ、人物カラーだけが残るようにする
+   （`brush_fade_sec: 0` で無効化＝旧バージョンと同じ即時消灯）。同時に名前テロップ
+   （位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、寄せは `title_align`・
+   既定 `center`、文字サイズは `title_size`・既定は高さの6%。日本語を含む名前は
+   `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら `font` に
+   フォールバックする。白文字＋薄い黒ドロップシャドウ。`title_pos` が画面端に
+   はみ出す位置を指しても、自動で内側に寄せられ画面外に出ない。指定したフォント
+   ファイルが見つからない・読み込めない場合は、文字が描かれないまま気づかずに
+   完成する事態を避けるため、その場でエラー終了する）を0.15秒でフェード
+   インさせ、効果音 `sfx`（`assets/sfx/{sfx}.wav`。`assets/sfx/` 内のファイルを
+   差し替えれば、差し替えた音がそのまま使われる。詳細は
+   [「効果音を差し替える」](#効果音を差し替える)）を鳴らす。`title_bounce: true` なら
    フェードインと同じ0.15秒の間に130%→100%へ急停止イージングで縮む「はずむ」演出になる
    （このときテロップの外接矩形の中心を基準に拡大縮小する）
 4. **残り時間**：`freeze_sec` になるまでカラー化＋テロップを保持
@@ -333,6 +352,19 @@ python render.py examples/sample.json --preview preview.png             # 確認
   | `flash_strength` | `0.6` | 白フラッシュの強さ（0〜1） |
   | `duration_sec` | `1.2` | 着地からの表示時間 |
 
+### 効果音を差し替える
+
+`assets/sfx/shakin.wav` / `assets/sfx/don.wav` は、`make_dummy.py` が最初に生成する
+**仮の合成音**です。フリー効果音サイト（例: [効果音ラボ](https://soundeffect-lab.info/)、
+[OtoLogic](https://otologic.jp/)、[PIXABAY Sound Effects](https://pixabay.com/sound-effects/)
+など、利用規約を確認の上で商用可否に注意して選んでください）から気に入った音を
+ダウンロードし、同じファイル名（`shakin.wav` / `don.wav`。他の名前で使う場合は
+プロジェクトJSONの `sfx` / `logo.sfx` にその名前を指定）で `assets/sfx/` に
+上書き保存するだけで、以後 `render.py` はその音をそのまま使います
+（特別な設定は不要。ファイルの存在確認だけで優先的に読み込む仕組みのため）。
+`python make_dummy.py` を再実行しても、既に存在する `assets/sfx/*.wav` は
+上書きされません（差し替えたファイルが仮の合成音に戻ってしまうことはありません）。
+
 ### 音声仕様
 
 - 元動画の音声は、フリーズ区間を挿入した分だけ後ろへずれます。
@@ -341,6 +373,12 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `logo.sfx` は、ロゴが着地する瞬間（`landing_sec` 経過後。`at: "last_freeze"` かつ背景色
   クロスフェードがある場合はそのぶんも加算した後）に鳴ります。`logo.at: "end"` の場合、
   動画末尾に無音区間（着地+表示ぶん）を追加した上で、その中の着地位置で鳴ります。
+- 入力動画が可変フレームレート(VFR)（iPhoneのスクリーン録画などで典型的。負荷でフレーム
+  間隔がばらつき、`ffprobe` の `r_frame_rate` と `avg_frame_rate` が大きく食い違う）と
+  判定された場合、`render.py` は処理前に自動でffmpegを使い固定フレームレート(CFR)へ
+  正規化してから以降の処理を行います（「フレーム番号 = 時刻 × fps」という前提で
+  フリーズ挿入位置・音声の切り貼り位置を計算しているため、VFRのままだと映像と音声が
+  徐々にズレてしまうのを防ぐため）。正規化が行われた場合はログに警告として表示されます。
 
 ## 実装メモ
 
@@ -349,6 +387,10 @@ python render.py examples/sample.json --preview preview.png             # 確認
   `libx264 / yuv420p / crf 20` でエンコードします（Colabで確実にH.264 MP4を出すため）。
 - 縦動画の回転メタデータを考慮し、表示上の向きでフレームを処理します。
 - 音声の切り貼り・ミックスは numpy で行い、最後に ffmpeg で映像と結合します。
+  フレーム数→サンプル数の変換は `frames_to_samples()` に一本化し、境界計算の
+  ズレ（無音の細切れなど）が起きないようにしています。また音声デコード時は
+  ffmpegの `aresample=async=1` で、実機録画に時々見られる音声タイムスタンプの
+  小さな不連続を吸収します。
 - `index.html`（エディタ）側は、一部のiOS Safariで `HTMLVideoElement.videoWidth/videoHeight` が
   回転メタデータを反映しない既知の不具合があるため、選択した動画ファイル自体（MP4/MOVの
   `tkhd` 変換行列）をJSで直接読み取って補正する（`parseMp4DisplayRotation` /
@@ -365,6 +407,10 @@ python render.py examples/sample.json --preview examples/preview.png   # brush_s
 
 node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 
+python tests/render_quality.test.py   # render.pyの品質回帰テスト（音声連続性・VFR正規化・
+                                       # テロップ描画・ブラシの白フェード・フォント読み込み
+                                       # 失敗時のエラー終了。要ffmpeg/numpy、初回はダミーVFR動画を生成）
+
 # 任意：UI回帰テスト（playwright-coreとChromiumが必要）
 npm install --no-save playwright-core
 python3 -m http.server 8794 &   # index.html をどこかで配信しておく
@@ -374,6 +420,7 @@ node tests/resize_scroll_black_screen.playwright.test.mjs
 node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動画それぞれでフリーズ3件追加→JSON件数一致を確認
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/film_logo_bounce.playwright.test.mjs # フィルム縁取り・テロップバウンス・ラストロゴ設定のE2E
+node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
 
 # 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）

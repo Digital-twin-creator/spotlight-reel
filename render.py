@@ -53,6 +53,7 @@ DEFAULT_STYLE = {
     "title_pos": [0.5, 0.78],     # テロップ中心の位置（出力サイズに対する比率、[x, y]）
     "title_size": 0.06,           # 文字サイズ（高さに対する比率）
     "title_align": "center",      # テロップの水平寄せ（left | center | right、title_posのxを基準）
+    "brush_fade_sec": 0.3,        # ブラシ完了後、先端に残る白い絵の具をフェードアウトさせる時間（秒）。0でフェードなし
     "audio_during_freeze": "mute",  # mute | keep
 }
 
@@ -222,16 +223,25 @@ def probe_video(path):
             rotation = int(round(float(sd["rotation"])))
     rotation = rotation % 360
 
-    # fps（avg_frame_rate優先、無ければr_frame_rate）
-    fps = 30.0
-    for key in ("avg_frame_rate", "r_frame_rate"):
-        val = vs.get(key)
-        if val and val != "0/0":
-            num, _, den = val.partition("/")
-            den = den or "1"
-            if float(den) != 0 and float(num) != 0:
-                fps = float(num) / float(den)
-                break
+    def parse_rate(val):
+        if not val or val == "0/0":
+            return None
+        num, _, den = val.partition("/")
+        den = den or "1"
+        if float(den) != 0 and float(num) != 0:
+            return float(num) / float(den)
+        return None
+
+    # avg_frame_rate: 実際に配信されたフレーム数から求めた「平均」fps。
+    # r_frame_rate: コンテナが宣言する「基準」fps（可変フレームレートの場合、
+    #   各フレーム間隔の最小公倍数に近い、実際の平均とかけ離れた値になることが多い）。
+    # 両者が大きく食い違う場合は可変フレームレート(VFR)と判断する
+    # （iPhoneのスクリーン録画など、実機の録画でよく見られる）。
+    avg_fps = parse_rate(vs.get("avg_frame_rate"))
+    r_fps = parse_rate(vs.get("r_frame_rate"))
+    fps = avg_fps or r_fps or 30.0
+    is_vfr = bool(avg_fps and r_fps and
+                  abs(r_fps - avg_fps) > max(avg_fps, r_fps) * 0.01)
 
     duration = 0.0
     for src in (vs.get("duration"), (info.get("format") or {}).get("duration")):
@@ -248,15 +258,44 @@ def probe_video(path):
         "width": width,
         "height": height,
         "fps": fps,
+        "r_fps": r_fps,
         "duration": duration,
         "rotation": rotation,
         "has_audio": has_audio,
+        "is_vfr": is_vfr,
     }
 
 
 # ---------------------------------------------------------------------------
 # 映像の入出力（ffmpeg パイプ）
 # ---------------------------------------------------------------------------
+
+def normalize_frame_rate(video_path, target_fps, has_audio, tmpdir):
+    """
+    可変フレームレート(VFR)の入力（iPhoneのスクリーン録画など、負荷でフレーム間隔が
+    ばらつく実機の録画で典型的）を、固定フレームレート(CFR)の一時ファイルへ
+    正規化してから返す。
+
+    以降の全処理（フレーム抽出・音声の尺計算）は「フレーム番号 = 時刻 × fps」という
+    単純な前提で動いているため、実際の再生間隔が不揃いなVFR入力のままだと、
+    フリーズ挿入位置や音声の切り貼り位置が実際の見た目の時刻とズレていき、
+    映像と音声が徐々に食い違う原因になる。CFRへ正規化することでこの前提を
+    満たす状態にしてから、以降の処理を行う。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    out_path = os.path.join(tmpdir, "normalized_input.mp4")
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", video_path,
+           "-vf", f"fps={target_fps:.6f}",
+           "-vsync", "cfr",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+           "-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", "aac", "-b:a", "256k"] if has_audio else ["-an"]
+    cmd += [out_path]
+    res = subprocess.run(cmd)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError("可変フレームレート入力の固定フレームレートへの正規化に失敗しました。")
+    return out_path
+
 
 def build_scale_filter(W, H, fps):
     """
@@ -659,16 +698,29 @@ def clamp_box_to_canvas(bbox, W, H):
     return dx, dy
 
 
-def render_telop_layer(text, W, H, font, size_px, pos_ratio=(0.5, 0.78), align="center"):
+def render_telop_layer(text, W, H, font, font_path, size_px, pos_ratio=(0.5, 0.78), align="center"):
     """
     テロップを1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
     フェードインは毎フレームこのアルファに係数を掛けるだけで済ませる。
     pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をテキストのアンカー位置とし、
     alignに応じて左寄せ/中央/右寄せする。画面端にはみ出す場合は自動で内側に寄せる。
     戻り値の中心x,yは実際に描画された文字の外接矩形の中心（バウンス演出の基準点）。
+
+    フォントが読み込めていない（file_pathが存在しない／破損しているなど）場合は、
+    OpenCVの既定フォント（日本語グリフを持たず、実質「何も描かれない」に等しい）へ
+    黙ってフォールバックせず、ここで即座にエラー終了させる。過去に「テロップの
+    フォントが見つからないまま全フレームで無言のうちに文字が描かれない」という
+    不具合があったため、失敗は必ず気づける形にする。
     """
     if not text:
         return None, None, 0, 0
+    if font is None:
+        raise RuntimeError(
+            f"テロップ用フォントを読み込めませんでした: {font_path}\n"
+            f"（name={text!r}）。title_font / title_font_jp / font で指定した"
+            "フォントファイルが存在し、正しく読み込めるか確認してください"
+            "（例: python make_dummy.py でダウンロードに失敗していないか）。"
+        )
 
     align = resolve_title_align(align)
     px = float(pos_ratio[0]) * W if pos_ratio and len(pos_ratio) > 0 else W * 0.5
@@ -678,47 +730,20 @@ def render_telop_layer(text, W, H, font, size_px, pos_ratio=(0.5, 0.78), align="
 
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
-    if font is not None:
-        anchor = {"left": "lm", "center": "mm", "right": "rm"}[align]
-        draw = ImageDraw.Draw(layer)
-        bbox = draw.textbbox((px, py), text, font=font, anchor=anchor)
-        dx, dy = clamp_box_to_canvas(bbox, W, H)
-        px, py = px + dx, py + dy
-        cx, cy = (bbox[0] + dx + bbox[2] + dx) / 2.0, (bbox[1] + dy + bbox[3] + dy) / 2.0
-        # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
-        draw.text((px + shadow_offset, py + shadow_offset), text, font=font, anchor=anchor,
-                  fill=(0, 0, 0, shadow_alpha))
-        draw.text((px, py), text, font=font, anchor=anchor, fill=(255, 255, 255, 255))
-        rgba = np.array(layer)
-    else:
-        # フォントが無い環境向けフォールバック（日本語は表示できない）
-        warn("日本語フォントが無いため OpenCV の既定フォントで描画します。")
-        scale = size_px / 30.0
-        thickness = max(2, size_px // 12)
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-        if align == "left":
-            ox = px
-        elif align == "right":
-            ox = px - tw
-        else:
-            ox = px - tw / 2.0
-        oy = py + th / 2.0
-        dx, dy = clamp_box_to_canvas((ox, oy - th, ox + tw, oy), W, H)
-        org = (int(round(ox + dx)), int(round(oy + dy)))
-        cx, cy = ox + dx + tw / 2.0, oy + dy - th / 2.0
-        shadow_org = (org[0] + shadow_offset, org[1] + shadow_offset)
-        shadow_layer = np.zeros((H, W, 4), np.uint8)
-        cv2.putText(shadow_layer, text, shadow_org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                    (0, 0, 0, 255), thickness, cv2.LINE_AA)
-        shadow_layer[:, :, 3] = (shadow_layer[:, :, 3].astype(np.float32) *
-                                  (shadow_alpha / 255.0)).astype(np.uint8)
-        tmp = shadow_layer
-        cv2.putText(tmp, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                    (255, 255, 255, 255), thickness, cv2.LINE_AA)
-        rgba = tmp
+    anchor = {"left": "lm", "center": "mm", "right": "rm"}[align]
+    draw = ImageDraw.Draw(layer)
+    bbox = draw.textbbox((px, py), text, font=font, anchor=anchor)
+    dx, dy = clamp_box_to_canvas(bbox, W, H)
+    px, py = px + dx, py + dy
+    cx, cy = (bbox[0] + dx + bbox[2] + dx) / 2.0, (bbox[1] + dy + bbox[3] + dy) / 2.0
+    # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
+    draw.text((px + shadow_offset, py + shadow_offset), text, font=font, anchor=anchor,
+              fill=(0, 0, 0, shadow_alpha))
+    draw.text((px, py), text, font=font, anchor=anchor, fill=(255, 255, 255, 255))
+    rgba = np.array(layer)
 
     rgb = rgba[:, :, :3].astype(np.float32)
-    bgr = rgb[:, :, ::-1].copy() if font is not None else rgb  # PILはRGB、cv2はBGR
+    bgr = rgb[:, :, ::-1].copy()  # PILはRGB、cv2はBGR
     alpha = (rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
     return bgr, alpha, cx, cy
 
@@ -1104,7 +1129,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
     telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(
-        fz.get("name", ""), W, H, font_cache[font_key], size_px, title_pos, title_align)
+        fz.get("name", ""), W, H, font_cache[font_key], font_path, size_px, title_pos, title_align)
     bounce = bool(fz.get("title_bounce"))
 
     # 1) ブラシ開始まで静止
@@ -1122,6 +1147,18 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
                             film_offset, film_color_bgr, film_alpha)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
 
+    # ブラシ完了時点で先端に残っている「乾いていない白い絵の具」
+    # （composite_brushのtail計算と同じ範囲）を、brush_fade_sec秒かけてフェードアウトさせる。
+    # 0（既定は0.3）を指定すると、この後続フェードを行わず従来どおり即座に消える。
+    brush_fade_sec = float(fz.get("brush_fade_sec", DEFAULT_STYLE["brush_fade_sec"]))
+    n_brush_fade = max(0, int(round(brush_fade_sec * fps))) if brush_fade_sec > 0 else 0
+    tail_paint_alpha = None
+    if n_brush_fade > 0 and geo and total_len > 0:
+        max_thick = max(g["thick"] for g in geo)
+        tail_len = max(2.0 * max_thick, total_len * 0.12)
+        tail_mask = draw_stroke_mask(geo, W, H, max(total_len - tail_len, 0.0), total_len, shape)
+        tail_paint_alpha = (tail_mask.astype(np.float32) / 255.0)[:, :, None]
+
     crossfade_frames = plan.get("logo_crossfade_frames", 0)
     logo_seg_frames = plan.get("logo_total_frames", 0)
     logo_start_in_rest = plan["n_rest"] - crossfade_frames - logo_seg_frames
@@ -1130,6 +1167,13 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
         solid_bg_frame = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
 
     for i in range(plan["n_rest"]):
+        if tail_paint_alpha is not None and i < n_brush_fade:
+            fade_out_t = (i + 1) / float(n_brush_fade)
+            pm = tail_paint_alpha * (BRUSH_PAINT_ALPHA * (1.0 - fade_out_t))
+            base = np.clip(done.astype(np.float32) * (1.0 - pm) + 255.0 * pm, 0, 255).astype(np.uint8)
+        else:
+            base = done
+
         t = (i + 1) / float(fade_frames)
         fade = min(1.0, t)
         if bounce and t < 1.0:
@@ -1138,7 +1182,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
                 if telop_bgr is not None else (None, None)
         else:
             f_bgr, f_alpha = telop_bgr, telop_alpha
-        out = blend_telop(done, f_bgr, f_alpha, fade)
+        out = blend_telop(base, f_bgr, f_alpha, fade)
 
         if plan["show_logo"]:
             rel = i - logo_start_in_rest
@@ -1176,7 +1220,7 @@ def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
     telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(
-        fz.get("name", ""), W, H, font, size_px, title_pos, title_align)
+        fz.get("name", ""), W, H, font, font_path, size_px, title_pos, title_align)
     img = blend_telop(img, telop_bgr, telop_alpha, 1.0)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)
@@ -1192,9 +1236,16 @@ def decode_audio(path, sr=AUDIO_SR, ch=AUDIO_CH):
     """
     ffmpeg で任意の音声を float32 の (N, ch) 配列にデコードする。
     音声が無い / 読めない場合は長さ0の配列を返す。
+
+    aresample=async=1 を指定し、コンテナ内の音声パケットのタイムスタンプに
+    小さな不連続（実機のスクリーン録画などで音声バッファが一瞬詰まった場合に
+    起きうる）があっても、ffmpeg側でサンプルを補間・伸縮して滑らかに追従させる。
+    指定しない場合、パケットをそのまま連結するだけになり、そうした不連続が
+    ブツ切れ（無音の隙間）としてそのまま出力に残ってしまうことがある。
     """
     ffmpeg = find_exe("ffmpeg")
     cmd = [ffmpeg, "-v", "error", "-i", path, "-vn",
+           "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
            "-f", "f32le", "-acodec", "pcm_f32le",
            "-ac", str(ch), "-ar", str(sr), "pipe:1"]
     res = subprocess.run(cmd, capture_output=True)
@@ -1203,6 +1254,16 @@ def decode_audio(path, sr=AUDIO_SR, ch=AUDIO_CH):
     data = np.frombuffer(res.stdout, np.float32)
     usable = (len(data) // ch) * ch
     return data[:usable].reshape(-1, ch).copy()
+
+
+def frames_to_samples(n_frames, fps, sr):
+    """
+    映像のフレーム数を、fps・サンプルレートに応じた音声サンプル数（整数）に変換する。
+    build_audio内の全てのフレーム→サンプル変換はこの関数だけを通すことで、
+    呼び出し箇所ごとに計算式や丸め方がバラバラになって境界がズレる（＝結果的に
+    サンプルが重複／欠落して隙間やクリックノイズになる）事態を防ぐ。
+    """
+    return int(round(float(n_frames) * sr / float(fps)))
 
 
 def mix_into(buf, snippet, start):
@@ -1227,7 +1288,7 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
     orig = decode_audio(src_path, sr, ch) if has_audio else np.zeros((0, ch), np.float32)
 
     # 音声が無い動画でも音声トラックは作る（映像長ぶんの無音）
-    need = int(round(src_frames / float(fps) * sr)) if src_frames > 0 else 0
+    need = frames_to_samples(src_frames, fps, sr) if src_frames > 0 else 0
     if len(orig) < need:
         orig = np.concatenate([orig, np.zeros((need - len(orig), ch), np.float32)])
 
@@ -1238,13 +1299,13 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
 
     for plan in plans:
         # 映像と同じ時刻基準（フレーム番号）で切り貼りしてズレを防ぐ
-        cut = int(round(plan["frame_index"] / float(fps) * sr))
+        cut = frames_to_samples(plan["frame_index"], fps, sr)
         cut = min(max(cut, cursor), len(orig))
         pieces.append(orig[cursor:cut])
         written += cut - cursor
         cursor = cut
 
-        n_samples = int(round(plan["n_total"] / float(fps) * sr))
+        n_samples = frames_to_samples(plan["n_total"], fps, sr)
         mode = plan["fz"].get("audio_during_freeze", "mute")
         if mode == "keep":
             loop_src = orig[max(0, cut - int(KEEP_LOOP_SEC * sr)):cut]
@@ -1261,14 +1322,14 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
 
         # 効果音はブラシ完了の瞬間
         if plan["sfx_path"]:
-            offset = int(round((plan["n_hold"] + plan["n_brush"]) / float(fps) * sr))
+            offset = frames_to_samples(plan["n_hold"] + plan["n_brush"], fps, sr)
             sfx_jobs.append((written + offset, plan["sfx_path"]))
         # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）にSEを鳴らす
         if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
-            logo_offset = int(round(
-                (plan["n_hold"] + plan["n_brush"] + plan.get("logo_crossfade_frames", 0) + landing_frames)
-                / float(fps) * sr))
+            logo_offset = frames_to_samples(
+                plan["n_hold"] + plan["n_brush"] + plan.get("logo_crossfade_frames", 0) + landing_frames,
+                fps, sr)
             sfx_jobs.append((written + logo_offset, logo_sfx_path))
         written += n_samples
 
@@ -1276,11 +1337,11 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
     tail_start = written + (len(orig) - cursor)   # 元音声の残り分を挟んだ後の位置
 
     if logo_at == "end" and logo_extra_frames > 0:
-        extra_samples = int(round(logo_extra_frames / float(fps) * sr))
+        extra_samples = frames_to_samples(logo_extra_frames, fps, sr)
         pieces.append(np.zeros((extra_samples, ch), np.float32))
         if logo_sfx_path and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
-            landing_samples = int(round(landing_frames / float(fps) * sr))
+            landing_samples = frames_to_samples(landing_frames, fps, sr)
             sfx_jobs.append((tail_start + landing_samples, logo_sfx_path))
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
@@ -1313,68 +1374,80 @@ def render(project, json_path, video_path, out_path, preview_path=None):
     info = probe_video(video_path)
 
     out_cfg = project["output"] or {}
-    W = even(out_cfg.get("width") or info["width"])
-    H = even(out_cfg.get("height") or info["height"])
     fps = float(out_cfg.get("fps") or info["fps"])
-    if W <= 0 or H <= 0 or fps <= 0:
+    if fps <= 0:
         raise RuntimeError("出力サイズ/fpsが不正です。")
 
-    log(f"入力: {video_path}  {info['width']}x{info['height']} "
-        f"{info['fps']:.3f}fps rotation={info['rotation']} "
-        f"audio={'あり' if info['has_audio'] else 'なし'}")
-    log(f"出力: {W}x{H} {fps:.3f}fps  フリーズ {len(project['freezes'])} 箇所")
-
-    src_frames = int(round(info["duration"] * fps)) if info["duration"] else 0
-
-    # --- ロゴ設定の解決（無指定ならlogo_cfg=None、以後ロゴ関連処理はすべて素通りになる） ---
-    logo_cfg = project.get("logo")
-    logo_at = None
-    logo_bgr, logo_alpha, logo_luma = None, None, None
-    logo_sfx_path = None
-    logo_extra_frames = 0
-    logo_params = None
-    logo_bg_color = None
-    logo_crossfade_frames = 0
-    if logo_cfg:
-        logo_at = resolve_logo_at(logo_cfg.get("at"), bool(project["freezes"]))
-        logo_path = resolve_path(logo_cfg.get("image"), [os.getcwd(), json_dir, SCRIPT_DIR])
-        logo_bgr, logo_alpha = load_logo_image(logo_path)
-        if logo_bgr is None:
-            warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
-            logo_cfg, logo_at = None, None
-        else:
-            logo_luma = build_logo_luminance_mask(logo_bgr, logo_alpha)
-            logo_params = resolve_logo_params(logo_cfg)
-            logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)
-            if logo_cfg.get("sfx"):
-                cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
-                logo_sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
-                if not os.path.exists(logo_sfx_path):
-                    warn(f"ロゴ用の効果音が見つかりません: {cand}")
-                    logo_sfx_path = None
-            logo_total_frames = logo_total_frames_for(logo_params, fps)
-            if logo_at == "end":
-                logo_extra_frames = logo_total_frames
-            elif logo_at == "last_freeze" and logo_bg_color is not None:
-                logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
-
-    plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
-                          logo_total_frames=(logo_total_frames if logo_params else 0),
-                          logo_crossfade_frames=logo_crossfade_frames)
-
-    # --- 確認用PNGだけ出して終了 ---
-    if preview_path:
-        if not plans:
-            raise RuntimeError("freezes が空なので preview を作れません。")
-        plan = plans[0]
-        frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
-        path = render_preview(frame, plan, W, H, fps, {}, json_dir, preview_path)
-        log(f"プレビューを書き出しました: {path}")
-        return path
-
-    # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---
+    # --- 一時ディレクトリは、確認用PNGだけの場合も含めて関数を抜ける時に必ず片付ける ---
     tmpdir = tempfile.mkdtemp(prefix="spotlight_")
     try:
+        if info["is_vfr"]:
+            warn(f"入力が可変フレームレート(VFR)のようです"
+                 f"（平均{info['fps']:.2f}fps・基準{info['r_fps']:.2f}fps）。"
+                 f"固定{fps:.2f}fpsへ正規化してから処理します。")
+            video_path = normalize_frame_rate(video_path, fps, info["has_audio"], tmpdir)
+            info = probe_video(video_path)
+
+        W = even(out_cfg.get("width") or info["width"])
+        H = even(out_cfg.get("height") or info["height"])
+        if W <= 0 or H <= 0:
+            raise RuntimeError("出力サイズ/fpsが不正です。")
+
+        log(f"入力: {video_path}  {info['width']}x{info['height']} "
+            f"{info['fps']:.3f}fps rotation={info['rotation']} "
+            f"audio={'あり' if info['has_audio'] else 'なし'}")
+        log(f"出力: {W}x{H} {fps:.3f}fps  フリーズ {len(project['freezes'])} 箇所")
+
+        src_frames = int(round(info["duration"] * fps)) if info["duration"] else 0
+
+        # --- ロゴ設定の解決（無指定ならlogo_cfg=None、以後ロゴ関連処理はすべて素通りになる） ---
+        logo_cfg = project.get("logo")
+        logo_at = None
+        logo_bgr, logo_alpha, logo_luma = None, None, None
+        logo_sfx_path = None
+        logo_extra_frames = 0
+        logo_params = None
+        logo_bg_color = None
+        logo_crossfade_frames = 0
+        logo_total_frames = 0
+        if logo_cfg:
+            logo_at = resolve_logo_at(logo_cfg.get("at"), bool(project["freezes"]))
+            logo_path = resolve_path(logo_cfg.get("image"), [os.getcwd(), json_dir, SCRIPT_DIR])
+            logo_bgr, logo_alpha = load_logo_image(logo_path)
+            if logo_bgr is None:
+                warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
+                logo_cfg, logo_at = None, None
+            else:
+                logo_luma = build_logo_luminance_mask(logo_bgr, logo_alpha)
+                logo_params = resolve_logo_params(logo_cfg)
+                logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)
+                if logo_cfg.get("sfx"):
+                    cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
+                    logo_sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
+                    if not os.path.exists(logo_sfx_path):
+                        warn(f"ロゴ用の効果音が見つかりません: {cand}")
+                        logo_sfx_path = None
+                logo_total_frames = logo_total_frames_for(logo_params, fps)
+                if logo_at == "end":
+                    logo_extra_frames = logo_total_frames
+                elif logo_at == "last_freeze" and logo_bg_color is not None:
+                    logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
+
+        plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
+                              logo_total_frames=(logo_total_frames if logo_params else 0),
+                              logo_crossfade_frames=logo_crossfade_frames)
+
+        # --- 確認用PNGだけ出して終了 ---
+        if preview_path:
+            if not plans:
+                raise RuntimeError("freezes が空なので preview を作れません。")
+            plan = plans[0]
+            frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
+            path = render_preview(frame, plan, W, H, fps, {}, json_dir, preview_path)
+            log(f"プレビューを書き出しました: {path}")
+            return path
+
+        # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---
         audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"],
                              logo_sfx_path=logo_sfx_path, logo_at=logo_at,
                              logo_extra_frames=logo_extra_frames, logo_params=logo_params)
