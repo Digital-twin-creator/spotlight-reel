@@ -130,7 +130,7 @@
   "logo": {
     "image": "store_logo.png",
     "at": "last_freeze",
-    "duration_sec": 1.5,
+    "background": "auto",
     "sfx": "don"
   }
 }

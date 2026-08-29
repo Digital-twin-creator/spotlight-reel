@@ -447,11 +447,23 @@
         </select>
       </div>
       <div class="field">
-        <label>duration_sec（表示時間・秒）</label>
-        <input type="number" id="logoDurationInput" min="0.3" max="10" step="0.1" value="1.5">
+        <label>logo.background（背景）</label>
+        <select id="logoBackgroundSelect">
+          <option value="auto">ロゴに合わせる（自動検出した色）</option>
+          <option value="video">動画の上に重ねる</option>
+          <option value="color">色指定</option>
+        </select>
+      </div>
+      <div class="row" id="logoColorRow" style="align-items:center; gap:8px; margin-bottom:10px;" hidden>
+        <input type="color" id="logoColorInput" value="#000000" style="width:44px; height:38px; padding:2px; flex:0 0 auto;">
+        <span class="muted" id="logoColorHint">検出色</span>
       </div>
       <div class="field">
-        <label>効果音</label>
+        <label>duration_sec（着地からの表示時間） <span class="brush-slider-value" id="logoDurationValue">1.2秒</span></label>
+        <input type="range" id="logoDurationSlider" min="0.3" max="5" step="0.1" value="1.2">
+      </div>
+      <div class="field">
+        <label>効果音（着地の瞬間に発火）</label>
         <select id="logoSfxSelect">
           <option value="don">don（低音）</option>
           <option value="shakin">shakin（上昇音）</option>
@@ -567,7 +579,8 @@ var FILM_COLOR_PRESETS = {
   yellow: "#FFC832"
 };
 var DEFAULT_LOGO_AT = "end";
-var DEFAULT_LOGO_DURATION_SEC = 1.5;
+var DEFAULT_LOGO_DURATION_SEC = 1.2;
+var DEFAULT_LOGO_BACKGROUND = "auto";
 
 function round(n, decimals) {
   var p = Math.pow(10, decimals);
@@ -690,6 +703,7 @@ function buildProjectJSON(state) {
     project.logo = {
       image: state.logo.imageName,
       at: state.logo.at === "last_freeze" ? "last_freeze" : "end",
+      background: state.logo.background || DEFAULT_LOGO_BACKGROUND,
       duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2)
     };
     if (state.logo.sfx) project.logo.sfx = state.logo.sfx;
@@ -738,8 +752,10 @@ function parseProjectJSON(json) {
       imageFile: null,
       imageName: json.logo.image,
       at: json.logo.at === "last_freeze" ? "last_freeze" : "end",
+      background: json.logo.background || DEFAULT_LOGO_BACKGROUND,
       durationSec: numOr(json.logo.duration_sec, DEFAULT_LOGO_DURATION_SEC),
-      sfx: json.logo.sfx || ""
+      sfx: json.logo.sfx || "",
+      autoColorHex: ""
     };
   }
   return {
@@ -902,6 +918,23 @@ function telopBounceScale(t) {
   t = clamp01(t);
   var eased = 1.0 - Math.pow(1.0 - t, 4);
   return TELOP_BOUNCE_FROM + (1.0 - TELOP_BOUNCE_FROM) * eased;
+}
+
+/**
+ * ラストロゴの「着地」演出の簡易プレビュー用イージング。
+ * render.py側は厳密なcubic-bezier(0.16,1,0.3,1)を使うが、プレビューは
+ * 雰囲気が伝わればよいので同系統のease-out-quartで近似する。
+ */
+var LOGO_PREVIEW_SCALE_FROM = 2.0;
+var LOGO_PREVIEW_LANDING_SEC = 0.15;
+var LOGO_PREVIEW_SWEEP_SEC = 0.30;
+function logoLandingEase(t) {
+  t = clamp01(t);
+  return 1.0 - Math.pow(1.0 - t, 4);
+}
+function logoLandingScale(t) {
+  var eased = logoLandingEase(t);
+  return LOGO_PREVIEW_SCALE_FROM + (1.0 - LOGO_PREVIEW_SCALE_FROM) * eased;
 }
 
 /** render.py の make_background と同じ計算（1画素分） */
@@ -1074,6 +1107,12 @@ if (typeof module !== "undefined" && module.exports) {
     FILM_COLOR_PRESETS: FILM_COLOR_PRESETS,
     DEFAULT_LOGO_AT: DEFAULT_LOGO_AT,
     DEFAULT_LOGO_DURATION_SEC: DEFAULT_LOGO_DURATION_SEC,
+    DEFAULT_LOGO_BACKGROUND: DEFAULT_LOGO_BACKGROUND,
+    LOGO_PREVIEW_SCALE_FROM: LOGO_PREVIEW_SCALE_FROM,
+    LOGO_PREVIEW_LANDING_SEC: LOGO_PREVIEW_LANDING_SEC,
+    LOGO_PREVIEW_SWEEP_SEC: LOGO_PREVIEW_SWEEP_SEC,
+    logoLandingEase: logoLandingEase,
+    logoLandingScale: logoLandingScale,
     round: round,
     clamp01: clamp01,
     numOr: numOr,
@@ -1140,7 +1179,7 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" }
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" }
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -1176,7 +1215,9 @@ function init() {
     "freezeSecInput", "brushAnimSecInput", "monoContrastSlider", "monoContrastValue",
     "filmOffsetSlider", "filmOffsetValue", "filmColorPresetRow", "filmAlphaSlider", "filmAlphaValue",
     "titleBounceCheckbox", "audioDuringFreezeSelect", "outputModeSelect",
-    "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect", "logoDurationInput",
+    "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
+    "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
+    "logoDurationSlider", "logoDurationValue",
     "logoSfxSelect", "clearLogoBtn",
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
@@ -1298,8 +1339,23 @@ function init() {
     appState.logo.at = els.logoAtSelect.value === "last_freeze" ? "last_freeze" : "end";
     saveToLocalStorage();
   });
-  els.logoDurationInput.addEventListener("change", function () {
-    appState.logo.durationSec = numOr(els.logoDurationInput.value, DEFAULT_LOGO_DURATION_SEC);
+  els.logoBackgroundSelect.addEventListener("change", function () {
+    var mode = els.logoBackgroundSelect.value;
+    if (mode === "video") appState.logo.background = "video";
+    else if (mode === "color") appState.logo.background = els.logoColorInput.value;
+    else appState.logo.background = "auto";
+    updateLogoColorRow();
+    saveToLocalStorage();
+  });
+  els.logoColorInput.addEventListener("input", function () {
+    if (els.logoBackgroundSelect.value === "color") {
+      appState.logo.background = els.logoColorInput.value;
+      saveToLocalStorage();
+    }
+  });
+  els.logoDurationSlider.addEventListener("input", function () {
+    appState.logo.durationSec = Number(els.logoDurationSlider.value);
+    els.logoDurationValue.textContent = appState.logo.durationSec.toFixed(1) + "秒";
     saveToLocalStorage();
   });
   els.logoSfxSelect.addEventListener("change", function () {
@@ -2264,8 +2320,9 @@ function startPreviewPlayback() {
   var start = performance.now();
   var filmColor = draft.filmColor || appState.filmColor;
 
-  // ロゴ（last_freeze指定・かつこのフリーズが一番遅い時刻の場合のみ）は静止表示でよいので、
-  // REST開始と同時に一度だけ読み込んで、以後は完成サイズのまま重ねるだけにする
+  // ロゴ（last_freeze指定・かつこのフリーズが一番遅い時刻の場合のみ）は「着地とスイープの
+  // 雰囲気が分かる程度」の簡易アニメーションで表示する（本番の厳密なタイミング・フラッシュ・
+  // 暗転までは再現しない）。REST開始と同時に一度だけ読み込む。
   var logoImgEl = null;
   if (appState.logo && appState.logo.imageFile && appState.logo.at === "last_freeze" && isLikelyLastFreezeDraft()) {
     previewLogoObjectURL = URL.createObjectURL(appState.logo.imageFile);
@@ -2275,11 +2332,47 @@ function startPreviewPlayback() {
 
   document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
 
-  function drawLogoIfReady() {
+  /** 斜め45度の白いハイライト帯を、(x,y,w,h)の矩形にscreen合成で重ねる（光彩スイープの簡易版） */
+  function drawSweepBand(ctx, x, y, w, h, sweepT) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    ctx.globalCompositeOperation = "screen";
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate(Math.PI / 4);
+    var diag = Math.sqrt(w * w + h * h);
+    var band = w * 0.3;
+    var center = -diag / 2 - band / 2 + sweepT * (diag + band);
+    var grad = ctx.createLinearGradient(center - band / 2, 0, center + band / 2, 0);
+    grad.addColorStop(0, "rgba(255,255,255,0)");
+    grad.addColorStop(0.5, "rgba(255,255,255,0.9)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(center - band / 2, -diag, band, diag * 2);
+    ctx.restore();
+  }
+
+  function drawLogoIfReady(logoElapsedSec) {
     if (!logoImgEl || !logoImgEl.complete || !logoImgEl.naturalWidth) return;
-    var lw = W * 0.4;
+    var scale = 1, opacity = 1;
+    if (logoElapsedSec < LOGO_PREVIEW_LANDING_SEC) {
+      scale = logoLandingScale(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
+      opacity = logoLandingEase(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
+    }
+    var lw = W * 0.4 * scale;
     var lh = lw * (logoImgEl.naturalHeight / logoImgEl.naturalWidth);
-    pctx.drawImage(logoImgEl, (W - lw) / 2, (H - lh) / 2, lw, lh);
+    var x = (W - lw) / 2, y = (H - lh) / 2;
+    pctx.save();
+    pctx.globalAlpha = Math.min(1, Math.max(0, opacity));
+    pctx.drawImage(logoImgEl, x, y, lw, lh);
+    pctx.restore();
+
+    var sweepEnd = LOGO_PREVIEW_LANDING_SEC + LOGO_PREVIEW_SWEEP_SEC;
+    if (logoElapsedSec >= LOGO_PREVIEW_LANDING_SEC && logoElapsedSec < sweepEnd) {
+      var sweepT = (logoElapsedSec - LOGO_PREVIEW_LANDING_SEC) / LOGO_PREVIEW_SWEEP_SEC;
+      drawSweepBand(pctx, x, y, lw, lh, sweepT);
+    }
   }
 
   function frame(now) {
@@ -2296,7 +2389,7 @@ function startPreviewPlayback() {
           var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
           var scale = (appState.titleBounce && fade < 1) ? telopBounceScale(fade) : 1;
           drawTelop(pctx, draft.name, W, H, fade, scale);
-          drawLogoIfReady();
+          drawLogoIfReady(elapsed - HOLD - BRUSH);
         }
       }
 
@@ -2460,17 +2553,86 @@ function handleLogoFileChange(e) {
   if (!file) return;
   appState.logo.imageFile = file;
   appState.logo.imageName = logoAssetName(file.name);
+  appState.logo.autoColorHex = "";
+  applyLogoSettingsToInputs();
+  detectLogoAutoColor(file);
+  saveToLocalStorage();
+  updateJsonPreview();
+}
+
+/**
+ * ロゴ画像の四隅の画素を平均した色を検出し、appState.logo.autoColorHex に反映する
+ * （render.py の logo_corner_avg_color と同じ考え方。background="auto" の見本表示用）。
+ * 非同期（画像読み込み待ち）で、完了時にスウォッチ表示を更新する。
+ */
+function detectLogoAutoColor(file) {
+  var url = URL.createObjectURL(file);
+  var img = new Image();
+  img.onload = function () {
+    try {
+      appState.logo.autoColorHex = cornerAverageColorHex(img);
+    } catch (err) {
+      appState.logo.autoColorHex = "";
+    }
+    URL.revokeObjectURL(url);
+    updateLogoColorRow();
+    saveToLocalStorage();
+  };
+  img.onerror = function () { URL.revokeObjectURL(url); };
+  img.src = url;
+}
+
+function cornerAverageColorHex(imgEl) {
+  var c = document.createElement("canvas");
+  c.width = Math.max(1, imgEl.naturalWidth);
+  c.height = Math.max(1, imgEl.naturalHeight);
+  var ctx = c.getContext("2d");
+  ctx.drawImage(imgEl, 0, 0);
+  var w = c.width, h = c.height;
+  var pts = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]];
+  var r = 0, g = 0, b = 0;
+  pts.forEach(function (p) {
+    var d = ctx.getImageData(p[0], p[1], 1, 1).data;
+    r += d[0]; g += d[1]; b += d[2];
+  });
+  function toHex(v) { return Math.round(v / 4).toString(16).padStart(2, "0"); }
+  return "#" + toHex(r) + toHex(g) + toHex(b);
+}
+
+function clearLogo() {
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
+  els.logoFileInput.value = "";
   applyLogoSettingsToInputs();
   saveToLocalStorage();
   updateJsonPreview();
 }
 
-function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
-  els.logoFileInput.value = "";
-  applyLogoSettingsToInputs();
-  saveToLocalStorage();
-  updateJsonPreview();
+/** logo.background の値("auto"/"video"/"#RRGGBB")から、選択欄が示すべきモードを決める */
+function logoBackgroundSelectMode(bg) {
+  if (bg === "video") return "video";
+  if (!bg || bg === "auto") return "auto";
+  return "color";
+}
+
+/** 背景モードに応じて、色スウォッチ行の表示・編集可否・ヒント文言を更新する */
+function updateLogoColorRow() {
+  var logo = appState.logo || {};
+  var mode = logoBackgroundSelectMode(logo.background);
+  if (mode === "video") {
+    els.logoColorRow.hidden = true;
+    return;
+  }
+  els.logoColorRow.hidden = false;
+  if (mode === "auto") {
+    els.logoColorInput.disabled = true;
+    els.logoColorInput.value = logo.autoColorHex || "#000000";
+    els.logoColorHint.textContent = logo.autoColorHex ?
+      "検出色: " + logo.autoColorHex : "検出色（ロゴ画像を選ぶと表示されます）";
+  } else {
+    els.logoColorInput.disabled = false;
+    els.logoColorInput.value = /^#[0-9A-Fa-f]{6}$/.test(logo.background) ? logo.background : "#000000";
+    els.logoColorHint.textContent = "背景色を選択";
+  }
 }
 
 function applyLogoSettingsToInputs() {
@@ -2483,7 +2645,11 @@ function applyLogoSettingsToInputs() {
     els.logoFileName.textContent = "まだロゴ画像が選ばれていません";
   }
   els.logoAtSelect.value = logo.at === "last_freeze" ? "last_freeze" : "end";
-  els.logoDurationInput.value = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
+  els.logoBackgroundSelect.value = logoBackgroundSelectMode(logo.background);
+  updateLogoColorRow();
+  var durationSec = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
+  els.logoDurationSlider.value = durationSec;
+  els.logoDurationValue.textContent = durationSec.toFixed(1) + "秒";
   els.logoSfxSelect.value = logo.sfx || "";
 }
 
@@ -2529,6 +2695,7 @@ function saveToLocalStorage() {
       logo: (appState.logo && appState.logo.imageName) ? {
         imageName: appState.logo.imageName,
         at: appState.logo.at,
+        background: appState.logo.background,
         durationSec: appState.logo.durationSec,
         sfx: appState.logo.sfx
       } : null
@@ -2557,9 +2724,11 @@ function loadFromLocalStorage(videoFileName) {
       imageFile: null,
       imageName: data.logo.imageName,
       at: data.logo.at === "last_freeze" ? "last_freeze" : "end",
+      background: data.logo.background || DEFAULT_LOGO_BACKGROUND,
       durationSec: numOr(data.logo.durationSec, DEFAULT_LOGO_DURATION_SEC),
-      sfx: data.logo.sfx || ""
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
+      sfx: data.logo.sfx || "",
+      autoColorHex: ""
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
     return true;
   } catch (e) {
     return false;
@@ -3093,7 +3262,7 @@ function handleJsonFileChange(e) {
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();

@@ -73,10 +73,24 @@ TELOP_SIZE_RATIO = 0.06       # 文字サイズ（高さ比）
 BRUSH_PAINT_ALPHA = 0.85      # 描いている最中の白い絵の具の不透明度
 DARK_GAIN = 0.30              # background="dark" のときの明るさ倍率
 
-LOGO_BOUNCE_SEC = 0.3         # ロゴが200%→100%に縮むアニメーションの長さ
-LOGO_BOUNCE_FROM = 2.0        # ロゴの初期スケール（200%→100%）
 LOGO_WIDTH_RATIO = 0.4        # ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき）
 DEFAULT_LOGO_AT = "end"       # logo.at の既定値・不明値のフォールバック先
+DEFAULT_LOGO_BACKGROUND = "auto"  # logo.background の既定値・不明値のフォールバック先
+
+# ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
+# scale_from/landing_sec/sweep_sec/flash_strength/duration_sec は logo{} 配下でJSON上書き可能
+# （resolve_logo_paramsで読み取る）。それ以外（フラッシュの長さ・スイープ帯の幅比率・
+# 保持中に拡大する先・終了直前の暗転時間・last_freezeのクロスフェード時間）は固定値。
+LOGO_SCALE_FROM_DEFAULT = 2.0     # スタンバイ時の初期スケール（200%）
+LOGO_LANDING_SEC_DEFAULT = 0.15   # 着地（縮小＋フェードイン）にかかる時間
+LOGO_FLASH_SEC = 0.05             # 着地直後の白フラッシュの長さ（固定）
+LOGO_FLASH_STRENGTH_DEFAULT = 0.6  # 白フラッシュの強さ（screen合成、0〜1）
+LOGO_SWEEP_SEC_DEFAULT = 0.30     # 光彩スイープにかかる時間
+LOGO_SWEEP_WIDTH_RATIO = 0.25     # 光彩帯の幅（ロゴ幅に対する比率、固定）
+LOGO_GROW_TO = 1.03               # 保持中にゆっくり拡大する先（103%、固定）
+LOGO_FADE_TO_BG_SEC = 0.3         # 終了直前、背景色へ暗転する時間（固定）
+LOGO_BG_CROSSFADE_SEC = 0.15      # last_freeze時、静止フレーム→背景色へのフェード時間（固定）
+LOGO_DURATION_SEC_DEFAULT = 1.2   # 着地からの表示時間の既定値
 
 AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
@@ -700,19 +714,129 @@ def load_logo_image(path):
     return bgr, alpha
 
 
-def logo_bounce_scale(t):
-    """t(0〜1、LOGO_BOUNCE_SEC内での経過割合)から、ロゴのスケール値を返す（急停止イージング）"""
-    t = float(np.clip(t, 0.0, 1.0))
-    eased = 1.0 - (1.0 - t) ** 4
-    return LOGO_BOUNCE_FROM + (1.0 - LOGO_BOUNCE_FROM) * eased
+def cubic_bezier_easing(x1, y1, x2, y2):
+    """
+    CSSのcubic-bezier(x1,y1,x2,y2)相当のイージング関数を返す。
+    制御点は (0,0)-(x1,y1)-(x2,y2)-(1,1)。x(u)=t となるuを二分探索で求め、y(u)を返す
+    （x1,x2が0〜1の通常のイージング曲線ではx(u)は単調増加なので二分探索で解ける）。
+    """
+    def bezier(u, p1, p2):
+        return 3 * (1 - u) ** 2 * u * p1 + 3 * (1 - u) * u ** 2 * p2 + u ** 3
+
+    def ease(t):
+        t = float(np.clip(t, 0.0, 1.0))
+        if t <= 0.0:
+            return 0.0
+        if t >= 1.0:
+            return 1.0
+        lo, hi = 0.0, 1.0
+        for _ in range(24):
+            mid = (lo + hi) / 2.0
+            if bezier(mid, x1, x2) < t:
+                lo = mid
+            else:
+                hi = mid
+        return bezier((lo + hi) / 2.0, y1, y2)
+    return ease
 
 
-def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale):
+# ロゴ着地アニメーションのイージング（Ease-Out Expo相当のcubic-bezier）
+LOGO_LANDING_EASE = cubic_bezier_easing(0.16, 1.0, 0.3, 1.0)
+
+
+def logo_corner_avg_color(logo_bgr):
+    """ロゴ画像の四隅の画素を平均したBGR色を返す（logo.background="auto"用）"""
+    h, w = logo_bgr.shape[:2]
+    corners = np.array([
+        logo_bgr[0, 0], logo_bgr[0, w - 1], logo_bgr[h - 1, 0], logo_bgr[h - 1, w - 1],
+    ], dtype=np.float32)
+    avg = corners.mean(axis=0)
+    return tuple(int(round(c)) for c in avg)
+
+
+def resolve_logo_background_color(bg_spec, logo_bgr):
+    """
+    logo.background を解決する。
+      - "video"                → None（背景色を敷かない。映像/静止フレームの上にそのまま重ねる）
+      - "auto"（既定・未指定）  → logo_corner_avg_color() の色
+      - "#RRGGBB"               → その色
+      - 不明な値                → 警告のうえ "auto" として扱う
+    戻り値: BGRのタプル、または背景色を敷かない場合は None
+    """
+    spec = bg_spec or DEFAULT_LOGO_BACKGROUND
+    if spec == "video":
+        return None
+    if spec == "auto":
+        return logo_corner_avg_color(logo_bgr)
+    if isinstance(spec, str) and spec.startswith("#") and len(spec) == 7:
+        s = spec.lstrip("#")
+        try:
+            r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+            return (b, g, r)
+        except ValueError:
+            pass
+    warn(f"logo.background='{spec}' は未知の値です。'{DEFAULT_LOGO_BACKGROUND}' として扱います。")
+    return logo_corner_avg_color(logo_bgr)
+
+
+def resolve_logo_params(logo_cfg):
+    """logo{} 配下のアニメーション上書きパラメータ（未指定なら既定値）をまとめて返す"""
+    return {
+        "scale_from": float(logo_cfg.get("scale_from", LOGO_SCALE_FROM_DEFAULT)),
+        "landing_sec": max(1e-3, float(logo_cfg.get("landing_sec", LOGO_LANDING_SEC_DEFAULT))),
+        "sweep_sec": max(1e-3, float(logo_cfg.get("sweep_sec", LOGO_SWEEP_SEC_DEFAULT))),
+        "flash_strength": float(np.clip(logo_cfg.get("flash_strength", LOGO_FLASH_STRENGTH_DEFAULT), 0.0, 1.0)),
+        "duration_sec": max(0.0, float(logo_cfg.get("duration_sec", LOGO_DURATION_SEC_DEFAULT))),
+    }
+
+
+def logo_total_frames_for(logo_params, fps):
+    """着地開始から終了までの合計フレーム数（＝landing_sec + duration_sec 分）"""
+    return max(1, int(round((logo_params["landing_sec"] + logo_params["duration_sec"]) * fps)))
+
+
+def build_logo_luminance_mask(logo_bgr, logo_alpha):
+    """
+    ロゴ画像の輝度(0〜1)×アルファをマスクとして返す（(H,W,1)）。
+    光彩スイープを「ロゴの明るい部分だけ」に乗せるために使う。黒背景の不透明PNGでは
+    アルファが全面ほぼ1で役に立たないため、主な判定材料は輝度にする。
+    """
+    gray = cv2.cvtColor(logo_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    a = logo_alpha[:, :, 0] if logo_alpha.ndim == 3 else logo_alpha
+    return (gray * a)[:, :, None]
+
+
+def sweep_highlight_layer(luminance_mask, sweep_t, width_ratio=LOGO_SWEEP_WIDTH_RATIO):
+    """
+    sweep_t(0〜1)における、ロゴの左上→右下に走る45度の白い帯の強度マップ(0〜1、(H,W,1))を返す。
+    透明→白→透明の線形グラデーションで、帯の幅はロゴ幅の width_ratio。
+    luminance_mask を掛けることで、ロゴの明るい部分だけに乗るようにする。
+    """
+    h, w = luminance_mask.shape[:2]
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    diag = (xs + ys) / math.sqrt(2.0)                       # 左上=0の対角線上の距離(px)
+    diag_max = ((w - 1) + (h - 1)) / math.sqrt(2.0)
+    band = max(1.0, width_ratio * w)
+    center = -band / 2.0 + float(np.clip(sweep_t, 0.0, 1.0)) * (diag_max + band)
+    dist = np.abs(diag - center)
+    intensity = np.clip(1.0 - dist / (band / 2.0), 0.0, 1.0)
+    return (intensity[:, :, None] * luminance_mask)
+
+
+def screen_blend_white(img_f32, amount):
+    """
+    img_f32(float32, 0〜255)に、白色を amount の強さでscreen合成した結果を返す。
+    amount はスカラー（フラッシュ用）・(H,W,1)配列（スイープの強度マップ用）のどちらでもよい。
+    """
+    return img_f32 + amount * (255.0 - img_f32)
+
+
+def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0):
     """
     frame の中央に、ロゴを「基準表示幅（LOGO_WIDTH_RATIO×W）× scale」のサイズで合成する。
-    scale=1.0 が最終的な表示サイズ、LOGO_BOUNCE_FROM が縮み始めの大きさ。
+    scale=1.0 が最終的な表示サイズ。opacity(0〜1)はロゴ全体の不透明度（着地時のフェードイン用）。
     """
-    if logo_bgr is None:
+    if logo_bgr is None or opacity <= 0:
         return frame
     lh, lw = logo_bgr.shape[:2]
     if lw <= 0 or lh <= 0:
@@ -725,6 +849,7 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale):
     interp = cv2.INTER_AREA if final_scale < 1.0 else cv2.INTER_LINEAR
     resized_bgr = cv2.resize(logo_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
     resized_alpha = cv2.resize(logo_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
+    resized_alpha = resized_alpha * float(np.clip(opacity, 0.0, 1.0))
 
     cx, cy = W // 2, H // 2
     x0, y0 = cx - new_w // 2, cy - new_h // 2
@@ -745,26 +870,111 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale):
     return out
 
 
-def render_logo_frame(frame, logo_bgr, logo_alpha, W, H, elapsed_sec):
-    """ロゴ表示区間内の経過秒数 elapsed_sec に応じた1フレームを作る（縮小アニメ→静止表示）"""
-    if logo_bgr is None:
-        return frame
-    if elapsed_sec < LOGO_BOUNCE_SEC:
-        scale = logo_bounce_scale(elapsed_sec / LOGO_BOUNCE_SEC)
-    else:
+def logo_animation_state(elapsed_sec, params):
+    """
+    着地開始(t=0、スタンバイ状態)からの経過秒数 elapsed_sec における、ロゴ演出の状態を返す。
+      scale       : ロゴの表示スケール
+      opacity     : ロゴ自体の不透明度（着地中のフェードイン用）
+      flash_amt   : 画面全体に乗せる白フラッシュの強さ(0〜1)
+      sweep_t     : 光彩スイープの進行度(0〜1)。スイープ区間外は None
+      fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
+    タイムライン（既定値の場合）:
+      0.00-0.15  着地（Scale 200%→100%・不透明度0→1、Ease-Out Expo）
+      0.15-0.20  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
+      0.20-0.50  光彩スイープ
+      0.50-終了  ゆっくり103%まで拡大、最後の0.3秒で背景色へ暗転
+    """
+    landing = params["landing_sec"]
+    flash_sec = LOGO_FLASH_SEC
+    sweep_sec = params["sweep_sec"]
+    duration_sec = params["duration_sec"]
+    scale_from = params["scale_from"]
+
+    seg_end = landing + duration_sec
+    sweep_start = landing + flash_sec
+    sweep_end = sweep_start + sweep_sec
+    hold_start = sweep_end
+    fade_start = max(hold_start, seg_end - LOGO_FADE_TO_BG_SEC)
+
+    t = float(np.clip(elapsed_sec, 0.0, seg_end))
+
+    if t < landing:
+        eased = LOGO_LANDING_EASE(t / landing)
+        scale = scale_from + (1.0 - scale_from) * eased
+        opacity = eased
+    elif t < hold_start:
         scale = 1.0
-    return composite_logo(frame, logo_bgr, logo_alpha, W, H, scale)
+        opacity = 1.0
+    else:
+        grow_span = max(seg_end - hold_start, 1e-6)
+        gp = float(np.clip((t - hold_start) / grow_span, 0.0, 1.0))
+        scale = 1.0 + (LOGO_GROW_TO - 1.0) * gp
+        opacity = 1.0
+
+    if landing <= t < landing + flash_sec:
+        flash_amt = params["flash_strength"] * (1.0 - (t - landing) / flash_sec)
+    else:
+        flash_amt = 0.0
+
+    if sweep_start <= t < sweep_end:
+        sweep_t = (t - sweep_start) / sweep_sec
+    else:
+        sweep_t = None
+
+    if t >= fade_start:
+        fade_amt = float(np.clip((t - fade_start) / max(seg_end - fade_start, 1e-6), 0.0, 1.0))
+    else:
+        fade_amt = 0.0
+
+    return {
+        "scale": scale, "opacity": opacity, "flash_amt": flash_amt,
+        "sweep_t": sweep_t, "fade_amt": fade_amt,
+    }
+
+
+def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_sec, params, bg_color):
+    """
+    着地開始からの経過秒数 elapsed_sec における1フレームを作る
+    （スタンバイ→着地→白フラッシュ→光彩スイープ→ゆっくり拡大→背景色へ暗転）。
+    backdrop: ロゴの後ろに敷く画面（背景色の単色フレーム、または映像/静止フレーム）。
+    """
+    if logo_bgr is None:
+        return backdrop
+
+    state = logo_animation_state(elapsed_sec, params)
+
+    logo_layer = logo_bgr.astype(np.float32)
+    if state["sweep_t"] is not None:
+        strength = sweep_highlight_layer(logo_luma, state["sweep_t"])
+        logo_layer = screen_blend_white(logo_layer, strength)
+    logo_layer = np.clip(logo_layer, 0, 255).astype(np.uint8)
+
+    frame = composite_logo(backdrop, logo_layer, logo_alpha, W, H, state["scale"], opacity=state["opacity"])
+
+    if state["flash_amt"] > 0:
+        f = screen_blend_white(frame.astype(np.float32), state["flash_amt"])
+        frame = np.clip(f, 0, 255).astype(np.uint8)
+
+    if state["fade_amt"] > 0:
+        target = np.array(bg_color if bg_color is not None else (0, 0, 0), dtype=np.float32)
+        f = frame.astype(np.float32)
+        f = f * (1.0 - state["fade_amt"]) + target * state["fade_amt"]
+        frame = np.clip(f, 0, 255).astype(np.uint8)
+
+    return frame
 
 
 # ---------------------------------------------------------------------------
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
-def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None):
+def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
+                  logo_total_frames=0, logo_crossfade_frames=0):
     """
     各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
-    logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの静止保持（rest）フェーズを
-    ロゴの表示時間ぶん確保できるよう延長する。
+    logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの静止保持（rest）フェーズを、
+    （logo.backgroundが背景色を敷くモードなら）静止フレーム→背景色のクロスフェード分
+    (logo_crossfade_frames) ＋ ロゴの着地〜表示終了分(logo_total_frames) を確保できるよう延長する。
     """
     plans = []
     for fz in freezes:
@@ -801,13 +1011,17 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None):
             "n_total": n_hold + n_brush + n_rest,
             "sfx_path": sfx_path,
             "show_logo": False,
+            "logo_crossfade_frames": 0,
+            "logo_total_frames": 0,
         })
     plans.sort(key=lambda p: p["frame_index"])
 
     if logo and logo_at == "last_freeze" and plans:
         last = plans[-1]
         last["show_logo"] = True
-        need_rest = max(1, int(round(float(logo.get("duration_sec", 1.5)) * fps)))
+        last["logo_crossfade_frames"] = logo_crossfade_frames
+        last["logo_total_frames"] = logo_total_frames
+        need_rest = max(1, logo_crossfade_frames + logo_total_frames)
         if last["n_rest"] < need_rest:
             extra = need_rest - last["n_rest"]
             last["n_rest"] += extra
@@ -816,13 +1030,16 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None):
     return plans
 
 
-def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir, logo_bgr=None, logo_alpha=None):
+def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+                        logo_bgr=None, logo_alpha=None, logo_luma=None,
+                        logo_params=None, logo_bg_color=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
       1. 静止（背景処理のみ）
       2. ブラシが伸びる（フィルム縁取り→人物カラーの順に復元）
       3. ブラシ完了 → テロップがフェードイン（バウンス可）、そのまま保持
-         （plan["show_logo"]がTrueなら、同じタイミングでロゴも表示する）
+         （plan["show_logo"]がTrueなら、rest終盤で「静止フレーム→背景色のクロスフェード
+           （logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」を行う）
     """
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
@@ -849,10 +1066,18 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir, logo_bgr=No
         yield composite_brush(bg, frame, geo, total_len, progress, W, shape,
                                film_offset, film_color_bgr, film_alpha)
 
-    # 3) 完成状態＋テロップのフェードイン（バウンス可）→保持。ロゴがあれば同時に表示する
+    # 3) 完成状態＋テロップのフェードイン（バウンス可）→保持。ロゴがあれば終盤で表示する
     done = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
                             film_offset, film_color_bgr, film_alpha)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
+
+    crossfade_frames = plan.get("logo_crossfade_frames", 0)
+    logo_seg_frames = plan.get("logo_total_frames", 0)
+    logo_start_in_rest = plan["n_rest"] - crossfade_frames - logo_seg_frames
+    solid_bg_frame = None
+    if plan["show_logo"] and logo_bg_color is not None:
+        solid_bg_frame = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
+
     for i in range(plan["n_rest"]):
         t = (i + 1) / float(fade_frames)
         fade = min(1.0, t)
@@ -863,8 +1088,20 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir, logo_bgr=No
         else:
             f_bgr, f_alpha = telop_bgr, telop_alpha
         out = blend_telop(done, f_bgr, f_alpha, fade)
+
         if plan["show_logo"]:
-            out = render_logo_frame(out, logo_bgr, logo_alpha, W, H, i / float(fps))
+            rel = i - logo_start_in_rest
+            if rel >= 0:
+                if crossfade_frames > 0 and rel < crossfade_frames:
+                    cf_t = (rel + 1) / float(crossfade_frames)
+                    target = np.array(logo_bg_color, dtype=np.float32)
+                    outf = out.astype(np.float32) * (1.0 - cf_t) + target * cf_t
+                    out = np.clip(outf, 0, 255).astype(np.uint8)
+                else:
+                    logo_elapsed = (rel - crossfade_frames) / float(fps)
+                    backdrop = solid_bg_frame if solid_bg_frame is not None else out
+                    out = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
+                                             W, H, logo_elapsed, logo_params, logo_bg_color)
         yield out
 
 
@@ -923,13 +1160,13 @@ def mix_into(buf, snippet, start):
 
 
 def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUDIO_CH,
-                 logo_sfx_path=None, logo_at=None, logo_extra_frames=0):
+                 logo_sfx_path=None, logo_at=None, logo_extra_frames=0, logo_params=None):
     """
     フリーズ区間の分だけ元音声を後ろへずらし、
     フリーズ中は無音 or 直前0.5秒のループを差し込み、効果音を重ねる。
-    logo_at=='last_freeze' なら最後のフリーズのロゴ表示開始時、
-    logo_at=='end' なら末尾に追加する logo_extra_frames 分の無音区間の先頭で、
-    logo_sfx_path のSEを鳴らす。
+    logo_sfx_path のSE（インパクトSE）は、ロゴが「着地」する瞬間に鳴らす
+    （logo_at=='last_freeze' なら最後のフリーズのクロスフェード後の着地時、
+      'end' なら末尾に追加する logo_extra_frames 区間内の着地時）。
     """
     orig = decode_audio(src_path, sr, ch) if has_audio else np.zeros((0, ch), np.float32)
 
@@ -970,9 +1207,12 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         if plan["sfx_path"]:
             offset = int(round((plan["n_hold"] + plan["n_brush"]) / float(fps) * sr))
             sfx_jobs.append((written + offset, plan["sfx_path"]))
-        # ロゴがこのフリーズ中に表示される場合、表示開始（rest開始）と同時にSEを鳴らす
-        if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path:
-            logo_offset = int(round((plan["n_hold"] + plan["n_brush"]) / float(fps) * sr))
+        # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）にSEを鳴らす
+        if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path and logo_params:
+            landing_frames = int(round(logo_params["landing_sec"] * fps))
+            logo_offset = int(round(
+                (plan["n_hold"] + plan["n_brush"] + plan.get("logo_crossfade_frames", 0) + landing_frames)
+                / float(fps) * sr))
             sfx_jobs.append((written + logo_offset, logo_sfx_path))
         written += n_samples
 
@@ -982,8 +1222,10 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
     if logo_at == "end" and logo_extra_frames > 0:
         extra_samples = int(round(logo_extra_frames / float(fps) * sr))
         pieces.append(np.zeros((extra_samples, ch), np.float32))
-        if logo_sfx_path:
-            sfx_jobs.append((tail_start, logo_sfx_path))
+        if logo_sfx_path and logo_params:
+            landing_frames = int(round(logo_params["landing_sec"] * fps))
+            landing_samples = int(round(landing_frames / float(fps) * sr))
+            sfx_jobs.append((tail_start + landing_samples, logo_sfx_path))
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
 
@@ -1031,9 +1273,12 @@ def render(project, json_path, video_path, out_path, preview_path=None):
     # --- ロゴ設定の解決（無指定ならlogo_cfg=None、以後ロゴ関連処理はすべて素通りになる） ---
     logo_cfg = project.get("logo")
     logo_at = None
-    logo_bgr, logo_alpha = None, None
+    logo_bgr, logo_alpha, logo_luma = None, None, None
     logo_sfx_path = None
     logo_extra_frames = 0
+    logo_params = None
+    logo_bg_color = None
+    logo_crossfade_frames = 0
     if logo_cfg:
         logo_at = resolve_logo_at(logo_cfg.get("at"), bool(project["freezes"]))
         logo_path = resolve_path(logo_cfg.get("image"), [os.getcwd(), json_dir, SCRIPT_DIR])
@@ -1042,16 +1287,24 @@ def render(project, json_path, video_path, out_path, preview_path=None):
             warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
             logo_cfg, logo_at = None, None
         else:
+            logo_luma = build_logo_luminance_mask(logo_bgr, logo_alpha)
+            logo_params = resolve_logo_params(logo_cfg)
+            logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)
             if logo_cfg.get("sfx"):
                 cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
                 logo_sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
                 if not os.path.exists(logo_sfx_path):
                     warn(f"ロゴ用の効果音が見つかりません: {cand}")
                     logo_sfx_path = None
+            logo_total_frames = logo_total_frames_for(logo_params, fps)
             if logo_at == "end":
-                logo_extra_frames = max(1, int(round(float(logo_cfg.get("duration_sec", 1.5)) * fps)))
+                logo_extra_frames = logo_total_frames
+            elif logo_at == "last_freeze" and logo_bg_color is not None:
+                logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
 
-    plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at)
+    plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
+                          logo_total_frames=(logo_total_frames if logo_params else 0),
+                          logo_crossfade_frames=logo_crossfade_frames)
 
     # --- 確認用PNGだけ出して終了 ---
     if preview_path:
@@ -1068,7 +1321,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
     try:
         audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"],
                              logo_sfx_path=logo_sfx_path, logo_at=logo_at,
-                             logo_extra_frames=logo_extra_frames)
+                             logo_extra_frames=logo_extra_frames, logo_params=logo_params)
         wav_path = write_wav(os.path.join(tmpdir, "audio.wav"), audio)
         log(f"音声トラック: {len(audio) / AUDIO_SR:.2f} 秒")
 
@@ -1087,7 +1340,8 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 while pending and pending[0]["frame_index"] == i:
                     plan = pending.pop(0)
                     for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
-                                                logo_bgr, logo_alpha):
+                                                logo_bgr, logo_alpha, logo_luma,
+                                                logo_params, logo_bg_color):
                         writer.stdin.write(f.tobytes())
                         last_out_frame = f
                         written += 1
@@ -1103,16 +1357,23 @@ def render(project, json_path, video_path, out_path, preview_path=None):
             # 動画末尾より後ろを指すフリーズが残っていたら最後のフレームで処理する
             for plan in pending:
                 for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
-                                            logo_bgr, logo_alpha):
+                                            logo_bgr, logo_alpha, logo_luma,
+                                            logo_params, logo_bg_color):
                     writer.stdin.write(f.tobytes())
                     last_out_frame = f
                     written += 1
 
-            # logo.at=='end'：最後に出力したフレームを背景に、ロゴだけを追加区間として書き足す
+            # logo.at=='end'：末尾に新しい区間としてロゴを書き足す。背景色を敷くモードなら
+            # 全面その色のフレーム、"video"モードなら最後に出力したフレームを背景にする
+            # （クロスフェードはlast_freezeのみで、endは背景色/映像への切り替えを挟まない）
             if logo_at == "end" and logo_bgr is not None and last_out_frame is not None:
-                backdrop = np.ascontiguousarray(last_out_frame)
+                if logo_bg_color is not None:
+                    backdrop = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
+                else:
+                    backdrop = np.ascontiguousarray(last_out_frame)
                 for i in range(logo_extra_frames):
-                    out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, W, H, i / float(fps))
+                    out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
+                                                   W, H, i / float(fps), logo_params, logo_bg_color)
                     writer.stdin.write(out_frame.tobytes())
                     written += 1
                     if written % 15 == 0:

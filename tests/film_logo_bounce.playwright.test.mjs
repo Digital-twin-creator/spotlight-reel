@@ -127,10 +127,13 @@ async function main() {
   console.log("=== ラストロゴ：画像選択でlogoブロックが組み立てられる ===");
   check(await page.textContent("#logoFileName") === "まだロゴ画像が選ばれていません",
     "ロゴ未選択時の表示文言");
+  check(await page.inputValue("#logoDurationSlider") === "1.2",
+    "duration_secスライダーの既定値が1.2秒: " + (await page.inputValue("#logoDurationSlider")));
+
   await page.setInputFiles("#logoFileInput", logoPath);
   await page.selectOption("#logoAtSelect", "end");
-  await page.fill("#logoDurationInput", "2");
-  await page.dispatchEvent("#logoDurationInput", "change");
+  await page.fill("#logoDurationSlider", "2");
+  await page.dispatchEvent("#logoDurationSlider", "input");
   await page.selectOption("#logoSfxSelect", "don");
 
   project = await page.evaluate(() => buildProjectJSON(appState));
@@ -138,8 +141,34 @@ async function main() {
   check(project.logo && project.logo.image === "logo.png",
     "logo.imageが固定名logo.<ext>になる（元ファイル名に依存しない）: " + (project.logo && project.logo.image));
   check(project.logo && project.logo.at === "end", "logo.atが選択どおりになる: " + (project.logo && project.logo.at));
-  check(project.logo && project.logo.duration_sec === 2, "logo.duration_secが入力どおりになる: " + (project.logo && project.logo.duration_sec));
+  check(project.logo && project.logo.background === "auto", "logo.backgroundの既定値がauto: " + (project.logo && project.logo.background));
+  check(project.logo && project.logo.duration_sec === 2, "logo.duration_secがスライダー操作どおりになる: " + (project.logo && project.logo.duration_sec));
   check(project.logo && project.logo.sfx === "don", "logo.sfxが選択どおりになる: " + (project.logo && project.logo.sfx));
+
+  console.log("");
+  console.log("=== ラストロゴ：背景モード（自動検出色／動画に重ねる／色指定） ===");
+  await page.waitForFunction(() => {
+    var el = document.getElementById("logoColorHint");
+    return el && el.textContent.indexOf("検出色:") === 0;
+  }, null, { timeout: 5000 });
+  const detectedHint = await page.textContent("#logoColorHint");
+  check(/^検出色: #[0-9A-Fa-f]{6}$/.test(detectedHint),
+    "ロゴ選択後、自動検出した色の見本(#RRGGBBのヒント)が表示される: " + detectedHint);
+
+  await page.selectOption("#logoBackgroundSelect", "video");
+  check(await page.isHidden("#logoColorRow"), "background='動画に重ねる'選択時は色スウォッチ行が隠れる");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.background === "video", "background選択が'video'としてJSONに反映される: " + project.logo.background);
+
+  await page.selectOption("#logoBackgroundSelect", "color");
+  await page.fill("#logoColorInput", "#112233");
+  await page.dispatchEvent("#logoColorInput", "input");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.background === "#112233", "色指定モードで選んだ色がJSONに反映される: " + project.logo.background);
+
+  await page.selectOption("#logoBackgroundSelect", "auto");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.background === "auto", "'auto'に戻すとbackgroundが'auto'になる: " + project.logo.background);
 
   console.log("");
   console.log("=== ラストロゴ：設定を削除するとlogoブロックが消える ===");

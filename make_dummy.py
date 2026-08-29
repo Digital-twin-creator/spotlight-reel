@@ -284,8 +284,10 @@ def make_sample_json(video_filename):
         "logo": {
             "image": "store_logo.png",
             "at": "last_freeze",
-            "duration_sec": 1.5,
+            "background": "auto",          # ロゴの四隅平均色（このダミーロゴは黒背景なので画面が黒くなる）
             "sfx": "don",
+            # duration_sec / scale_from / landing_sec / sweep_sec / flash_strength は
+            # 省略時の既定値（着地からの表示1.2秒・200%→100%・0.15秒・0.30秒・0.6）のまま使う
         },
     }
     return project

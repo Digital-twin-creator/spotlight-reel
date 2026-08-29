@@ -272,25 +272,39 @@ test("buildProjectJSON: フリーズに filmColor があれば film_color を出
 
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
-    logo: { imageName: "logo.png", at: "last_freeze", durationSec: 1.5, sfx: "don" }
+    logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }
   }));
-  assert.deepStrictEqual(withLogo.logo, { image: "logo.png", at: "last_freeze", duration_sec: 1.5, sfx: "don" });
+  assert.deepStrictEqual(withLogo.logo,
+    { image: "logo.png", at: "last_freeze", background: "auto", duration_sec: 1.2, sfx: "don" });
 
   const withoutLogo = core.buildProjectJSON(Object.assign(sampleState(), {
-    logo: { imageFile: null, imageName: "", at: "end", durationSec: 1.5, sfx: "don" }
+    logo: { imageFile: null, imageName: "", at: "end", background: "auto", durationSec: 1.2, sfx: "don" }
   }));
   assert.strictEqual(withoutLogo.logo, undefined);
 });
 
-test("buildProjectJSON: logo.atが'last_freeze'以外なら'end'に、sfx未設定ならsfxキー省略", () => {
+test("buildProjectJSON: logo.atが'last_freeze'以外なら'end'に、sfx未設定ならsfxキー省略、backgroundは既定でauto", () => {
   const project = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "something-unknown", durationSec: 2, sfx: "" }
   }));
   assert.strictEqual(project.logo.at, "end");
+  assert.strictEqual(project.logo.background, "auto");
   assert.strictEqual("sfx" in project.logo, false);
 });
 
-test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color・logoブロックを読み込める", () => {
+test("buildProjectJSON: logo.backgroundに色指定(#RRGGBB)や'video'をそのまま出力する", () => {
+  const withColor = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "#112233", durationSec: 1.2 }
+  }));
+  assert.strictEqual(withColor.logo.background, "#112233");
+
+  const withVideo = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "video", durationSec: 1.2 }
+  }));
+  assert.strictEqual(withVideo.logo.background, "video");
+});
+
+test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color・logo(background込み)ブロックを読み込める", () => {
   const project = {
     version: 1, video: "v.mp4",
     style: {
@@ -298,7 +312,7 @@ test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color�
       film_color: "#FF6432", film_alpha: 0.8, title_bounce: true
     },
     freezes: [{ time: 2.5, name: "赤い人", brush_shape: "round", film_color: "#FF6432", strokes: [] }],
-    logo: { image: "store_logo.png", at: "last_freeze", duration_sec: 1.5, sfx: "don" }
+    logo: { image: "store_logo.png", at: "last_freeze", background: "#00C8FF", duration_sec: 1.2, sfx: "don" }
   };
   const loaded = core.parseProjectJSON(project);
   assert.strictEqual(loaded.monoContrast, 1.3);
@@ -308,8 +322,17 @@ test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color�
   assert.strictEqual(loaded.titleBounce, true);
   assert.strictEqual(loaded.freezes[0].filmColor, "#FF6432");
   assert.deepStrictEqual(loaded.logo, {
-    imageFile: null, imageName: "store_logo.png", at: "last_freeze", durationSec: 1.5, sfx: "don"
+    imageFile: null, imageName: "store_logo.png", at: "last_freeze", background: "#00C8FF",
+    durationSec: 1.2, sfx: "don", autoColorHex: ""
   });
+});
+
+test("parseProjectJSON: logo.backgroundが省略されていれば既定値'auto'を補う", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    logo: { image: "logo.png", at: "end", duration_sec: 1.2 }
+  });
+  assert.strictEqual(loaded.logo.background, "auto");
 });
 
 test("parseProjectJSON: 新キーを含まない旧JSONは、render.pyと同じ無効化デフォルトに解決される（後方互換）", () => {
@@ -326,6 +349,17 @@ test("parseProjectJSON: 新キーを含まない旧JSONは、render.pyと同じ�
   assert.strictEqual(loaded.logo, null);
 });
 
+test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として1.2秒", () => {
+  assert.strictEqual(core.DEFAULT_LOGO_DURATION_SEC, 1.2);
+});
+
+test("logoLandingScale/logoLandingEase: t=0で初期スケール(200%)・不透明度0、t=1で100%・不透明度1", () => {
+  assert.strictEqual(core.logoLandingScale(0), core.LOGO_PREVIEW_SCALE_FROM);
+  assert.strictEqual(core.logoLandingScale(1), 1);
+  assert.strictEqual(core.logoLandingEase(0), 0);
+  assert.strictEqual(core.logoLandingEase(1), 1);
+});
+
 test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", () => {
   const state = sampleState();
   state.monoContrast = 1.4;
@@ -334,7 +368,7 @@ test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", 
   state.filmAlpha = 0.6;
   state.titleBounce = true;
   state.freezes[0].filmColor = "#00C8FF";
-  state.logo = { imageName: "logo.png", at: "end", durationSec: 2.0, sfx: "shakin" };
+  state.logo = { imageName: "logo.png", at: "end", background: "video", durationSec: 2.0, sfx: "shakin" };
   const project = core.buildProjectJSON(state);
   const loaded = core.parseProjectJSON(project);
   assert.strictEqual(loaded.monoContrast, 1.4);
@@ -344,6 +378,7 @@ test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", 
   assert.strictEqual(loaded.titleBounce, true);
   assert.strictEqual(loaded.logo.imageName, "logo.png");
   assert.strictEqual(loaded.logo.at, "end");
+  assert.strictEqual(loaded.logo.background, "video");
   assert.strictEqual(loaded.logo.durationSec, 2.0);
 });
 
