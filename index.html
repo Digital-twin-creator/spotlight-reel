@@ -199,6 +199,14 @@
   .status-line{font-size:12px; color:var(--ok); min-height:16px;}
   .brush-slider-value{font-variant-numeric:tabular-nums; color:var(--accent); font-weight:700;}
 
+  /* --- フィルム色プリセット --- */
+  .film-color-btn{
+    display:flex; align-items:center; gap:6px; min-height:38px; padding:6px 12px; font-size:13px;
+    border:2px solid transparent;
+  }
+  .film-color-btn .swatch{width:14px; height:14px; border-radius:50%; flex-shrink:0; border:1px solid rgba(255,255,255,.4);}
+  .film-color-btn.selected{border-color:var(--accent);}
+
   textarea#jsonPreviewArea{
     width:100%; min-height:120px; background:var(--panel3); color:var(--text);
     border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px;
@@ -357,6 +365,12 @@
             <option value="spray">spray（スプレー）</option>
           </select>
         </div>
+        <div class="field grow">
+          <label>フィルム色（このフリーズだけ上書き）</label>
+          <select id="filmColorOverrideSelect">
+            <option value="">全体設定を使う</option>
+          </select>
+        </div>
       </div>
     </div>
   </section>
@@ -374,11 +388,31 @@
     <div class="body stack">
       <div class="field">
         <label>freeze_sec（フリーズ全体の長さ・秒）</label>
-        <input type="number" id="freezeSecInput" min="0.5" max="10" step="0.1" value="2.5">
+        <input type="number" id="freezeSecInput" min="0.5" max="10" step="0.1" value="1.2">
       </div>
       <div class="field">
         <label>brush_anim_sec（ブラシが伸びる時間・秒）</label>
         <input type="number" id="brushAnimSecInput" min="0.2" max="3" step="0.1" value="0.8">
+      </div>
+      <div class="field">
+        <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
+        <input type="range" id="monoContrastSlider" min="1" max="2" step="0.05" value="1">
+      </div>
+      <div class="field">
+        <label>フィルム縁取り ズレ量 <span class="brush-slider-value" id="filmOffsetValue">0px</span></label>
+        <input type="range" id="filmOffsetSlider" min="0" max="30" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>フィルム縁取り 色</label>
+        <div class="row wrap" id="filmColorPresetRow"></div>
+      </div>
+      <div class="field">
+        <label>フィルム縁取り 不透明度 <span class="brush-slider-value" id="filmAlphaValue">0.80</span></label>
+        <input type="range" id="filmAlphaSlider" min="0" max="1" step="0.05" value="0.8">
+      </div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="titleBounceCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="titleBounceCheckbox">title_bounce（テロップがはずんで現れる演出）</label>
       </div>
       <div class="field">
         <label>audio_during_freeze（フリーズ中の音声）</label>
@@ -395,6 +429,36 @@
           <option value="720x1280">720 x 1280</option>
         </select>
       </div>
+    </div>
+  </details>
+
+  <!-- 6.5 ラストロゴ -->
+  <details class="card" id="logoSection">
+    <summary>ラストロゴ</summary>
+    <div class="body stack">
+      <button class="ghost" id="pickLogoBtn">🖼 ロゴ画像を選ぶ（PNG推奨）</button>
+      <input type="file" id="logoFileInput" accept="image/png,image/*" hidden>
+      <div class="muted" id="logoFileName">まだロゴ画像が選ばれていません</div>
+      <div class="field">
+        <label>logo.at（表示タイミング）</label>
+        <select id="logoAtSelect">
+          <option value="end">end（動画の末尾に追加）</option>
+          <option value="last_freeze">last_freeze（最後のフリーズに重ねて表示）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>duration_sec（表示時間・秒）</label>
+        <input type="number" id="logoDurationInput" min="0.3" max="10" step="0.1" value="1.5">
+      </div>
+      <div class="field">
+        <label>効果音</label>
+        <select id="logoSfxSelect">
+          <option value="don">don（低音）</option>
+          <option value="shakin">shakin（上昇音）</option>
+          <option value="">なし</option>
+        </select>
+      </div>
+      <button class="ghost small danger" id="clearLogoBtn">ロゴ設定を削除</button>
     </div>
   </details>
 
@@ -477,12 +541,17 @@
 
 var DEFAULT_FONT_PATH = "assets/fonts/NotoSansJP-Bold.ttf";
 var DEFAULT_STYLE = {
-  freeze_sec: 2.5,
+  freeze_sec: 1.2,
   brush_anim_sec: 0.8,
   brush_width: 0.12,
   brush_shape: "round",
+  mono_contrast: 1.0,
+  film_offset: [0, 0],
+  film_color: "#FF6432",
+  film_alpha: 0.8,
   background: "mono",
   font: DEFAULT_FONT_PATH,
+  title_bounce: false,
   audio_during_freeze: "mute"
 };
 var OUTPUT_PRESETS = {
@@ -490,6 +559,15 @@ var OUTPUT_PRESETS = {
   "1080x1920": { width: 1080, height: 1920 },
   "720x1280": { width: 720, height: 1280 }
 };
+/** フィルム縁取りの色プリセット（参考動画は人物ごとに色が違うため、フリーズ単位の上書きにも使う） */
+var FILM_COLOR_PRESETS = {
+  orange: "#FF6432",
+  cyan: "#00C8FF",
+  magenta: "#FF32C8",
+  yellow: "#FFC832"
+};
+var DEFAULT_LOGO_AT = "end";
+var DEFAULT_LOGO_DURATION_SEC = 1.5;
 
 function round(n, decimals) {
   var p = Math.pow(10, decimals);
@@ -503,6 +581,20 @@ function clamp01(v) {
 function numOr(v, fallback) {
   var n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * film_offset は render.py 側では「出力幅に対する比率」で持つ（解像度非依存にするため）。
+ * エディタのスライダーは px 表示のほうが直感的なので、参照幅(W)を基準に相互変換する。
+ * render.py の composite_brush と同じ考え方（x・y とも出力幅を基準にスケールする）。
+ */
+function filmOffsetRatioFromPx(px, referenceW) {
+  if (!referenceW) return 0;
+  return (Number(px) || 0) / referenceW;
+}
+
+function filmOffsetPxFromRatio(ratio, referenceW) {
+  return Math.round((Number(ratio) || 0) * (referenceW || 0));
 }
 
 /**
@@ -564,12 +656,15 @@ function freezeToJSON(fz) {
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
   if (fz.sfx) out.sfx = fz.sfx;
+  // フリーズ単位でのフィルム色の上書き（未指定なら省略し、全体設定の film_color を使わせる）
+  if (fz.filmColor) out.film_color = fz.filmColor;
   return out;
 }
 
 /** エディタの内部状態から render.py 契約どおりのプロジェクトJSONを作る */
 function buildProjectJSON(state) {
   var preset = OUTPUT_PRESETS[state.outputMode] || null;
+  var offsetRatio = round(numOr(state.filmOffsetRatio, 0), 5);
   var project = {
     version: 1,
     video: state.videoFileName || "",
@@ -577,14 +672,27 @@ function buildProjectJSON(state) {
       freeze_sec: round(numOr(state.freezeSec, DEFAULT_STYLE.freeze_sec), 2),
       brush_anim_sec: round(numOr(state.brushAnimSec, DEFAULT_STYLE.brush_anim_sec), 2),
       brush_width: DEFAULT_STYLE.brush_width,
+      mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
+      film_offset: [offsetRatio, offsetRatio],
+      film_color: state.filmColor || DEFAULT_STYLE.film_color,
+      film_alpha: round(numOr(state.filmAlpha, DEFAULT_STYLE.film_alpha), 2),
       background: DEFAULT_STYLE.background,
       font: DEFAULT_FONT_PATH,
+      title_bounce: !!state.titleBounce,
       audio_during_freeze: state.audioDuringFreeze === "keep" ? "keep" : "mute"
     },
     freezes: sortFreezesByTime(state.freezes).map(freezeToJSON)
   };
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
+  }
+  if (state.logo && state.logo.imageName) {
+    project.logo = {
+      image: state.logo.imageName,
+      at: state.logo.at === "last_freeze" ? "last_freeze" : "end",
+      duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2)
+    };
+    if (state.logo.sfx) project.logo.sfx = state.logo.sfx;
   }
   return project;
 }
@@ -614,6 +722,7 @@ function parseProjectJSON(json) {
       sfx: fz.sfx || "",
       background: fz.background === "dark" ? "dark" : "mono",
       brushShape: resolveBrushShape(fz.brush_shape),
+      filmColor: fz.film_color || "",
       strokes: (fz.strokes || []).map(function (st) {
         return {
           width: numOr(st.width, style.brush_width),
@@ -622,13 +731,30 @@ function parseProjectJSON(json) {
       })
     };
   });
+  var filmOffsetArr = Array.isArray(style.film_offset) ? style.film_offset : DEFAULT_STYLE.film_offset;
+  var logo = null;
+  if (json.logo && json.logo.image) {
+    logo = {
+      imageFile: null,
+      imageName: json.logo.image,
+      at: json.logo.at === "last_freeze" ? "last_freeze" : "end",
+      durationSec: numOr(json.logo.duration_sec, DEFAULT_LOGO_DURATION_SEC),
+      sfx: json.logo.sfx || ""
+    };
+  }
   return {
     videoFileName: json.video || "",
     outputMode: matchOutputPreset(json.output),
     freezeSec: numOr(style.freeze_sec, DEFAULT_STYLE.freeze_sec),
     brushAnimSec: numOr(style.brush_anim_sec, DEFAULT_STYLE.brush_anim_sec),
+    monoContrast: numOr(style.mono_contrast, DEFAULT_STYLE.mono_contrast),
+    filmOffsetRatio: numOr(filmOffsetArr[0], 0),
+    filmColor: style.film_color || DEFAULT_STYLE.film_color,
+    filmAlpha: numOr(style.film_alpha, DEFAULT_STYLE.film_alpha),
+    titleBounce: !!style.title_bounce,
     audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
-    freezes: sortFreezesByTime(freezes)
+    freezes: sortFreezesByTime(freezes),
+    logo: logo
   };
 }
 
@@ -769,6 +895,15 @@ function clampByte(v) {
   return Math.min(255, Math.max(0, Math.round(v)));
 }
 
+/** title_bounce=true のときの、テロップフェード進行割合t(0〜1)からスケール値を返す。
+ *  render.py の telop_bounce_scale と同じ式（ease-out-quart、急停止イージング）。 */
+var TELOP_BOUNCE_FROM = 1.3;
+function telopBounceScale(t) {
+  t = clamp01(t);
+  var eased = 1.0 - Math.pow(1.0 - t, 4);
+  return TELOP_BOUNCE_FROM + (1.0 - TELOP_BOUNCE_FROM) * eased;
+}
+
 /** render.py の make_background と同じ計算（1画素分） */
 function computeBgPixel(r, g, b, mode) {
   if (mode === "dark") {
@@ -825,6 +960,13 @@ function videoAssetName(originalFileName) {
   var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
   var ext = m ? m[1].toLowerCase() : "mp4";
   return "video." + ext;
+}
+
+/** ロゴ画像も動画と同じ考え方で、job ブランチ内での固定名（拡張子だけ元ファイルから引き継ぐ）にする */
+function logoAssetName(originalFileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
+  var ext = m ? m[1].toLowerCase() : "png";
+  return "logo." + ext;
 }
 
 /**
@@ -929,9 +1071,16 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_STYLE: DEFAULT_STYLE,
     DEFAULT_FONT_PATH: DEFAULT_FONT_PATH,
     OUTPUT_PRESETS: OUTPUT_PRESETS,
+    FILM_COLOR_PRESETS: FILM_COLOR_PRESETS,
+    DEFAULT_LOGO_AT: DEFAULT_LOGO_AT,
+    DEFAULT_LOGO_DURATION_SEC: DEFAULT_LOGO_DURATION_SEC,
     round: round,
     clamp01: clamp01,
     numOr: numOr,
+    filmOffsetRatioFromPx: filmOffsetRatioFromPx,
+    filmOffsetPxFromRatio: filmOffsetPxFromRatio,
+    telopBounceScale: telopBounceScale,
+    logoAssetName: logoAssetName,
     computeContentRect: computeContentRect,
     ratioFromRect: ratioFromRect,
     shouldAddPoint: shouldAddPoint,
@@ -982,8 +1131,16 @@ var appState = {
   outputMode: "original",
   freezeSec: DEFAULT_STYLE.freeze_sec,
   brushAnimSec: DEFAULT_STYLE.brush_anim_sec,
+  monoContrast: DEFAULT_STYLE.mono_contrast,
+  filmOffsetRatio: DEFAULT_STYLE.film_offset[0],
+  filmColor: DEFAULT_STYLE.film_color,
+  filmAlpha: DEFAULT_STYLE.film_alpha,
+  titleBounce: DEFAULT_STYLE.title_bounce,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
-  freezes: []
+  freezes: [],
+  // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
+  // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" }
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -996,6 +1153,7 @@ var overlaySize = { width: 0, height: 0 };
 // 実際に変わった時だけ再設定するための比較基準として使う。
 var lastCanvasContentSize = { width: 0, height: 0 };
 var previewRAF = null;
+var previewLogoObjectURL = null; // 簡易プレビュー中に読み込んだロゴ画像のObjectURL（停止時に必ず解放する）
 
 var els = {};
 
@@ -1012,10 +1170,14 @@ function init() {
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
-    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect",
+    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect", "filmColorOverrideSelect",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
-    "freezeSecInput", "brushAnimSecInput", "audioDuringFreezeSelect", "outputModeSelect",
+    "freezeSecInput", "brushAnimSecInput", "monoContrastSlider", "monoContrastValue",
+    "filmOffsetSlider", "filmOffsetValue", "filmColorPresetRow", "filmAlphaSlider", "filmAlphaValue",
+    "titleBounceCheckbox", "audioDuringFreezeSelect", "outputModeSelect",
+    "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect", "logoDurationInput",
+    "logoSfxSelect", "clearLogoBtn",
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
     "ghSettingsSaveBtn", "ghSettingsStatus",
@@ -1025,6 +1187,7 @@ function init() {
   wireGlobalErrorHandling();
   preloadBrushTipImages();
   initGuideCard();
+  buildFilmColorControls();
 
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
   els.videoFileInput.addEventListener("change", handleVideoFileChange);
@@ -1083,6 +1246,10 @@ function init() {
     draft.brushShape = els.brushShapeSelect.value;
     redrawStrokesOverlay();
   });
+  els.filmColorOverrideSelect.addEventListener("change", function () {
+    if (!draft) return;
+    draft.filmColor = els.filmColorOverrideSelect.value || "";
+  });
 
   els.freezeSecInput.addEventListener("change", function () {
     appState.freezeSec = numOr(els.freezeSecInput.value, DEFAULT_STYLE.freeze_sec);
@@ -1092,14 +1259,54 @@ function init() {
     appState.brushAnimSec = numOr(els.brushAnimSecInput.value, DEFAULT_STYLE.brush_anim_sec);
     saveToLocalStorage();
   });
+  els.monoContrastSlider.addEventListener("input", function () {
+    appState.monoContrast = Number(els.monoContrastSlider.value);
+    els.monoContrastValue.textContent = appState.monoContrast.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.filmOffsetSlider.addEventListener("input", function () {
+    var px = Number(els.filmOffsetSlider.value);
+    els.filmOffsetValue.textContent = px + "px";
+    appState.filmOffsetRatio = filmOffsetRatioFromPx(px, getReferenceOutputWidth());
+    saveToLocalStorage();
+  });
+  els.filmAlphaSlider.addEventListener("input", function () {
+    appState.filmAlpha = Number(els.filmAlphaSlider.value);
+    els.filmAlphaValue.textContent = appState.filmAlpha.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.titleBounceCheckbox.addEventListener("change", function () {
+    appState.titleBounce = els.titleBounceCheckbox.checked;
+    saveToLocalStorage();
+  });
   els.audioDuringFreezeSelect.addEventListener("change", function () {
     appState.audioDuringFreeze = els.audioDuringFreezeSelect.value;
     saveToLocalStorage();
   });
   els.outputModeSelect.addEventListener("change", function () {
     appState.outputMode = els.outputModeSelect.value;
+    // 出力解像度が変わると「ズレ量スライダー(px)」の基準幅も変わるので、
+    // 比率(appState.filmOffsetRatio)は保ったまま表示だけ更新する
+    els.filmOffsetSlider.value = String(filmOffsetPxFromRatio(appState.filmOffsetRatio, getReferenceOutputWidth()));
+    els.filmOffsetValue.textContent = els.filmOffsetSlider.value + "px";
     saveToLocalStorage();
   });
+
+  els.pickLogoBtn.addEventListener("click", function () { els.logoFileInput.click(); });
+  els.logoFileInput.addEventListener("change", handleLogoFileChange);
+  els.logoAtSelect.addEventListener("change", function () {
+    appState.logo.at = els.logoAtSelect.value === "last_freeze" ? "last_freeze" : "end";
+    saveToLocalStorage();
+  });
+  els.logoDurationInput.addEventListener("change", function () {
+    appState.logo.durationSec = numOr(els.logoDurationInput.value, DEFAULT_LOGO_DURATION_SEC);
+    saveToLocalStorage();
+  });
+  els.logoSfxSelect.addEventListener("change", function () {
+    appState.logo.sfx = els.logoSfxSelect.value;
+    saveToLocalStorage();
+  });
+  els.clearLogoBtn.addEventListener("click", clearLogo);
 
   els.exportBtn.addEventListener("click", exportProjectJSON);
   els.copyJsonBtn.addEventListener("click", copyProjectJSON);
@@ -1316,6 +1523,7 @@ function startNewFreeze() {
     sfx: "shakin",
     background: "mono",
     brushShape: "round",
+    filmColor: "",
     strokes: []
   }, true);
 }
@@ -1446,6 +1654,7 @@ function enterDrawMode() {
   els.sfxSelect.value = draft.sfx || "";
   els.backgroundSelect.value = draft.background || "mono";
   els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
+  els.filmColorOverrideSelect.value = draft.filmColor || "";
   els.brushWidthSlider.value = "0.12";
   els.brushWidthValue.textContent = "0.12";
 
@@ -2014,6 +2223,7 @@ function togglePreviewPlayback() {
 function stopPreviewPlayback() {
   if (previewRAF) cancelAnimationFrame(previewRAF);
   previewRAF = null;
+  if (previewLogoObjectURL) { URL.revokeObjectURL(previewLogoObjectURL); previewLogoObjectURL = null; }
   els.videoWrap.classList.remove("previewing");
   els.previewBtn.textContent = "▶ プレビュー";
   if (draft) setPlayStatus("フリーズ編集中");
@@ -2052,8 +2262,25 @@ function startPreviewPlayback() {
   var pctx = els.previewCanvas.getContext("2d");
   var HOLD = 0.3, BRUSH = appState.brushAnimSec, REST = 1.0;
   var start = performance.now();
+  var filmColor = draft.filmColor || appState.filmColor;
+
+  // ロゴ（last_freeze指定・かつこのフリーズが一番遅い時刻の場合のみ）は静止表示でよいので、
+  // REST開始と同時に一度だけ読み込んで、以後は完成サイズのまま重ねるだけにする
+  var logoImgEl = null;
+  if (appState.logo && appState.logo.imageFile && appState.logo.at === "last_freeze" && isLikelyLastFreezeDraft()) {
+    previewLogoObjectURL = URL.createObjectURL(appState.logo.imageFile);
+    logoImgEl = new Image();
+    logoImgEl.src = previewLogoObjectURL;
+  }
 
   document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
+
+  function drawLogoIfReady() {
+    if (!logoImgEl || !logoImgEl.complete || !logoImgEl.naturalWidth) return;
+    var lw = W * 0.4;
+    var lh = lw * (logoImgEl.naturalHeight / logoImgEl.naturalWidth);
+    pctx.drawImage(logoImgEl, (W - lw) / 2, (H - lh) / 2, lw, lh);
+  }
 
   function frame(now) {
     try {
@@ -2063,10 +2290,13 @@ function startPreviewPlayback() {
 
       if (elapsed >= HOLD) {
         var progress = geoInfo.total > 0 ? Math.min(1, (elapsed - HOLD) / BRUSH) : 1;
-        drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape);
+        drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape,
+          filmColor, appState.filmAlpha, appState.filmOffsetRatio);
         if (elapsed >= HOLD + BRUSH) {
           var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
-          drawTelop(pctx, draft.name, W, H, fade);
+          var scale = (appState.titleBounce && fade < 1) ? telopBounceScale(fade) : 1;
+          drawTelop(pctx, draft.name, W, H, fade, scale);
+          drawLogoIfReady();
         }
       }
 
@@ -2078,11 +2308,19 @@ function startPreviewPlayback() {
       showError("プレビュー中にエラーが発生しました: " + (err && err.message ? err.message : err));
     }
     previewRAF = null;
+    if (previewLogoObjectURL) { URL.revokeObjectURL(previewLogoObjectURL); previewLogoObjectURL = null; }
     els.videoWrap.classList.remove("previewing");
     els.previewBtn.textContent = "▶ プレビュー";
     if (draft) setPlayStatus("フリーズ編集中");
   }
   previewRAF = requestAnimationFrame(frame);
+}
+
+/** 現在編集中のdraftが、既存フリーズの中で一番遅い時刻か（＝last_freezeロゴの対象になりうるか） */
+function isLikelyLastFreezeDraft() {
+  if (!draft) return false;
+  var t = draft.time;
+  return appState.freezes.every(function (f) { return f.id === draft.id || f.time <= t; });
 }
 
 function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
@@ -2098,7 +2336,7 @@ function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
   dctx.putImageData(img, 0, 0);
 }
 
-function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape) {
+function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, filmColor, filmAlpha, filmOffsetRatio) {
   if (geoInfo.total <= 0) return;
   var head = geoInfo.total * progress;
   shape = resolveBrushShape(shape);
@@ -2108,6 +2346,28 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape) {
   var mctx = maskCanvas.getContext("2d");
   mctx.filter = "blur(2px)";
   drawStampedGeo(mctx, shape, geoInfo.geo, 0, head);
+
+  // フィルム縁取り：本番マスクを film_offset（出力幅比、x・yとも同じ量）だけズラし、
+  // film_color を film_alpha で塗ってから、その上に人物カラーを重ねる（render.pyのcomposite_brushと同じ考え方）
+  var dx = (filmOffsetRatio || 0) * W, dy = (filmOffsetRatio || 0) * W;
+  if (filmAlpha > 0 && (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5)) {
+    var filmMaskCanvas = document.createElement("canvas");
+    filmMaskCanvas.width = W; filmMaskCanvas.height = H;
+    filmMaskCanvas.getContext("2d").drawImage(maskCanvas, dx, dy);
+
+    var filmCanvas = document.createElement("canvas");
+    filmCanvas.width = W; filmCanvas.height = H;
+    var flctx = filmCanvas.getContext("2d");
+    flctx.fillStyle = filmColor || DEFAULT_STYLE.film_color;
+    flctx.fillRect(0, 0, W, H);
+    flctx.globalCompositeOperation = "destination-in";
+    flctx.drawImage(filmMaskCanvas, 0, 0);
+
+    pctx.save();
+    pctx.globalAlpha = filmAlpha;
+    pctx.drawImage(filmCanvas, 0, 0);
+    pctx.restore();
+  }
 
   var colorCanvas = document.createElement("canvas");
   colorCanvas.width = W; colorCanvas.height = H;
@@ -2128,21 +2388,103 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape) {
   }
 }
 
-function drawTelop(ctx, name, W, H, fade) {
+/** 白太字＋薄い黒ドロップシャドウ。render.pyのrender_telop_layerと同じ見た目。
+ *  scale（既定1）を渡すと、テロップ中心を基準に拡大表示する（title_bounce用）。 */
+function drawTelop(ctx, name, W, H, fade, scale) {
   if (!name || fade <= 0) return;
+  scale = scale || 1;
   var size = Math.max(8, Math.round(H * 0.06));
+  var shadowOffset = Math.max(1, Math.round(size / 20));
+  var x = W / 2, y = H * 0.78;
   ctx.save();
   ctx.globalAlpha = Math.min(1, fade);
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
   ctx.font = "700 " + size + 'px "SpotlightJP", -apple-system, sans-serif';
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.lineWidth = Math.max(2, Math.round(size / 12)) * 2;
-  ctx.strokeStyle = "#000";
+  ctx.fillStyle = "rgba(0,0,0,0.51)";
+  ctx.fillText(name, shadowOffset, shadowOffset);
   ctx.fillStyle = "#fff";
-  var x = W / 2, y = H * 0.78;
-  ctx.strokeText(name, x, y);
-  ctx.fillText(name, x, y);
+  ctx.fillText(name, 0, 0);
   ctx.restore();
+}
+
+/* ---------------- フィルム縁取り色（全体設定のプリセット・フリーズ単位の上書き選択） ---------------- */
+
+var FILM_COLOR_LABELS = { orange: "オレンジ", cyan: "シアン", magenta: "マゼンタ", yellow: "イエロー" };
+
+function buildFilmColorControls() {
+  els.filmColorPresetRow.innerHTML = "";
+  Object.keys(FILM_COLOR_PRESETS).forEach(function (key) {
+    var hex = FILM_COLOR_PRESETS[key];
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small ghost film-color-btn";
+    btn.dataset.filmColor = hex;
+    btn.innerHTML = '<span class="swatch" style="background:' + hex + '"></span>' + FILM_COLOR_LABELS[key];
+    btn.addEventListener("click", function () {
+      appState.filmColor = hex;
+      updateFilmColorPresetSelection();
+      saveToLocalStorage();
+    });
+    els.filmColorPresetRow.appendChild(btn);
+
+    var opt = document.createElement("option");
+    opt.value = hex;
+    opt.textContent = FILM_COLOR_LABELS[key];
+    els.filmColorOverrideSelect.appendChild(opt);
+  });
+  updateFilmColorPresetSelection();
+}
+
+function updateFilmColorPresetSelection() {
+  var buttons = els.filmColorPresetRow.querySelectorAll(".film-color-btn");
+  for (var i = 0; i < buttons.length; i++) {
+    var match = (buttons[i].dataset.filmColor || "").toLowerCase() === (appState.filmColor || "").toLowerCase();
+    buttons[i].classList.toggle("selected", match);
+  }
+}
+
+/** film_offset のpxスライダーの基準幅。出力解像度が固定ならそれを、元のままなら動画の実解像度を使う */
+function getReferenceOutputWidth() {
+  var preset = OUTPUT_PRESETS[appState.outputMode];
+  if (preset) return preset.width;
+  return els.video.videoWidth || 1080;
+}
+
+/* ---------------- ラストロゴ ---------------- */
+
+function handleLogoFileChange(e) {
+  var file = e.target.files && e.target.files[0];
+  if (!file) return;
+  appState.logo.imageFile = file;
+  appState.logo.imageName = logoAssetName(file.name);
+  applyLogoSettingsToInputs();
+  saveToLocalStorage();
+  updateJsonPreview();
+}
+
+function clearLogo() {
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
+  els.logoFileInput.value = "";
+  applyLogoSettingsToInputs();
+  saveToLocalStorage();
+  updateJsonPreview();
+}
+
+function applyLogoSettingsToInputs() {
+  var logo = appState.logo || {};
+  if (logo.imageFile) {
+    els.logoFileName.textContent = "選択中: " + logo.imageFile.name;
+  } else if (logo.imageName) {
+    els.logoFileName.textContent = "設定済み（" + logo.imageName + "）。「動画を作る」の前にロゴ画像を選び直してください";
+  } else {
+    els.logoFileName.textContent = "まだロゴ画像が選ばれていません";
+  }
+  els.logoAtSelect.value = logo.at === "last_freeze" ? "last_freeze" : "end";
+  els.logoDurationInput.value = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
+  els.logoSfxSelect.value = logo.sfx || "";
 }
 
 /* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
@@ -2150,8 +2492,18 @@ function drawTelop(ctx, name, W, H, fade) {
 function applySettingsToInputs() {
   els.freezeSecInput.value = appState.freezeSec;
   els.brushAnimSecInput.value = appState.brushAnimSec;
+  els.monoContrastSlider.value = appState.monoContrast;
+  els.monoContrastValue.textContent = Number(appState.monoContrast).toFixed(2);
+  var offsetPx = filmOffsetPxFromRatio(appState.filmOffsetRatio, getReferenceOutputWidth());
+  els.filmOffsetSlider.value = String(offsetPx);
+  els.filmOffsetValue.textContent = offsetPx + "px";
+  els.filmAlphaSlider.value = appState.filmAlpha;
+  els.filmAlphaValue.textContent = Number(appState.filmAlpha).toFixed(2);
+  els.titleBounceCheckbox.checked = !!appState.titleBounce;
+  updateFilmColorPresetSelection();
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.outputModeSelect.value = appState.outputMode;
+  applyLogoSettingsToInputs();
 }
 
 /* ---------------- localStorage ---------------- */
@@ -2164,9 +2516,22 @@ function saveToLocalStorage() {
     var payload = {
       freezeSec: appState.freezeSec,
       brushAnimSec: appState.brushAnimSec,
+      monoContrast: appState.monoContrast,
+      filmOffsetRatio: appState.filmOffsetRatio,
+      filmColor: appState.filmColor,
+      filmAlpha: appState.filmAlpha,
+      titleBounce: appState.titleBounce,
       audioDuringFreeze: appState.audioDuringFreeze,
       outputMode: appState.outputMode,
-      freezes: appState.freezes
+      freezes: appState.freezes,
+      // logo画像本体(File)は保存できないため、ファイル名等の設定だけ保存する
+      // （動画ファイルと同じく、復元後は「動画を作る」の前に選び直してもらう）
+      logo: (appState.logo && appState.logo.imageName) ? {
+        imageName: appState.logo.imageName,
+        at: appState.logo.at,
+        durationSec: appState.logo.durationSec,
+        sfx: appState.logo.sfx
+      } : null
     };
     localStorage.setItem(storageKey(appState.videoFileName), JSON.stringify(payload));
   } catch (e) { /* 容量超過などは無視 */ }
@@ -2180,9 +2545,21 @@ function loadFromLocalStorage(videoFileName) {
     var data = JSON.parse(raw);
     appState.freezeSec = numOr(data.freezeSec, DEFAULT_STYLE.freeze_sec);
     appState.brushAnimSec = numOr(data.brushAnimSec, DEFAULT_STYLE.brush_anim_sec);
+    appState.monoContrast = numOr(data.monoContrast, DEFAULT_STYLE.mono_contrast);
+    appState.filmOffsetRatio = numOr(data.filmOffsetRatio, DEFAULT_STYLE.film_offset[0]);
+    appState.filmColor = data.filmColor || DEFAULT_STYLE.film_color;
+    appState.filmAlpha = numOr(data.filmAlpha, DEFAULT_STYLE.film_alpha);
+    appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.outputMode = data.outputMode || "original";
     appState.freezes = data.freezes || [];
+    appState.logo = (data.logo && data.logo.imageName) ? {
+      imageFile: null,
+      imageName: data.logo.imageName,
+      at: data.logo.at === "last_freeze" ? "last_freeze" : "end",
+      durationSec: numOr(data.logo.durationSec, DEFAULT_LOGO_DURATION_SEC),
+      sfx: data.logo.sfx || ""
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
     return true;
   } catch (e) {
     return false;
@@ -2492,6 +2869,17 @@ function startMakeVideoJob() {
     return;
   }
 
+  var logoFile = (appState.logo && appState.logo.imageFile) || null;
+  if (appState.logo && appState.logo.imageName && !logoFile) {
+    showJobError("ラストロゴの設定が残っていますが画像が選び直されていません。ロゴ画像を選び直すか、「ロゴ設定を削除」してください");
+    els.logoSection.open = true;
+    return;
+  }
+  if (logoFile && exceedsBlobLimit(logoFile.size)) {
+    showJobError("ロゴ画像が大きすぎます（上限100MB）");
+    return;
+  }
+
   var user = els.ghUserInput.value.trim();
   var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
   var token = els.ghTokenInput.value.trim();
@@ -2508,6 +2896,7 @@ function startMakeVideoJob() {
   var baseCommitSha = null;
   var jsonBlobSha = null;
   var videoBlobSha = null;
+  var logoBlobSha = null;
   var releaseInfo = null;
 
   setJobButtonBusy(true);
@@ -2543,14 +2932,29 @@ function startMakeVideoJob() {
     })
     .then(function (blob) {
       videoBlobSha = blob.sha;
-      showJobProgress(86, "コミットを作成中…");
+      if (!logoFile) return null;
+      showJobProgress(84, "ロゴ画像をBase64に変換中…");
+      return blobToBase64(logoFile);
+    })
+    .then(function (logoBase64) {
+      if (!logoFile) return null;
+      showJobProgress(86, "ロゴ画像をアップロード中…");
+      return ghCreateBlob(user, repo, token, logoBase64);
+    })
+    .then(function (logoBlob) {
+      if (logoBlob) logoBlobSha = logoBlob.sha;
+      showJobProgress(88, "コミットを作成中…");
       return ghGetCommit(user, repo, token, baseCommitSha);
     })
     .then(function (baseCommit) {
-      return ghCreateTree(user, repo, token, baseCommit.tree.sha, [
+      var entries = [
         { path: "project.json", sha: jsonBlobSha },
         { path: videoName, sha: videoBlobSha }
-      ]);
+      ];
+      if (logoFile && logoBlobSha) {
+        entries.push({ path: logoAssetName(logoFile.name), sha: logoBlobSha });
+      }
+      return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
     })
     .then(function (tree) {
       return ghCreateCommit(user, repo, token, "spotlight-reel editor: " + tag, tree.sha, baseCommitSha);
@@ -2681,9 +3085,15 @@ function handleJsonFileChange(e) {
       var loaded = parseProjectJSON(json);
       appState.freezeSec = loaded.freezeSec;
       appState.brushAnimSec = loaded.brushAnimSec;
+      appState.monoContrast = loaded.monoContrast;
+      appState.filmOffsetRatio = loaded.filmOffsetRatio;
+      appState.filmColor = loaded.filmColor;
+      appState.filmAlpha = loaded.filmAlpha;
+      appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don" };
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();

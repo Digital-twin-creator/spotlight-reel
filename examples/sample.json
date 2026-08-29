@@ -7,11 +7,22 @@
     "fps": 30
   },
   "style": {
-    "freeze_sec": 2.5,
+    "freeze_sec": 1.8,
     "brush_anim_sec": 0.8,
     "brush_width": 0.12,
+    "brush_shape": "round",
+    "mono_contrast": 1.3,
+    "film_offset": [
+      0.0074,
+      0.0074
+    ],
+    "film_color": "#FF6432",
+    "film_alpha": 0.8,
     "background": "mono",
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
+    "title_font": "assets/fonts/Anton-Regular.ttf",
+    "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
+    "title_bounce": true,
     "audio_during_freeze": "mute"
   },
   "freezes": [
@@ -19,6 +30,8 @@
       "time": 2.5,
       "name": "赤い人",
       "sfx": "shakin",
+      "brush_shape": "round",
+      "film_color": "#FF6432",
       "strokes": [
         {
           "width": 0.1,
@@ -65,8 +78,10 @@
     },
     {
       "time": 5.5,
-      "name": "青い人",
+      "name": "BLUE GUY",
       "sfx": "don",
+      "brush_shape": "hake",
+      "film_color": "#00C8FF",
       "strokes": [
         {
           "width": 0.09,
@@ -111,5 +126,11 @@
         }
       ]
     }
-  ]
+  ],
+  "logo": {
+    "image": "store_logo.png",
+    "at": "last_freeze",
+    "duration_sec": 1.5,
+    "sfx": "don"
+  }
 }

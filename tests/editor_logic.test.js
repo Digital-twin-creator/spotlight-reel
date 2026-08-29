@@ -210,6 +210,143 @@ test("parseProjectJSON: style が省略されていても既定値を補う", ()
   assert.strictEqual(loaded.audioDuringFreeze, "mute");
 });
 
+/* ---- 演出追加：フィルム色オフセット縁取り／テロップバウンス／ラストロゴ ---- */
+
+test("DEFAULT_STYLE: freeze_secの既定値は1.2、film系はrender.pyと同じ無効化デフォルト", () => {
+  assert.strictEqual(core.DEFAULT_STYLE.freeze_sec, 1.2);
+  assert.strictEqual(core.DEFAULT_STYLE.mono_contrast, 1.0);
+  assert.deepStrictEqual(core.DEFAULT_STYLE.film_offset, [0, 0]);
+  assert.strictEqual(core.DEFAULT_STYLE.title_bounce, false);
+});
+
+test("filmOffsetRatioFromPx / filmOffsetPxFromRatio: 出力幅を基準に相互変換できる（render.pyと同じ考え方）", () => {
+  assert.strictEqual(core.filmOffsetRatioFromPx(8, 1080), 8 / 1080);
+  assert.strictEqual(core.filmOffsetPxFromRatio(8 / 1080, 1080), 8);
+  assert.strictEqual(core.filmOffsetRatioFromPx(10, 0), 0); // 参照幅0での0除算を避ける
+});
+
+test("telopBounceScale: t=0で130%、t=1で100%になる急停止イージング", () => {
+  assert.strictEqual(core.telopBounceScale(0), 1.3);
+  assert.strictEqual(core.telopBounceScale(1), 1.0);
+  assert.ok(core.telopBounceScale(0.5) > 1.0 && core.telopBounceScale(0.5) < 1.3);
+});
+
+test("logoAssetName: 拡張子を保ったまま logo.<ext> にする（大文字は小文字化）", () => {
+  assert.strictEqual(core.logoAssetName("my store LOGO.PNG"), "logo.png");
+  assert.strictEqual(core.logoAssetName("noext"), "logo.png");
+});
+
+test("buildProjectJSON: 新しいstyleキー（mono_contrast/film_offset/film_color/film_alpha/title_bounce）を出力する", () => {
+  const state = sampleState();
+  state.monoContrast = 1.3;
+  state.filmOffsetRatio = 8 / 1080;
+  state.filmColor = "#00C8FF";
+  state.filmAlpha = 0.8;
+  state.titleBounce = true;
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.mono_contrast, 1.3);
+  assert.deepStrictEqual(project.style.film_offset, [0.00741, 0.00741]);
+  assert.strictEqual(project.style.film_color, "#00C8FF");
+  assert.strictEqual(project.style.film_alpha, 0.8);
+  assert.strictEqual(project.style.title_bounce, true);
+});
+
+test("buildProjectJSON: 新キーを何も設定しなければ、render.pyと同じ無効化デフォルトのまま出力される（後方互換）", () => {
+  const state = sampleState();
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.mono_contrast, 1.0);
+  assert.deepStrictEqual(project.style.film_offset, [0, 0]);
+  assert.strictEqual(project.style.title_bounce, false);
+  assert.strictEqual(project.logo, undefined);
+});
+
+test("buildProjectJSON: フリーズに filmColor があれば film_color を出力し、無ければ省略する（全体設定を継承）", () => {
+  const state = sampleState();
+  state.freezes[0].filmColor = "#FF32C8";
+  const project = core.buildProjectJSON(state);
+  const withColor = project.freezes.filter(f => f.time === 5.5)[0];
+  const withoutColor = project.freezes.filter(f => f.time === 2.5)[0];
+  assert.strictEqual(withColor.film_color, "#FF32C8");
+  assert.strictEqual("film_color" in withoutColor, false);
+});
+
+test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
+  const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "last_freeze", durationSec: 1.5, sfx: "don" }
+  }));
+  assert.deepStrictEqual(withLogo.logo, { image: "logo.png", at: "last_freeze", duration_sec: 1.5, sfx: "don" });
+
+  const withoutLogo = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageFile: null, imageName: "", at: "end", durationSec: 1.5, sfx: "don" }
+  }));
+  assert.strictEqual(withoutLogo.logo, undefined);
+});
+
+test("buildProjectJSON: logo.atが'last_freeze'以外なら'end'に、sfx未設定ならsfxキー省略", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "something-unknown", durationSec: 2, sfx: "" }
+  }));
+  assert.strictEqual(project.logo.at, "end");
+  assert.strictEqual("sfx" in project.logo, false);
+});
+
+test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color・logoブロックを読み込める", () => {
+  const project = {
+    version: 1, video: "v.mp4",
+    style: {
+      freeze_sec: 1.8, mono_contrast: 1.3, film_offset: [0.0074, 0.0074],
+      film_color: "#FF6432", film_alpha: 0.8, title_bounce: true
+    },
+    freezes: [{ time: 2.5, name: "赤い人", brush_shape: "round", film_color: "#FF6432", strokes: [] }],
+    logo: { image: "store_logo.png", at: "last_freeze", duration_sec: 1.5, sfx: "don" }
+  };
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.monoContrast, 1.3);
+  assert.strictEqual(loaded.filmOffsetRatio, 0.0074);
+  assert.strictEqual(loaded.filmColor, "#FF6432");
+  assert.strictEqual(loaded.filmAlpha, 0.8);
+  assert.strictEqual(loaded.titleBounce, true);
+  assert.strictEqual(loaded.freezes[0].filmColor, "#FF6432");
+  assert.deepStrictEqual(loaded.logo, {
+    imageFile: null, imageName: "store_logo.png", at: "last_freeze", durationSec: 1.5, sfx: "don"
+  });
+});
+
+test("parseProjectJSON: 新キーを含まない旧JSONは、render.pyと同じ無効化デフォルトに解決される（後方互換）", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { freeze_sec: 2.5, font: "assets/fonts/CustomFont.ttf" },
+    freezes: [{ time: 1, name: "旧フリーズ", strokes: [] }]
+  });
+  assert.strictEqual(loaded.monoContrast, 1.0);
+  assert.strictEqual(loaded.filmOffsetRatio, 0);
+  assert.strictEqual(loaded.filmColor, core.DEFAULT_STYLE.film_color);
+  assert.strictEqual(loaded.titleBounce, false);
+  assert.strictEqual(loaded.freezes[0].filmColor, "");
+  assert.strictEqual(loaded.logo, null);
+});
+
+test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", () => {
+  const state = sampleState();
+  state.monoContrast = 1.4;
+  state.filmOffsetRatio = 0.01;
+  state.filmColor = "#FFC832";
+  state.filmAlpha = 0.6;
+  state.titleBounce = true;
+  state.freezes[0].filmColor = "#00C8FF";
+  state.logo = { imageName: "logo.png", at: "end", durationSec: 2.0, sfx: "shakin" };
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.monoContrast, 1.4);
+  assert.strictEqual(loaded.filmOffsetRatio, 0.01);
+  assert.strictEqual(loaded.filmColor, "#FFC832");
+  assert.strictEqual(loaded.filmAlpha, 0.6);
+  assert.strictEqual(loaded.titleBounce, true);
+  assert.strictEqual(loaded.logo.imageName, "logo.png");
+  assert.strictEqual(loaded.logo.at, "end");
+  assert.strictEqual(loaded.logo.durationSec, 2.0);
+});
+
 /* ---- buildStrokeGeometry / trimGeometryToLength（ブラシのプレビュー計算） ---- */
 test("buildStrokeGeometry: 比率座標をピクセル座標に変換し長さを計算する", () => {
   const strokes = [{ width: 0.1, points: [[0, 0], [1, 0]] }]; // 幅いっぱいの水平線

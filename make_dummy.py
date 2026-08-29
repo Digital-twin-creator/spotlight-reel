@@ -24,7 +24,7 @@ import wave
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES_DIR = os.path.join(SCRIPT_DIR, "examples")
@@ -43,6 +43,12 @@ FONT_URLS = [
     "https://fonts.gstatic.com/s/notosansjp/v53/-F6jfjtqLzI2JPCgQBnw7HFyzSD-AsregP8VFBEj75s.ttf",
 ]
 FONT_PATH = os.path.join(FONT_DIR, "NotoSansJP-Bold.ttf")
+
+ANTON_FONT_URLS = [
+    # タイトル用の欧文ディスプレイ体（Google Fonts OFL）
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf",
+]
+ANTON_FONT_PATH = os.path.join(FONT_DIR, "Anton-Regular.ttf")
 
 
 def log(msg):
@@ -183,27 +189,37 @@ def write_wav(path, samples, sr=SR):
 # フォント取得
 # ---------------------------------------------------------------------------
 
-def ensure_font():
-    """NotoSansJP-Bold.ttf が無ければ Google Fonts からダウンロードする"""
-    if os.path.exists(FONT_PATH):
-        log(f"フォントは既に存在します: {FONT_PATH}")
+def ensure_font_file(urls, dest_path, label):
+    """dest_path が無ければ urls を順に試してダウンロードする"""
+    if os.path.exists(dest_path):
+        log(f"フォントは既に存在します: {dest_path}")
         return
-    for url in FONT_URLS:
-        log(f"フォントをダウンロード中: {url}")
+    for url in urls:
+        log(f"{label}をダウンロード中: {url}")
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0 (make_dummy.py)"})
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = resp.read()
-            with open(FONT_PATH, "wb") as f:
+            with open(dest_path, "wb") as f:
                 f.write(data)
-            log(f"フォントを保存しました: {FONT_PATH}")
+            log(f"{label}を保存しました: {dest_path}")
             return
         except Exception as exc:  # noqa: BLE001 - ネットワーク不通環境向けフォールバック
             print(f"[warn] このURLからは取得できませんでした（{exc}）", file=sys.stderr)
-    print("[warn] フォントを取得できませんでした。"
-          "render.py は OpenCV の既定フォントにフォールバックします。",
+    print(f"[warn] {label}を取得できませんでした。"
+          "render.py は代替フォント（未指定時はOpenCVの既定フォント）にフォールバックします。",
           file=sys.stderr)
+
+
+def ensure_font():
+    """NotoSansJP-Bold.ttf が無ければ Google Fonts からダウンロードする"""
+    ensure_font_file(FONT_URLS, FONT_PATH, "日本語フォント")
+
+
+def ensure_title_font():
+    """Anton-Regular.ttf（欧文タイトル用）が無ければ Google Fonts からダウンロードする"""
+    ensure_font_file(ANTON_FONT_URLS, ANTON_FONT_PATH, "タイトル用欧文フォント(Anton)")
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +244,18 @@ def make_sample_json(video_filename):
     freezes = [
         {
             "time": 2.5,
-            "name": "赤い人",
+            "name": "赤い人",              # 日本語 → title_font_jp（NotoSansJP）が使われる
             "sfx": "shakin",
+            "brush_shape": "round",
+            "film_color": "#FF6432",       # オレンジのフィルム縁取り（フリーズ単位で上書き）
             "strokes": [{"width": 0.10, "points": stroke_over_circle(2.5, 0)}],
         },
         {
             "time": 5.5,
-            "name": "青い人",
+            "name": "BLUE GUY",            # 欧文 → title_font（Anton）が使われる
             "sfx": "don",
+            "brush_shape": "hake",
+            "film_color": "#00C8FF",       # シアンのフィルム縁取り（人物ごとに色を変える例）
             "strokes": [{"width": 0.09, "points": stroke_over_circle(5.5, 1)}],
         },
     ]
@@ -245,16 +265,68 @@ def make_sample_json(video_filename):
         "video": video_filename,
         "output": {"width": W, "height": H, "fps": FPS},
         "style": {
-            "freeze_sec": 2.5,
+            "freeze_sec": 1.8,             # 既定値(1.2)より少し長めに取り、バウンス/ロゴが映える余裕を持たせる
             "brush_anim_sec": 0.8,
             "brush_width": 0.12,
+            "brush_shape": "round",
+            "mono_contrast": 1.3,
+            "film_offset": [0.0074, 0.0074],   # 出力幅比。1080px換算でおよそ8px
+            "film_color": "#FF6432",
+            "film_alpha": 0.8,
             "background": "mono",
             "font": "assets/fonts/NotoSansJP-Bold.ttf",
+            "title_font": "assets/fonts/Anton-Regular.ttf",
+            "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
+            "title_bounce": True,
             "audio_during_freeze": "mute",
         },
         "freezes": freezes,
+        "logo": {
+            "image": "store_logo.png",
+            "at": "last_freeze",
+            "duration_sec": 1.5,
+            "sfx": "don",
+        },
     }
     return project
+
+
+# ---------------------------------------------------------------------------
+# ダミーロゴ（examples/store_logo.png）
+# ---------------------------------------------------------------------------
+
+def gen_dummy_logo(out_path):
+    """テスト用のダミーロゴPNG（透過、丸角バッジに白文字の「STORE」）を生成する"""
+    w, h, ss = 640, 360, 2
+    img = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    pad = 10 * ss
+    draw.rounded_rectangle(
+        [pad, pad, w * ss - pad, h * ss - pad],
+        radius=40 * ss, fill=(30, 30, 40, 235), outline=(255, 255, 255, 255), width=6 * ss)
+
+    text = "STORE"
+    font = None
+    font_candidates = [ANTON_FONT_PATH, FONT_PATH]
+    for cand in font_candidates:
+        if os.path.exists(cand):
+            try:
+                font = ImageFont.truetype(cand, 100 * ss)
+                break
+            except Exception:  # noqa: BLE001
+                font = None
+    if font is not None:
+        draw.text((w * ss / 2, h * ss / 2), text, font=font, anchor="mm", fill=(255, 255, 255, 255))
+    else:
+        arr = np.array(img)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.2 * ss, 6 * ss)
+        org = (int(w * ss / 2 - tw / 2), int(h * ss / 2 + th / 2))
+        cv2.putText(arr, text, org, cv2.FONT_HERSHEY_SIMPLEX, 3.2 * ss, (255, 255, 255, 255), 6 * ss, cv2.LINE_AA)
+        img = Image.fromarray(arr)
+
+    img = img.resize((w, h), Image.LANCZOS)
+    img.save(out_path)
+    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -404,12 +476,17 @@ def main():
 
     log("=== フォントを確認 ===")
     ensure_font()
+    ensure_title_font()
 
     log("=== ダミー動画を生成 ===")
     video_path = os.path.join(EXAMPLES_DIR, "dummy_input.mp4")
     render_dummy_video(video_path)
     mux_audio_into_video(video_path, make_tone_track())
     log(f"  {video_path} を生成しました")
+
+    log("=== ダミーロゴを生成 ===")
+    logo_path = gen_dummy_logo(os.path.join(EXAMPLES_DIR, "store_logo.png"))
+    log(f"  {logo_path} を生成しました")
 
     log("=== サンプルJSONを生成 ===")
     project = make_sample_json("dummy_input.mp4")

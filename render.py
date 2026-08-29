@@ -37,12 +37,19 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # style の既定値（プロジェクトJSONの style / 各freeze で上書きされる）
 DEFAULT_STYLE = {
-    "freeze_sec": 2.5,            # フリーズ全体の長さ（秒）
+    "freeze_sec": 1.2,            # フリーズ全体の長さ（秒）
     "brush_anim_sec": 0.8,        # ブラシが伸びるアニメーションの長さ（秒）
     "brush_width": 0.12,          # ブラシ太さ（動画幅に対する比率）
     "brush_shape": "round",       # round | hake | marker | spray
+    "mono_contrast": 1.0,         # mono背景のコントラスト倍率（1.0=従来どおり無加工）
+    "film_offset": [0.0, 0.0],    # フィルム縁取りのズラし量（出力幅に対する比率、[x, y]）
+    "film_color": "#FF6432",      # フィルム縁取りの色（film_offsetが[0,0]なら見えない）
+    "film_alpha": 0.8,            # フィルム縁取りの不透明度
     "background": "mono",         # mono | dark
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
+    # title_font / title_font_jp は省略時 font にフォールバックする（use_style_font()参照）。
+    # ここではキー自体を持たせず、未指定であることを判別できるようにする。
+    "title_bounce": False,        # テロップ出現時に130%→100%のバウンスを付けるか
     "audio_during_freeze": "mute",  # mute | keep
 }
 
@@ -59,11 +66,17 @@ BRUSH_TIP_SCALE = {"round": 1.19, "hake": 1.56, "marker": 1.61, "spray": 1.09}
 BRUSH_STAMP_SPACING = {"round": 0.32, "hake": 0.62, "marker": 0.42, "spray": 0.68}
 
 HOLD_BEFORE_BRUSH_SEC = 0.3   # フリーズ開始からブラシ描き始めまでの静止時間
-TELOP_FADE_SEC = 0.15         # テロップのフェードイン時間
+TELOP_FADE_SEC = 0.15         # テロップのフェードイン（＝バウンスも同じ時間で行う）
+TELOP_BOUNCE_FROM = 1.3       # title_bounce=true のときの初期スケール（130%→100%）
 TELOP_Y_RATIO = 0.78          # テロップ中心の縦位置（高さ比）
 TELOP_SIZE_RATIO = 0.06       # 文字サイズ（高さ比）
 BRUSH_PAINT_ALPHA = 0.85      # 描いている最中の白い絵の具の不透明度
 DARK_GAIN = 0.30              # background="dark" のときの明るさ倍率
+
+LOGO_BOUNCE_SEC = 0.3         # ロゴが200%→100%に縮むアニメーションの長さ
+LOGO_BOUNCE_FROM = 2.0        # ロゴの初期スケール（200%→100%）
+LOGO_WIDTH_RATIO = 0.4        # ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき）
+DEFAULT_LOGO_AT = "end"       # logo.at の既定値・不明値のフォールバック先
 
 AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
@@ -148,6 +161,7 @@ def load_project(json_path):
         "output": proj.get("output") or {},
         "style": style,
         "freezes": freezes,
+        "logo": proj.get("logo"),   # 無指定ならNone（ロゴ演出なし）
     }
 
 
@@ -299,14 +313,43 @@ def open_video_writer(out_path, W, H, fps, audio_wav):
 # 背景処理（モノクロ / 減光）
 # ---------------------------------------------------------------------------
 
-def make_background(frame, mode):
-    """フリーズ中の「カラーが抜けた背景」を作る"""
+def make_background(frame, mode, contrast=1.0):
+    """フリーズ中の「カラーが抜けた背景」を作る（mono時はcontrastでコントラストを強調できる）"""
     if mode == "dark":
         return np.clip(frame.astype(np.float32) * DARK_GAIN, 0, 255).astype(np.uint8)
     if mode != "mono":
         warn(f"background='{mode}' は未知の値です。mono として扱います。")
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    contrast = float(contrast) if contrast else 1.0
+    if contrast != 1.0:
+        gray = np.clip((gray - 128.0) * contrast + 128.0, 0, 255)
+    gray = gray.astype(np.uint8)
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def hex_to_bgr(hex_color, default=(50, 100, 255)):
+    """"#RRGGBB" をOpenCVのBGRタプルに変換する。不正な値はdefaultにフォールバックする"""
+    s = (hex_color or "").lstrip("#")
+    if len(s) != 6:
+        if hex_color:
+            warn(f"film_color='{hex_color}' は不正な値です。既定色を使います。")
+        return default
+    try:
+        r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+        return (b, g, r)
+    except ValueError:
+        warn(f"film_color='{hex_color}' は不正な値です。既定色を使います。")
+        return default
+
+
+def translate_mask(mask, dx, dy):
+    """マスク（H×W, uint8）を(dx, dy)だけ平行移動する（はみ出た部分は切り捨てる）"""
+    if abs(dx) < 0.5 and abs(dy) < 0.5:
+        return mask
+    H, W = mask.shape
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(mask, M, (W, H), flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 # ---------------------------------------------------------------------------
@@ -471,9 +514,13 @@ def draw_stroke_mask(geo, W, H, start_len, end_len, shape):
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 
-def composite_brush(bg, color, geo, total_len, progress, W, shape):
+def composite_brush(bg, color, geo, total_len, progress, W, shape,
+                     film_offset=(0.0, 0.0), film_color_bgr=None, film_alpha=0.0):
     """
     進捗 progress(0〜1) の時点の合成フレームを作る。
+      - 背景の上に、本番マスクを film_offset だけズラした「フィルム縁取り」を
+        film_color/film_alpha で敷く（film_offsetが[0,0]なら人物カラーの下に
+        完全に隠れるため、見た目には現れない＝既定で無効化される）
       - 描画済みの領域だけ元のカラーが見える（筆先スタンプによるマスクで復元）
       - 描いたばかりの先端付近には白い絵の具（alpha 0.85）が乗り、
         少し後ろでフェードして消える（＝最終的にはカラーだけが残る）
@@ -483,9 +530,18 @@ def composite_brush(bg, color, geo, total_len, progress, W, shape):
 
     head = total_len * float(np.clip(progress, 0.0, 1.0))
     mask = draw_stroke_mask(geo, W, bg.shape[0], 0.0, head, shape)
-    m = (mask.astype(np.float32) / 255.0)[:, :, None]
 
-    out = bg.astype(np.float32) * (1.0 - m) + color.astype(np.float32) * m
+    out = bg.astype(np.float32)
+
+    dx, dy = float(film_offset[0]) * W, float(film_offset[1]) * W
+    if film_alpha > 0 and (abs(dx) >= 0.5 or abs(dy) >= 0.5):
+        film_mask = translate_mask(mask, dx, dy)
+        fm = (film_mask.astype(np.float32) / 255.0)[:, :, None] * float(np.clip(film_alpha, 0.0, 1.0))
+        film_bgr = np.array(film_color_bgr or (50, 100, 255), dtype=np.float32)
+        out = out * (1.0 - fm) + film_bgr * fm
+
+    m = (mask.astype(np.float32) / 255.0)[:, :, None]
+    out = out * (1.0 - m) + color.astype(np.float32) * m
 
     if progress < 1.0:
         # 先端付近の「まだ乾いていない絵の具」の長さ
@@ -518,43 +574,94 @@ def load_font(font_path, size):
     return font
 
 
+def contains_japanese(text):
+    """ひらがな・カタカナ・CJK統合漢字が含まれるかどうか"""
+    for ch in text or "":
+        code = ord(ch)
+        if (0x3040 <= code <= 0x30FF or      # ひらがな・カタカナ
+                0x3400 <= code <= 0x4DBF or  # CJK統合漢字拡張A
+                0x4E00 <= code <= 0x9FFF or  # CJK統合漢字
+                0xFF66 <= code <= 0xFF9F):   # 半角カタカナ
+            return True
+    return False
+
+
+def resolve_title_font_path(fz, json_dir):
+    """
+    title_font / title_font_jp（テキストが日本語を含むかで選ぶ）から実パスを解決する。
+    どちらも未指定なら font にフォールバックする（既存JSONとの後方互換のため）。
+    """
+    key = "title_font_jp" if contains_japanese(fz.get("name", "")) else "title_font"
+    path = fz.get(key) or fz.get("font")
+    return resolve_path(path, [os.getcwd(), json_dir, SCRIPT_DIR])
+
+
+def telop_bounce_scale(t):
+    """t(0〜1、フェード進行割合)から、バウンス中のテロップのスケール値を返す（急停止イージング）"""
+    t = float(np.clip(t, 0.0, 1.0))
+    eased = 1.0 - (1.0 - t) ** 4   # ease-out-quart：最初速く、終盤で急停止
+    return TELOP_BOUNCE_FROM + (1.0 - TELOP_BOUNCE_FROM) * eased
+
+
+def scale_telop_layer(bgr, alpha, scale, cx, cy):
+    """テロップ層（BGR・アルファ）を(cx, cy)中心にscale倍する（バウンス演出用）"""
+    if abs(scale - 1.0) < 0.001:
+        return bgr, alpha
+    H, W = bgr.shape[:2]
+    M = cv2.getRotationMatrix2D((float(cx), float(cy)), 0.0, scale)
+    bgr_s = cv2.warpAffine(bgr, M, (W, H), flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+    alpha2d = alpha[:, :, 0] if alpha.ndim == 3 else alpha
+    alpha_s = cv2.warpAffine(alpha2d, M, (W, H), flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+    return bgr_s, alpha_s[:, :, None]
+
+
 def render_telop_layer(text, W, H, font):
     """
-    テロップを1回だけ描いて (BGR画像, アルファ0〜1) として返す。
+    テロップを1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
     フェードインは毎フレームこのアルファに係数を掛けるだけで済ませる。
     """
     if not text:
-        return None, None
+        return None, None, 0, 0
 
     size = max(8, int(round(H * TELOP_SIZE_RATIO)))
     cx, cy = W // 2, int(round(H * TELOP_Y_RATIO))
-    outline = max(2, size // 12)
+    shadow_offset = max(1, size // 20)
+    shadow_alpha = 130   # 薄い黒ドロップシャドウ（0〜255）
 
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
     if font is not None:
         draw = ImageDraw.Draw(layer)
-        draw.text((cx, cy), text, font=font, anchor="mm",
-                  fill=(255, 255, 255, 255),
-                  stroke_width=outline, stroke_fill=(0, 0, 0, 255))
+        # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
+        draw.text((cx + shadow_offset, cy + shadow_offset), text, font=font, anchor="mm",
+                  fill=(0, 0, 0, shadow_alpha))
+        draw.text((cx, cy), text, font=font, anchor="mm", fill=(255, 255, 255, 255))
         rgba = np.array(layer)
     else:
         # フォントが無い環境向けフォールバック（日本語は表示できない）
         warn("日本語フォントが無いため OpenCV の既定フォントで描画します。")
         tmp = np.zeros((H, W, 4), np.uint8)
         scale = size / 30.0
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, outline)
+        thickness = max(2, size // 12)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
         org = (cx - tw // 2, cy + th // 2)
+        shadow_org = (org[0] + shadow_offset, org[1] + shadow_offset)
+        shadow_layer = np.zeros((H, W, 4), np.uint8)
+        cv2.putText(shadow_layer, text, shadow_org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (0, 0, 0, 255), thickness, cv2.LINE_AA)
+        shadow_layer[:, :, 3] = (shadow_layer[:, :, 3].astype(np.float32) *
+                                  (shadow_alpha / 255.0)).astype(np.uint8)
+        tmp = shadow_layer
         cv2.putText(tmp, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                    (0, 0, 0, 255), outline * 2, cv2.LINE_AA)
-        cv2.putText(tmp, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                    (255, 255, 255, 255), outline, cv2.LINE_AA)
+                    (255, 255, 255, 255), thickness, cv2.LINE_AA)
         rgba = tmp
 
     rgb = rgba[:, :, :3].astype(np.float32)
     bgr = rgb[:, :, ::-1].copy() if font is not None else rgb  # PILはRGB、cv2はBGR
     alpha = (rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
-    return bgr, alpha
+    return bgr, alpha, cx, cy
 
 
 def blend_telop(frame, telop_bgr, telop_alpha, fade):
@@ -567,13 +674,97 @@ def blend_telop(frame, telop_bgr, telop_alpha, fade):
 
 
 # ---------------------------------------------------------------------------
+# ロゴ（動画末尾 or 最後のフリーズ中に表示）
+# ---------------------------------------------------------------------------
+
+def resolve_logo_at(at, has_freezes):
+    """logo.at を検証する。last_freeze を指定してもfreezesが無ければ end にフォールバックする"""
+    at = at or DEFAULT_LOGO_AT
+    if at not in ("end", "last_freeze"):
+        warn(f"logo.at='{at}' は未知の値です。'{DEFAULT_LOGO_AT}' として扱います。")
+        at = DEFAULT_LOGO_AT
+    if at == "last_freeze" and not has_freezes:
+        warn("logo.at='last_freeze' ですが freezes が空のため、'end' として扱います。")
+        at = "end"
+    return at
+
+
+def load_logo_image(path):
+    """ロゴPNGを読み込み、(BGR uint8, アルファ float32 Hlogo×Wlogo×1) を返す。無ければ (None, None)"""
+    if not path or not os.path.exists(path):
+        return None, None
+    img = Image.open(path).convert("RGBA")
+    arr = np.array(img)
+    bgr = arr[:, :, :3][:, :, ::-1].copy()
+    alpha = (arr[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+    return bgr, alpha
+
+
+def logo_bounce_scale(t):
+    """t(0〜1、LOGO_BOUNCE_SEC内での経過割合)から、ロゴのスケール値を返す（急停止イージング）"""
+    t = float(np.clip(t, 0.0, 1.0))
+    eased = 1.0 - (1.0 - t) ** 4
+    return LOGO_BOUNCE_FROM + (1.0 - LOGO_BOUNCE_FROM) * eased
+
+
+def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale):
+    """
+    frame の中央に、ロゴを「基準表示幅（LOGO_WIDTH_RATIO×W）× scale」のサイズで合成する。
+    scale=1.0 が最終的な表示サイズ、LOGO_BOUNCE_FROM が縮み始めの大きさ。
+    """
+    if logo_bgr is None:
+        return frame
+    lh, lw = logo_bgr.shape[:2]
+    if lw <= 0 or lh <= 0:
+        return frame
+
+    base_scale = (W * LOGO_WIDTH_RATIO) / lw
+    final_scale = max(0.01, base_scale * scale)
+    new_w = max(1, int(round(lw * final_scale)))
+    new_h = max(1, int(round(lh * final_scale)))
+    interp = cv2.INTER_AREA if final_scale < 1.0 else cv2.INTER_LINEAR
+    resized_bgr = cv2.resize(logo_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
+    resized_alpha = cv2.resize(logo_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
+
+    cx, cy = W // 2, H // 2
+    x0, y0 = cx - new_w // 2, cy - new_h // 2
+    x1, y1 = x0 + new_w, y0 + new_h
+    sx0, sy0 = max(0, -x0), max(0, -y0)
+    sx1, sy1 = new_w - max(0, x1 - W), new_h - max(0, y1 - H)
+    dx0, dy0 = max(0, x0), max(0, y0)
+    dx1, dy1 = min(W, x1), min(H, y1)
+    if dx1 <= dx0 or dy1 <= dy0 or sx1 <= sx0 or sy1 <= sy0:
+        return frame
+
+    out = frame.copy()
+    patch_bgr = resized_bgr[sy0:sy1, sx0:sx1]
+    patch_a = resized_alpha[sy0:sy1, sx0:sx1]
+    region = out[dy0:dy1, dx0:dx1].astype(np.float32)
+    blended = region * (1.0 - patch_a) + patch_bgr * patch_a
+    out[dy0:dy1, dx0:dx1] = np.clip(blended, 0, 255).astype(np.uint8)
+    return out
+
+
+def render_logo_frame(frame, logo_bgr, logo_alpha, W, H, elapsed_sec):
+    """ロゴ表示区間内の経過秒数 elapsed_sec に応じた1フレームを作る（縮小アニメ→静止表示）"""
+    if logo_bgr is None:
+        return frame
+    if elapsed_sec < LOGO_BOUNCE_SEC:
+        scale = logo_bounce_scale(elapsed_sec / LOGO_BOUNCE_SEC)
+    else:
+        scale = 1.0
+    return composite_logo(frame, logo_bgr, logo_alpha, W, H, scale)
+
+
+# ---------------------------------------------------------------------------
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
-def plan_freezes(freezes, fps, src_frames, json_dir):
+def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None):
     """
-    各フリーズについて、挿入位置（フレーム番号）と
-    各フェーズのフレーム数を決める。
+    各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
+    logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの静止保持（rest）フェーズを
+    ロゴの表示時間ぶん確保できるよう延長する。
     """
     plans = []
     for fz in freezes:
@@ -609,28 +800,44 @@ def plan_freezes(freezes, fps, src_frames, json_dir):
             "n_rest": n_rest,
             "n_total": n_hold + n_brush + n_rest,
             "sfx_path": sfx_path,
+            "show_logo": False,
         })
     plans.sort(key=lambda p: p["frame_index"])
+
+    if logo and logo_at == "last_freeze" and plans:
+        last = plans[-1]
+        last["show_logo"] = True
+        need_rest = max(1, int(round(float(logo.get("duration_sec", 1.5)) * fps)))
+        if last["n_rest"] < need_rest:
+            extra = need_rest - last["n_rest"]
+            last["n_rest"] += extra
+            last["n_total"] += extra
+
     return plans
 
 
-def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir):
+def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir, logo_bgr=None, logo_alpha=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
       1. 静止（背景処理のみ）
-      2. ブラシが伸びる
-      3. ブラシ完了 → テロップがフェードイン、そのまま保持
+      2. ブラシが伸びる（フィルム縁取り→人物カラーの順に復元）
+      3. ブラシ完了 → テロップがフェードイン（バウンス可）、そのまま保持
+         （plan["show_logo"]がTrueなら、同じタイミングでロゴも表示する）
     """
     fz = plan["fz"]
-    bg = make_background(frame, fz.get("background", "mono"))
+    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
     shape = resolve_brush_shape(fz.get("brush_shape"))
     geo, total_len = build_stroke_geometry(
         fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
+    film_offset = fz.get("film_offset") or (0.0, 0.0)
+    film_color_bgr = hex_to_bgr(fz.get("film_color"))
+    film_alpha = float(fz.get("film_alpha", 0.0))
 
-    font_path = resolve_path(fz.get("font"), [os.getcwd(), json_dir, SCRIPT_DIR])
+    font_path = resolve_title_font_path(fz, json_dir)
     if font_path not in font_cache:
         font_cache[font_path] = load_font(font_path, max(8, int(round(H * TELOP_SIZE_RATIO))))
-    telop_bgr, telop_alpha = render_telop_layer(fz.get("name", ""), W, H, font_cache[font_path])
+    telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(fz.get("name", ""), W, H, font_cache[font_path])
+    bounce = bool(fz.get("title_bounce"))
 
     # 1) ブラシ開始まで静止
     for _ in range(plan["n_hold"]):
@@ -639,28 +846,44 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir):
     # 2) ブラシ描画
     for i in range(plan["n_brush"]):
         progress = (i + 1) / float(plan["n_brush"])
-        yield composite_brush(bg, frame, geo, total_len, progress, W, shape)
+        yield composite_brush(bg, frame, geo, total_len, progress, W, shape,
+                               film_offset, film_color_bgr, film_alpha)
 
-    # 3) 完成状態＋テロップのフェードイン→保持
-    done = composite_brush(bg, frame, geo, total_len, 1.0, W, shape)
+    # 3) 完成状態＋テロップのフェードイン（バウンス可）→保持。ロゴがあれば同時に表示する
+    done = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
+                            film_offset, film_color_bgr, film_alpha)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
     for i in range(plan["n_rest"]):
-        fade = min(1.0, (i + 1) / float(fade_frames))
-        yield blend_telop(done, telop_bgr, telop_alpha, fade)
+        t = (i + 1) / float(fade_frames)
+        fade = min(1.0, t)
+        if bounce and t < 1.0:
+            scale = telop_bounce_scale(t)
+            f_bgr, f_alpha = scale_telop_layer(telop_bgr, telop_alpha, scale, tcx, tcy) \
+                if telop_bgr is not None else (None, None)
+        else:
+            f_bgr, f_alpha = telop_bgr, telop_alpha
+        out = blend_telop(done, f_bgr, f_alpha, fade)
+        if plan["show_logo"]:
+            out = render_logo_frame(out, logo_bgr, logo_alpha, W, H, i / float(fps))
+        yield out
 
 
 def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
     """--preview 用：ブラシ完了＋テロップ全表示のフレームを1枚PNGで出す"""
     fz = plan["fz"]
-    bg = make_background(frame, fz.get("background", "mono"))
+    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
     shape = resolve_brush_shape(fz.get("brush_shape"))
     geo, total_len = build_stroke_geometry(
         fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
-    img = composite_brush(bg, frame, geo, total_len, 1.0, W, shape)
+    film_offset = fz.get("film_offset") or (0.0, 0.0)
+    film_color_bgr = hex_to_bgr(fz.get("film_color"))
+    film_alpha = float(fz.get("film_alpha", 0.0))
+    img = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
+                           film_offset, film_color_bgr, film_alpha)
 
-    font_path = resolve_path(fz.get("font"), [os.getcwd(), json_dir, SCRIPT_DIR])
+    font_path = resolve_title_font_path(fz, json_dir)
     font = load_font(font_path, max(8, int(round(H * TELOP_SIZE_RATIO))))
-    telop_bgr, telop_alpha = render_telop_layer(fz.get("name", ""), W, H, font)
+    telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(fz.get("name", ""), W, H, font)
     img = blend_telop(img, telop_bgr, telop_alpha, 1.0)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)
@@ -699,10 +922,14 @@ def mix_into(buf, snippet, start):
         buf[start:start + n] += snippet[:n]
 
 
-def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUDIO_CH):
+def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUDIO_CH,
+                 logo_sfx_path=None, logo_at=None, logo_extra_frames=0):
     """
     フリーズ区間の分だけ元音声を後ろへずらし、
     フリーズ中は無音 or 直前0.5秒のループを差し込み、効果音を重ねる。
+    logo_at=='last_freeze' なら最後のフリーズのロゴ表示開始時、
+    logo_at=='end' なら末尾に追加する logo_extra_frames 分の無音区間の先頭で、
+    logo_sfx_path のSEを鳴らす。
     """
     orig = decode_audio(src_path, sr, ch) if has_audio else np.zeros((0, ch), np.float32)
 
@@ -743,9 +970,21 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         if plan["sfx_path"]:
             offset = int(round((plan["n_hold"] + plan["n_brush"]) / float(fps) * sr))
             sfx_jobs.append((written + offset, plan["sfx_path"]))
+        # ロゴがこのフリーズ中に表示される場合、表示開始（rest開始）と同時にSEを鳴らす
+        if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path:
+            logo_offset = int(round((plan["n_hold"] + plan["n_brush"]) / float(fps) * sr))
+            sfx_jobs.append((written + logo_offset, logo_sfx_path))
         written += n_samples
 
     pieces.append(orig[cursor:])
+    tail_start = written + (len(orig) - cursor)   # 元音声の残り分を挟んだ後の位置
+
+    if logo_at == "end" and logo_extra_frames > 0:
+        extra_samples = int(round(logo_extra_frames / float(fps) * sr))
+        pieces.append(np.zeros((extra_samples, ch), np.float32))
+        if logo_sfx_path:
+            sfx_jobs.append((tail_start, logo_sfx_path))
+
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
 
     for start, path in sfx_jobs:
@@ -788,7 +1027,31 @@ def render(project, json_path, video_path, out_path, preview_path=None):
     log(f"出力: {W}x{H} {fps:.3f}fps  フリーズ {len(project['freezes'])} 箇所")
 
     src_frames = int(round(info["duration"] * fps)) if info["duration"] else 0
-    plans = plan_freezes(project["freezes"], fps, src_frames, json_dir)
+
+    # --- ロゴ設定の解決（無指定ならlogo_cfg=None、以後ロゴ関連処理はすべて素通りになる） ---
+    logo_cfg = project.get("logo")
+    logo_at = None
+    logo_bgr, logo_alpha = None, None
+    logo_sfx_path = None
+    logo_extra_frames = 0
+    if logo_cfg:
+        logo_at = resolve_logo_at(logo_cfg.get("at"), bool(project["freezes"]))
+        logo_path = resolve_path(logo_cfg.get("image"), [os.getcwd(), json_dir, SCRIPT_DIR])
+        logo_bgr, logo_alpha = load_logo_image(logo_path)
+        if logo_bgr is None:
+            warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
+            logo_cfg, logo_at = None, None
+        else:
+            if logo_cfg.get("sfx"):
+                cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
+                logo_sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
+                if not os.path.exists(logo_sfx_path):
+                    warn(f"ロゴ用の効果音が見つかりません: {cand}")
+                    logo_sfx_path = None
+            if logo_at == "end":
+                logo_extra_frames = max(1, int(round(float(logo_cfg.get("duration_sec", 1.5)) * fps)))
+
+    plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at)
 
     # --- 確認用PNGだけ出して終了 ---
     if preview_path:
@@ -803,41 +1066,57 @@ def render(project, json_path, video_path, out_path, preview_path=None):
     # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---
     tmpdir = tempfile.mkdtemp(prefix="spotlight_")
     try:
-        audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"])
+        audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"],
+                             logo_sfx_path=logo_sfx_path, logo_at=logo_at,
+                             logo_extra_frames=logo_extra_frames)
         wav_path = write_wav(os.path.join(tmpdir, "audio.wav"), audio)
         log(f"音声トラック: {len(audio) / AUDIO_SR:.2f} 秒")
 
-        total_out = src_frames + sum(p["n_total"] for p in plans)
+        total_out = src_frames + sum(p["n_total"] for p in plans) + logo_extra_frames
         reader = open_frame_reader(video_path, W, H, fps)
         writer = open_video_writer(out_path, W, H, fps, wav_path)
 
         font_cache = {}
         pending = list(plans)      # まだ挿入していないフリーズ
         written = 0
+        last_out_frame = None
 
         try:
             for i, frame in enumerate(iter_frames(reader, W, H)):
                 # このフレーム位置に来たフリーズを（複数あってもすべて）挿入する
                 while pending and pending[0]["frame_index"] == i:
                     plan = pending.pop(0)
-                    for f in iter_freeze_frames(frame, plan, W, H, fps,
-                                                font_cache, json_dir):
+                    for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+                                                logo_bgr, logo_alpha):
                         writer.stdin.write(f.tobytes())
+                        last_out_frame = f
                         written += 1
                         if written % 15 == 0:
                             print(f"\r  {written}/{total_out} フレーム",
                                   end="", flush=True)
                 writer.stdin.write(np.ascontiguousarray(frame).tobytes())
+                last_out_frame = frame
                 written += 1
                 if written % 15 == 0:
                     print(f"\r  {written}/{total_out} フレーム", end="", flush=True)
 
             # 動画末尾より後ろを指すフリーズが残っていたら最後のフレームで処理する
             for plan in pending:
-                for f in iter_freeze_frames(frame, plan, W, H, fps,
-                                            font_cache, json_dir):
+                for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+                                            logo_bgr, logo_alpha):
                     writer.stdin.write(f.tobytes())
+                    last_out_frame = f
                     written += 1
+
+            # logo.at=='end'：最後に出力したフレームを背景に、ロゴだけを追加区間として書き足す
+            if logo_at == "end" and logo_bgr is not None and last_out_frame is not None:
+                backdrop = np.ascontiguousarray(last_out_frame)
+                for i in range(logo_extra_frames):
+                    out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, W, H, i / float(fps))
+                    writer.stdin.write(out_frame.tobytes())
+                    written += 1
+                    if written % 15 == 0:
+                        print(f"\r  {written}/{total_out} フレーム", end="", flush=True)
         finally:
             writer.stdin.close()
             writer.wait()
