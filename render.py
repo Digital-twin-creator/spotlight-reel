@@ -642,14 +642,21 @@ def contains_japanese(text):
     return False
 
 
-def resolve_title_font_path(fz, json_dir):
+def resolve_title_font_path(fz):
     """
     title_font / title_font_jp（テキストが日本語を含むかで選ぶ）から実パスを解決する。
     どちらも未指定なら font にフォールバックする（既存JSONとの後方互換のため）。
+
+    フォントは render.py に同梱されたアセット（assets/fonts/配下）である前提のため、
+    cwd や プロジェクトJSONの置き場所（json_dir）には依存せず、常に render.py 自身の
+    ディレクトリ（SCRIPT_DIR）基準で解決する（絶対パスが指定された場合はそのまま使う）。
+    GitHub Actions のジョブでは、project.json を含むジョブブランチのチェックアウトと
+    spotlight-reelのクローンが別ディレクトリに存在し、render.pyの実行時cwdは前者になる
+    ため、cwd基準で探すとフォントが見つからずテロップが描けない不具合があった。
     """
     key = "title_font_jp" if contains_japanese(fz.get("name", "")) else "title_font"
     path = fz.get(key) or fz.get("font")
-    return resolve_path(path, [os.getcwd(), json_dir, SCRIPT_DIR])
+    return resolve_path(path, [SCRIPT_DIR])
 
 
 def telop_bounce_scale(t):
@@ -1038,7 +1045,7 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
-def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
+def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
                   logo_total_frames=0, logo_crossfade_frames=0):
     """
     各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
@@ -1066,8 +1073,10 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
 
         sfx_path = None
         if fz.get("sfx"):
+            # 効果音はrender.pyに同梱されたアセット（assets/sfx/配下）である前提のため、
+            # フォント（resolve_title_font_path）と同じ理由でSCRIPT_DIR基準のみで解決する。
             cand = os.path.join("assets", "sfx", f"{fz['sfx']}.wav")
-            sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
+            sfx_path = resolve_path(cand, [SCRIPT_DIR])
             if not os.path.exists(sfx_path):
                 warn(f"効果音が見つかりません: {cand}")
                 sfx_path = None
@@ -1100,7 +1109,7 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
     return plans
 
 
-def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+def iter_freeze_frames(frame, plan, W, H, fps, font_cache,
                         logo_bgr=None, logo_alpha=None, logo_luma=None,
                         logo_params=None, logo_bg_color=None):
     """
@@ -1122,7 +1131,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
-    font_path = resolve_title_font_path(fz, json_dir)
+    font_path = resolve_title_font_path(fz)
     font_key = (font_path, size_px)
     if font_key not in font_cache:
         font_cache[font_key] = load_font(font_path, size_px)
@@ -1200,7 +1209,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
         yield out
 
 
-def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
+def render_preview(frame, plan, W, H, fps, font_cache, out_png):
     """--preview 用：ブラシ完了＋テロップ全表示のフレームを1枚PNGで出す"""
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
@@ -1215,7 +1224,7 @@ def render_preview(frame, plan, W, H, fps, font_cache, json_dir, out_png):
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
-    font_path = resolve_title_font_path(fz, json_dir)
+    font_path = resolve_title_font_path(fz)
     font = load_font(font_path, size_px)
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
@@ -1422,8 +1431,9 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 logo_params = resolve_logo_params(logo_cfg)
                 logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)
                 if logo_cfg.get("sfx"):
+                    # 同梱アセットのためSCRIPT_DIR基準のみで解決する（freezeのsfxと同じ理由）
                     cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
-                    logo_sfx_path = resolve_path(cand, [os.getcwd(), json_dir, SCRIPT_DIR])
+                    logo_sfx_path = resolve_path(cand, [SCRIPT_DIR])
                     if not os.path.exists(logo_sfx_path):
                         warn(f"ロゴ用の効果音が見つかりません: {cand}")
                         logo_sfx_path = None
@@ -1433,7 +1443,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 elif logo_at == "last_freeze" and logo_bg_color is not None:
                     logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
 
-        plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
+        plans = plan_freezes(project["freezes"], fps, src_frames, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_crossfade_frames=logo_crossfade_frames)
 
@@ -1443,7 +1453,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 raise RuntimeError("freezes が空なので preview を作れません。")
             plan = plans[0]
             frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
-            path = render_preview(frame, plan, W, H, fps, {}, json_dir, preview_path)
+            path = render_preview(frame, plan, W, H, fps, {}, preview_path)
             log(f"プレビューを書き出しました: {path}")
             return path
 
@@ -1468,7 +1478,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 # このフレーム位置に来たフリーズを（複数あってもすべて）挿入する
                 while pending and pending[0]["frame_index"] == i:
                     plan = pending.pop(0)
-                    for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+                    for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
                                                 logo_bgr, logo_alpha, logo_luma,
                                                 logo_params, logo_bg_color):
                         writer.stdin.write(f.tobytes())
@@ -1485,7 +1495,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
 
             # 動画末尾より後ろを指すフリーズが残っていたら最後のフレームで処理する
             for plan in pending:
-                for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache, json_dir,
+                for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
                                             logo_bgr, logo_alpha, logo_luma,
                                             logo_params, logo_bg_color):
                     writer.stdin.write(f.tobytes())

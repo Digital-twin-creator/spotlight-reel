@@ -235,12 +235,11 @@ try:
         merged["name"] = fz.get("name", "")
         merged["sfx"] = fz.get("sfx")
         freezes.append(merged)
-    json_dir = os.path.join(REPO_ROOT, "examples")
-    plans = render.plan_freezes(freezes, fps, src_frames, json_dir)
+    plans = render.plan_freezes(freezes, fps, src_frames)
     for plan in plans:
         fz = plan["fz"]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
-        frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}, json_dir))
+        frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}))
         done_idx = plan["n_hold"] + plan["n_brush"]
         no_telop_frame = frames[done_idx]        # ブラシ完了直後、テロップフェードイン前
         telop_frame = frames[-1]                  # フリーズ末尾、テロップ表示済み
@@ -257,12 +256,12 @@ try:
         fz = dict(freezes[0])
         if fade_sec is not None:
             fz["brush_fade_sec"] = fade_sec
-        plan = render.plan_freezes([fz], fps, src_frames, json_dir)[0]
+        plan = render.plan_freezes([fz], fps, src_frames)[0]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
         fz_no_name = dict(fz)
         fz_no_name["name"] = ""  # テロップの変化と混同しないよう名前を消して分離する
-        plan_no_name = render.plan_freezes([fz_no_name], fps, src_frames, json_dir)[0]
-        frames = list(render.iter_freeze_frames(frame, plan_no_name, W, H, fps, {}, json_dir))
+        plan_no_name = render.plan_freezes([fz_no_name], fps, src_frames)[0]
+        frames = list(render.iter_freeze_frames(frame, plan_no_name, W, H, fps, {}))
         done_idx = plan_no_name["n_hold"] + plan_no_name["n_brush"]
         first_rest = frames[done_idx]
         last_rest = frames[-1]
@@ -299,6 +298,29 @@ try:
         err_msg = str(exc)
     check(raised_pipeline, "存在しないフォントを指定したプロジェクト全体のrender()もRuntimeErrorで停止する: "
           + err_msg[:60])
+
+    # ------------------------------------------------------------------
+    # 5.5) GitHub Actions相当のディレクトリ構成でもアセットが解決できる
+    #      （render.yml は project.json を含むjobブランチをcwdにcheckoutし、
+    #       spotlight-reel は別のサブディレクトリにcloneする。この構成でcwd基準の
+    #       パス解決に頼っていると、assets/fonts/等が見つからずテロップが描けない）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== CI相当のレイアウト：cwdがrender.pyの置き場所と無関係でもアセットが解決できる ===")
+    unrelated_cwd = tempfile.mkdtemp(prefix="unrelated_cwd_")  # assetsもrender.pyも存在しない場所
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(unrelated_cwd)
+        out_ci_layout = os.path.join(tmpdir, "ci_layout.mp4")
+        render_direct(sample_project("dummy_input.mp4"), video_path, out_ci_layout, tmpdir)
+    finally:
+        os.chdir(old_cwd)
+        shutil.rmtree(unrelated_cwd, ignore_errors=True)
+    check(os.path.exists(out_ci_layout) and os.path.getsize(out_ci_layout) > 0,
+          "無関係なcwdから実行してもレンダリングが成功する"
+          "（フォント/効果音のパス解決がcwdに依存せず、render.py自身の置き場所を基準にする）")
+    ci_layout_info = render.probe_video(out_ci_layout)
+    check(ci_layout_info["duration"] > 0, f"CI相当レイアウトでの出力の尺が正常: {ci_layout_info['duration']:.2f}s")
 
     # ------------------------------------------------------------------
     # 6) 効果音の外部ファイル優先（assets/sfx/を差し替えれば使われる）
