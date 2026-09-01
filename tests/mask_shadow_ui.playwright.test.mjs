@@ -152,7 +152,7 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   console.log("");
-  console.log("=== 全体設定：影（shadow）のオン/オフとスライダー ===");
+  console.log("=== 全体設定：影（フィルム色）のオン/オフとスライダー・方向 ===");
   // 全体設定は <details class="card"> の中にあり既定で閉じているため、先に開く
   await page.evaluate(() => { document.getElementById("settingsSection").open = true; });
   check(await page.isHidden("#shadowOptionsBody"), "影は既定でオフ（shadowOptionsBodyが隠れている）");
@@ -161,20 +161,31 @@ async function main() {
 
   await page.check("#shadowEnabledCheckbox");
   check(await page.isVisible("#shadowOptionsBody"), "影オンでshadowOptionsBodyが表示される");
-  await page.fill("#shadowOffsetSlider", "30");
-  await page.dispatchEvent("#shadowOffsetSlider", "input");
+  check(await page.isVisible("#filmColorPresetRow"), "影オンで色プリセット行（#filmColorPresetRow）が表示される");
+  await page.fill("#shadowDistanceSlider", "0.05");
+  await page.dispatchEvent("#shadowDistanceSlider", "input");
   await page.fill("#shadowBlurSlider", "0.04");
   await page.dispatchEvent("#shadowBlurSlider", "input");
   await page.fill("#shadowAlphaSlider", "0.75");
   await page.dispatchEvent("#shadowAlphaSlider", "input");
+  await page.selectOption("#shadowDirectionSelect", "left");
 
   const styleWithShadow = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(!!styleWithShadow.shadow, "影オン時はstyle.shadowが出力される: " + JSON.stringify(styleWithShadow.shadow));
   check(styleWithShadow.shadow.blur === 0.04, "style.shadow.blurがスライダー値どおり: " + styleWithShadow.shadow.blur);
   check(styleWithShadow.shadow.alpha === 0.75, "style.shadow.alphaがスライダー値どおり: " + styleWithShadow.shadow.alpha);
-  check(Array.isArray(styleWithShadow.shadow.offset) && styleWithShadow.shadow.offset.length === 2,
-    "style.shadow.offsetが[x,y]の配列: " + JSON.stringify(styleWithShadow.shadow.offset));
-  check(styleWithShadow.shadow.color === "#000000", "style.shadow.colorが既定の黒: " + styleWithShadow.shadow.color);
+  check(styleWithShadow.shadow.distance === 0.05, "style.shadow.distanceがスライダー値どおり: " + styleWithShadow.shadow.distance);
+  check(styleWithShadow.shadow.direction === "left", "style.shadow.directionが選択どおり'left': " + styleWithShadow.shadow.direction);
+
+  await page.selectOption("#shadowDirectionSelect", "auto");
+  const styleAutoDir = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleAutoDir.shadow.direction === "auto", "shadowDirectionSelectを'自動'に戻すとstyle.shadow.directionが'auto'になる: " + styleAutoDir.shadow.direction);
+
+  const presetHex = await page.evaluate(() => Object.values(FILM_COLOR_PRESETS)[1]);
+  await page.locator("#filmColorPresetRow .film-color-btn").nth(1).click();
+  const styleWithPresetColor = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleWithPresetColor.shadow.color.toLowerCase() === presetHex.toLowerCase(),
+    "色プリセットをクリックするとstyle.shadow.colorがそのプリセット色になる: " + styleWithPresetColor.shadow.color);
 
   console.log("");
   console.log("=== 全体設定：reveal（wipe/fade） ===");
@@ -185,6 +196,55 @@ async function main() {
   await page.selectOption("#revealSelect", "fade");
   const styleFadeReveal = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(styleFadeReveal.reveal === "fade", "revealSelectを'fade'にするとstyle.revealが'fade'になる: " + styleFadeReveal.reveal);
+  await page.selectOption("#revealSelect", "wipe");
+
+  console.log("");
+  console.log("=== 簡易プレビュー：影ありのフリーズで、着地前後に人物の元の位置の見え方が変わる（スライドで影が現れる） ===");
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.selectOption("#maskModeSelect", "auto");
+  await page.fill("#nameInput", "プレビュー影テスト");
+  await page.evaluate(() => {
+    appState.shadowEnabled = true;
+    appState.shadowDirection = "right";
+    appState.shadowDistanceRatio = 0.08;
+    appState.shadowBlurRatio = 0;
+    appState.shadowAlpha = 1.0;
+    appState.shadowColor = "#00FF00"; // ダミー動画の色と被らない、はっきり判別できる色にする
+  });
+
+  /** previewCanvasの、mask="auto"代用マスクの左端付近・縦中央よりやや下の1px色をCSS座標基準で読む */
+  const readProbePixel = () => page.evaluate(() => {
+    var dpr = window.devicePixelRatio || 1;
+    var ctx = document.getElementById("previewCanvas").getContext("2d");
+    var W = overlaySize.width, H = overlaySize.height;
+    var bx = W * 0.25; // buildAutoPlaceholderMaskのbxと同じ式
+    var x = Math.round((bx + 6) * dpr), y = Math.round(H * 0.7 * dpr);
+    var d = ctx.getImageData(x, y, 1, 1).data;
+    return [d[0], d[1], d[2]];
+  });
+
+  await page.click("#previewBtn");
+  check((await page.textContent("#previewBtn")) === "■ 停止", "プレビュー開始でボタン表示が「■ 停止」になる");
+  // HOLD(0.3s)+BRUSH(auto既定wipeで0.4s)の途中(0.6s、progress=0.75)。まだスライド開始前で、
+  // wipeはH*0.75まで下から現れているのでプローブ位置(H*0.7)は「人物」で覆われている。
+  await page.waitForTimeout(600);
+  const beforeSlide = await readProbePixel();
+  // さらに700ms待つ（合計1.3s）と、着地(0.3+0.4+0.2=0.9s)を過ぎ保持中。人物は右へ8%W分
+  // ずれた位置にあり、プローブ位置(元の左端付近)は人物が去って影（#123456）が見えているはず。
+  await page.waitForTimeout(700);
+  const afterSlide = await readProbePixel();
+
+  const dist = Math.hypot(
+    beforeSlide[0] - afterSlide[0], beforeSlide[1] - afterSlide[1], beforeSlide[2] - afterSlide[2]);
+  check(dist > 30,
+    "スライドインの着地前後でプローブ位置の色が大きく変わる(=影が現れる演出が反映されている): " +
+    "before=" + JSON.stringify(beforeSlide) + " after=" + JSON.stringify(afterSlide) + " dist=" + dist.toFixed(1));
+
+  await page.click("#previewBtn");
+  check((await page.textContent("#previewBtn")) === "▶ プレビュー", "「■ 停止」を押すとプレビューが止まりボタン表示が戻る");
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 

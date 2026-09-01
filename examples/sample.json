@@ -12,18 +12,21 @@
     "brush_width": 0.12,
     "brush_shape": "round",
     "mono_contrast": 1.3,
-    "film_offset": [
-      0.0074,
-      0.0074
-    ],
-    "film_color": "#FF6432",
-    "film_alpha": 0.8,
     "background": "mono",
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     "title_font": "assets/fonts/Anton-Regular.ttf",
     "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
     "title_bounce": true,
-    "audio_during_freeze": "mute"
+    "audio_during_freeze": "mute",
+    "shadow": {
+      "color": "#1A1A2E",
+      "alpha": 0.8,
+      "distance": 0.03,
+      "direction": "auto",
+      "offset_y": 0.02,
+      "blur": 0.0,
+      "slide_sec": 0.2
+    }
   },
   "freezes": [
     {
@@ -31,7 +34,6 @@
       "name": "赤い人",
       "sfx": "shakin",
       "brush_shape": "round",
-      "film_color": "#FF6432",
       "strokes": [
         {
           "width": 0.1,
@@ -81,7 +83,6 @@
       "name": "BLUE GUY",
       "sfx": "don",
       "brush_shape": "hake",
-      "film_color": "#00C8FF",
       "strokes": [
         {
           "width": 0.09,

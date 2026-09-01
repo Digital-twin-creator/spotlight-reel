@@ -404,12 +404,6 @@
             <option value="spray">spray（スプレー）</option>
           </select>
         </div>
-        <div class="field grow">
-          <label>フィルム色（このフリーズだけ上書き）</label>
-          <select id="filmColorOverrideSelect">
-            <option value="">全体設定を使う</option>
-          </select>
-        </div>
       </div>
     </div>
   </section>
@@ -436,18 +430,6 @@
       <div class="field">
         <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
         <input type="range" id="monoContrastSlider" min="1" max="2" step="0.05" value="1">
-      </div>
-      <div class="field">
-        <label>フィルム縁取り ズレ量 <span class="brush-slider-value" id="filmOffsetValue">0px</span></label>
-        <input type="range" id="filmOffsetSlider" min="0" max="30" step="1" value="0">
-      </div>
-      <div class="field">
-        <label>フィルム縁取り 色</label>
-        <div class="row wrap" id="filmColorPresetRow"></div>
-      </div>
-      <div class="field">
-        <label>フィルム縁取り 不透明度 <span class="brush-slider-value" id="filmAlphaValue">0.80</span></label>
-        <input type="range" id="filmAlphaSlider" min="0" max="1" step="0.05" value="0.8">
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="titleBounceCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
@@ -481,20 +463,32 @@
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="shadowEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
-        <label style="margin:0;" for="shadowEnabledCheckbox">影（人物の右下などに影を落とす演出）</label>
+        <label style="margin:0;" for="shadowEnabledCheckbox">影（フィルム色）（人物がスライドして元の位置に影を見せる演出）</label>
       </div>
       <div id="shadowOptionsBody" hidden>
         <div class="field">
-          <label>影 ズレ量 <span class="brush-slider-value" id="shadowOffsetValue">0px</span></label>
-          <input type="range" id="shadowOffsetSlider" min="0" max="60" step="1" value="27">
+          <label>影 色</label>
+          <div class="row wrap" id="filmColorPresetRow"></div>
         </div>
         <div class="field">
-          <label>影 ぼかし <span class="brush-slider-value" id="shadowBlurValue">0.02</span></label>
-          <input type="range" id="shadowBlurSlider" min="0" max="0.08" step="0.005" value="0.02">
+          <label>影 濃さ <span class="brush-slider-value" id="shadowAlphaValue">0.80</span></label>
+          <input type="range" id="shadowAlphaSlider" min="0" max="1" step="0.05" value="0.8">
         </div>
         <div class="field">
-          <label>影 濃さ <span class="brush-slider-value" id="shadowAlphaValue">0.60</span></label>
-          <input type="range" id="shadowAlphaSlider" min="0" max="1" step="0.05" value="0.6">
+          <label>影 ズレ距離（出力幅比） <span class="brush-slider-value" id="shadowDistanceValue">0.030</span></label>
+          <input type="range" id="shadowDistanceSlider" min="0" max="0.15" step="0.005" value="0.03">
+        </div>
+        <div class="field">
+          <label>影 方向</label>
+          <select id="shadowDirectionSelect">
+            <option value="auto">自動（人物の位置から判定）</option>
+            <option value="left">左</option>
+            <option value="right">右</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>影 ぼかし <span class="brush-slider-value" id="shadowBlurValue">0.000</span></label>
+          <input type="range" id="shadowBlurSlider" min="0" max="0.08" step="0.005" value="0">
         </div>
       </div>
       <div class="field">
@@ -634,6 +628,8 @@ var DEFAULT_STYLE = {
   brush_width: 0.12,
   brush_shape: "round",
   mono_contrast: 1.0,
+  // film_offset/film_color/film_alpha は廃止（shadowに統合）。旧JSONを読み込んだときの
+  // 後方互換変換にのみ使う（parseProjectJSON参照）。新しいJSONの書き出しには使わない。
   film_offset: [0, 0],
   film_color: "#FF6432",
   film_alpha: 0.8,
@@ -652,8 +648,22 @@ var DEFAULT_STYLE = {
 var TITLE_ALIGNS = ["left", "center", "right"];
 var MASK_MODES = ["brush", "auto", "auto+brush"];
 var REVEALS = ["wipe", "fade", "brush"];
-/** 影のUIスライダーの初期値（オンにした直後・旧JSON読み込み時の補完に使う） */
-var DEFAULT_SHADOW = { offsetRatio: 0.025, blurRatio: 0.02, alpha: 0.6, color: "#000000" };
+var SHADOW_DIRECTIONS = ["auto", "left", "right"];
+/** 影（フィルム色）のJSON契約上の既定値（render.pyのSHADOW_*_DEFAULTと同じ値） */
+var DEFAULT_SHADOW = {
+  color: "#FF6432", alpha: 0.8, distance: 0.03, direction: "auto",
+  offsetY: 0.02, blur: 0.0, slideSec: 0.2
+};
+/** render.pyのSHADOW_SLIDE_BACK_SECと同じ値。保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定） */
+var SHADOW_SLIDE_BACK_SEC = 0.1;
+
+/** Ease-Out Expo：1 - 2^(-10t)（t=0→0, t=1→1、序盤速く終盤で急停止。render.pyのease_out_exptoと同じ） */
+function easeOutExpo(t) {
+  t = clamp01(t);
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  return 1 - Math.pow(2, -10 * t);
+}
 /** render.pyのAUTO_REVEAL_WIPE_SEC/AUTO_REVEAL_FADE_SECと同じ値（mask="auto"/"auto+brush"の出現時間・固定） */
 var AUTO_REVEAL_WIPE_SEC = 0.4;
 var AUTO_REVEAL_FADE_SEC = 0.3;
@@ -662,7 +672,7 @@ var OUTPUT_PRESETS = {
   "1080x1920": { width: 1080, height: 1920 },
   "720x1280": { width: 720, height: 1280 }
 };
-/** フィルム縁取りの色プリセット（参考動画は人物ごとに色が違うため、フリーズ単位の上書きにも使う） */
+/** 影（フィルム色）の色プリセット（参考動画は人物ごとに色が違う場合があるため複数用意） */
 var FILM_COLOR_PRESETS = {
   orange: "#FF6432",
   cyan: "#00C8FF",
@@ -685,20 +695,6 @@ function clamp01(v) {
 function numOr(v, fallback) {
   var n = Number(v);
   return Number.isFinite(n) ? n : fallback;
-}
-
-/**
- * film_offset は render.py 側では「出力幅に対する比率」で持つ（解像度非依存にするため）。
- * エディタのスライダーは px 表示のほうが直感的なので、参照幅(W)を基準に相互変換する。
- * render.py の composite_brush と同じ考え方（x・y とも出力幅を基準にスケールする）。
- */
-function filmOffsetRatioFromPx(px, referenceW) {
-  if (!referenceW) return 0;
-  return (Number(px) || 0) / referenceW;
-}
-
-function filmOffsetPxFromRatio(ratio, referenceW) {
-  return Math.round((Number(ratio) || 0) * (referenceW || 0));
 }
 
 /**
@@ -868,8 +864,6 @@ function freezeToJSON(fz) {
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
   if (fz.sfx) out.sfx = fz.sfx;
-  // フリーズ単位でのフィルム色の上書き（未指定なら省略し、全体設定の film_color を使わせる）
-  if (fz.filmColor) out.film_color = fz.filmColor;
   // テロップ位置・サイズ・寄せ（未指定なら省略し、全体設定 style.title_* を使わせる）
   if (fz.titlePos) out.title_pos = [round(fz.titlePos[0], 4), round(fz.titlePos[1], 4)];
   if (fz.titleSize !== null && fz.titleSize !== undefined) out.title_size = round(fz.titleSize, 4);
@@ -880,7 +874,6 @@ function freezeToJSON(fz) {
 /** エディタの内部状態から render.py 契約どおりのプロジェクトJSONを作る */
 function buildProjectJSON(state) {
   var preset = OUTPUT_PRESETS[state.outputMode] || null;
-  var offsetRatio = round(numOr(state.filmOffsetRatio, 0), 5);
   var project = {
     version: 1,
     video: state.videoFileName || "",
@@ -889,9 +882,6 @@ function buildProjectJSON(state) {
       brush_anim_sec: round(numOr(state.brushAnimSec, DEFAULT_STYLE.brush_anim_sec), 2),
       brush_width: DEFAULT_STYLE.brush_width,
       mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
-      film_offset: [offsetRatio, offsetRatio],
-      film_color: state.filmColor || DEFAULT_STYLE.film_color,
-      film_alpha: round(numOr(state.filmAlpha, DEFAULT_STYLE.film_alpha), 2),
       background: DEFAULT_STYLE.background,
       font: DEFAULT_FONT_PATH,
       title_bounce: !!state.titleBounce,
@@ -910,12 +900,14 @@ function buildProjectJSON(state) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
   }
   if (state.shadowEnabled) {
-    var shadowOffset = round(numOr(state.shadowOffsetRatio, DEFAULT_SHADOW.offsetRatio), 4);
     project.style.shadow = {
-      offset: [shadowOffset, shadowOffset],
-      blur: round(numOr(state.shadowBlurRatio, DEFAULT_SHADOW.blurRatio), 4),
-      color: DEFAULT_SHADOW.color,
-      alpha: round(numOr(state.shadowAlpha, DEFAULT_SHADOW.alpha), 2)
+      color: state.shadowColor || DEFAULT_SHADOW.color,
+      alpha: round(numOr(state.shadowAlpha, DEFAULT_SHADOW.alpha), 2),
+      distance: round(numOr(state.shadowDistanceRatio, DEFAULT_SHADOW.distance), 4),
+      direction: resolveShadowDirection(state.shadowDirection),
+      offset_y: DEFAULT_SHADOW.offsetY,
+      blur: round(numOr(state.shadowBlurRatio, DEFAULT_SHADOW.blur), 4),
+      slide_sec: DEFAULT_SHADOW.slideSec
     };
   }
   if (state.logo && state.logo.imageName) {
@@ -957,7 +949,6 @@ function parseProjectJSON(json) {
       brushShape: resolveBrushShape(fz.brush_shape),
       maskMode: resolveMaskMode(fz.mask),
       brushEditMode: "add",
-      filmColor: fz.film_color || "",
       titlePos: Array.isArray(fz.title_pos)
         ? [numOr(fz.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(fz.title_pos[1], DEFAULT_STYLE.title_pos[1])]
         : null,
@@ -974,7 +965,35 @@ function parseProjectJSON(json) {
       })
     };
   });
+  // 影（フィルム色）：shadowが明示されていればそれを使う。無ければ、旧film_offset/
+  // film_color/film_alpha（film_offsetが非ゼロの場合のみ）から後方互換で読み替える
+  // （render.py の resolve_shadow_config と同じ考え方）。
   var filmOffsetArr = Array.isArray(style.film_offset) ? style.film_offset : DEFAULT_STYLE.film_offset;
+  var shadowEnabled = false;
+  var shadowColor = DEFAULT_SHADOW.color;
+  var shadowAlpha = DEFAULT_SHADOW.alpha;
+  var shadowDistanceRatio = DEFAULT_SHADOW.distance;
+  var shadowDirection = DEFAULT_SHADOW.direction;
+  var shadowBlurRatio = DEFAULT_SHADOW.blur;
+  if (style.shadow && typeof style.shadow === "object") {
+    shadowEnabled = true;
+    shadowColor = style.shadow.color || DEFAULT_SHADOW.color;
+    shadowAlpha = numOr(style.shadow.alpha, DEFAULT_SHADOW.alpha);
+    shadowDistanceRatio = numOr(style.shadow.distance, DEFAULT_SHADOW.distance);
+    shadowDirection = resolveShadowDirection(style.shadow.direction);
+    shadowBlurRatio = numOr(style.shadow.blur, DEFAULT_SHADOW.blur);
+  } else {
+    var legacyFx = numOr(filmOffsetArr[0], 0);
+    var legacyFy = numOr(filmOffsetArr[1], 0);
+    if (legacyFx !== 0 || legacyFy !== 0) {
+      shadowEnabled = true;
+      shadowColor = style.film_color || DEFAULT_SHADOW.color;
+      shadowAlpha = numOr(style.film_alpha, DEFAULT_SHADOW.alpha);
+      shadowDistanceRatio = Math.abs(legacyFx);
+      shadowDirection = legacyFx >= 0 ? "right" : "left";
+      shadowBlurRatio = 0;
+    }
+  }
   var logo = null;
   if (json.logo && json.logo.image) {
     logo = {
@@ -993,9 +1012,6 @@ function parseProjectJSON(json) {
     freezeSec: numOr(style.freeze_sec, DEFAULT_STYLE.freeze_sec),
     brushAnimSec: numOr(style.brush_anim_sec, DEFAULT_STYLE.brush_anim_sec),
     monoContrast: numOr(style.mono_contrast, DEFAULT_STYLE.mono_contrast),
-    filmOffsetRatio: numOr(filmOffsetArr[0], 0),
-    filmColor: style.film_color || DEFAULT_STYLE.film_color,
-    filmAlpha: numOr(style.film_alpha, DEFAULT_STYLE.film_alpha),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -1004,12 +1020,12 @@ function parseProjectJSON(json) {
     titleAlign: resolveTitleAlign(style.title_align),
     audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
     reveal: resolveReveal(style.reveal),
-    shadowEnabled: !!(style.shadow && typeof style.shadow === "object"),
-    shadowOffsetRatio: numOr(
-      style.shadow && Array.isArray(style.shadow.offset) ? style.shadow.offset[0] : null,
-      DEFAULT_SHADOW.offsetRatio),
-    shadowBlurRatio: numOr(style.shadow && style.shadow.blur, DEFAULT_SHADOW.blurRatio),
-    shadowAlpha: numOr(style.shadow && style.shadow.alpha, DEFAULT_SHADOW.alpha),
+    shadowEnabled: shadowEnabled,
+    shadowColor: shadowColor,
+    shadowAlpha: shadowAlpha,
+    shadowDistanceRatio: shadowDistanceRatio,
+    shadowDirection: shadowDirection,
+    shadowBlurRatio: shadowBlurRatio,
     freezes: sortFreezesByTime(freezes),
     logo: logo
   };
@@ -1174,6 +1190,35 @@ function resolveMaskMode(mode) {
 /** 未知の値は wipe にフォールバックする（render.py の resolve_reveal と同じ方針） */
 function resolveReveal(reveal) {
   return REVEALS.indexOf(reveal) >= 0 ? reveal : "wipe";
+}
+
+/** 未知の値は auto にフォールバックする（render.py の resolve_shadow_config と同じ方針） */
+function resolveShadowDirection(direction) {
+  return SHADOW_DIRECTIONS.indexOf(direction) >= 0 ? direction : "auto";
+}
+
+/**
+ * 人物マスク（0〜255、Uint8Array/Uint8ClampedArray、幅Wの1チャンネル画像）のX重心から、
+ * 影の自動スライド方向（"left"|"right"）を判定する。render.pyのresolve_shadow_auto_directionと
+ * 同じロジック（画面中心±5%はあいまいとみなし、既定で'right'）。
+ */
+function resolveShadowAutoDirection(maskData, W, H) {
+  var total = 0, weighted = 0;
+  for (var y = 0; y < H; y++) {
+    var rowOffset = y * W;
+    for (var x = 0; x < W; x++) {
+      var v = maskData[rowOffset + x];
+      total += v;
+      weighted += v * x;
+    }
+  }
+  if (total <= 0) return "right";
+  var weightedX = weighted / total;
+  var center = W / 2;
+  var band = W * 0.05;
+  if (weightedX > center + band) return "right";
+  if (weightedX < center - band) return "left";
+  return "right";
 }
 
 /**
@@ -1423,14 +1468,17 @@ if (typeof module !== "undefined" && module.exports) {
     round: round,
     clamp01: clamp01,
     numOr: numOr,
-    filmOffsetRatioFromPx: filmOffsetRatioFromPx,
-    filmOffsetPxFromRatio: filmOffsetPxFromRatio,
     telopBounceScale: telopBounceScale,
     TITLE_ALIGNS: TITLE_ALIGNS,
     resolveTitleAlign: resolveTitleAlign,
     MASK_MODES: MASK_MODES,
     REVEALS: REVEALS,
     DEFAULT_SHADOW: DEFAULT_SHADOW,
+    SHADOW_SLIDE_BACK_SEC: SHADOW_SLIDE_BACK_SEC,
+    SHADOW_DIRECTIONS: SHADOW_DIRECTIONS,
+    resolveShadowDirection: resolveShadowDirection,
+    resolveShadowAutoDirection: resolveShadowAutoDirection,
+    easeOutExpo: easeOutExpo,
     AUTO_REVEAL_WIPE_SEC: AUTO_REVEAL_WIPE_SEC,
     AUTO_REVEAL_FADE_SEC: AUTO_REVEAL_FADE_SEC,
     resolveMaskMode: resolveMaskMode,
@@ -1494,9 +1542,6 @@ var appState = {
   freezeSec: DEFAULT_STYLE.freeze_sec,
   brushAnimSec: DEFAULT_STYLE.brush_anim_sec,
   monoContrast: DEFAULT_STYLE.mono_contrast,
-  filmOffsetRatio: DEFAULT_STYLE.film_offset[0],
-  filmColor: DEFAULT_STYLE.film_color,
-  filmAlpha: DEFAULT_STYLE.film_alpha,
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -1504,9 +1549,11 @@ var appState = {
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   reveal: DEFAULT_STYLE.reveal,
   shadowEnabled: false,
-  shadowOffsetRatio: DEFAULT_SHADOW.offsetRatio,
-  shadowBlurRatio: DEFAULT_SHADOW.blurRatio,
+  shadowColor: DEFAULT_SHADOW.color,
   shadowAlpha: DEFAULT_SHADOW.alpha,
+  shadowDistanceRatio: DEFAULT_SHADOW.distance,
+  shadowDirection: DEFAULT_SHADOW.direction,
+  shadowBlurRatio: DEFAULT_SHADOW.blur,
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
@@ -1547,16 +1594,16 @@ function init() {
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "maskModeSelect", "autoMaskHint", "brushEditModeRow", "brushModeAddBtn", "brushModeEraseBtn",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
-    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect", "filmColorOverrideSelect",
+    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
     "freezeSecInput", "brushAnimSecInput", "monoContrastSlider", "monoContrastValue",
-    "filmOffsetSlider", "filmOffsetValue", "filmColorPresetRow", "filmAlphaSlider", "filmAlphaValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect",
-    "shadowEnabledCheckbox", "shadowOptionsBody", "shadowOffsetSlider", "shadowOffsetValue",
-    "shadowBlurSlider", "shadowBlurValue", "shadowAlphaSlider", "shadowAlphaValue",
+    "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
+    "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
+    "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue",
     "outputModeSelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
@@ -1637,10 +1684,6 @@ function init() {
     draft.brushShape = els.brushShapeSelect.value;
     redrawStrokesOverlay();
   });
-  els.filmColorOverrideSelect.addEventListener("change", function () {
-    if (!draft) return;
-    draft.filmColor = els.filmColorOverrideSelect.value || "";
-  });
   els.maskModeSelect.addEventListener("change", function () {
     if (!draft) return;
     draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
@@ -1680,17 +1723,6 @@ function init() {
     els.monoContrastValue.textContent = appState.monoContrast.toFixed(2);
     saveToLocalStorage();
   });
-  els.filmOffsetSlider.addEventListener("input", function () {
-    var px = Number(els.filmOffsetSlider.value);
-    els.filmOffsetValue.textContent = px + "px";
-    appState.filmOffsetRatio = filmOffsetRatioFromPx(px, getReferenceOutputWidth());
-    saveToLocalStorage();
-  });
-  els.filmAlphaSlider.addEventListener("input", function () {
-    appState.filmAlpha = Number(els.filmAlphaSlider.value);
-    els.filmAlphaValue.textContent = appState.filmAlpha.toFixed(2);
-    saveToLocalStorage();
-  });
   els.titleBounceCheckbox.addEventListener("change", function () {
     appState.titleBounce = els.titleBounceCheckbox.checked;
     saveToLocalStorage();
@@ -1717,10 +1749,18 @@ function init() {
     els.shadowOptionsBody.hidden = !appState.shadowEnabled;
     saveToLocalStorage();
   });
-  els.shadowOffsetSlider.addEventListener("input", function () {
-    var px = Number(els.shadowOffsetSlider.value);
-    els.shadowOffsetValue.textContent = px + "px";
-    appState.shadowOffsetRatio = filmOffsetRatioFromPx(px, getReferenceOutputWidth());
+  els.shadowAlphaSlider.addEventListener("input", function () {
+    appState.shadowAlpha = Number(els.shadowAlphaSlider.value);
+    els.shadowAlphaValue.textContent = appState.shadowAlpha.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.shadowDistanceSlider.addEventListener("input", function () {
+    appState.shadowDistanceRatio = Number(els.shadowDistanceSlider.value);
+    els.shadowDistanceValue.textContent = appState.shadowDistanceRatio.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.shadowDirectionSelect.addEventListener("change", function () {
+    appState.shadowDirection = resolveShadowDirection(els.shadowDirectionSelect.value);
     saveToLocalStorage();
   });
   els.shadowBlurSlider.addEventListener("input", function () {
@@ -1728,19 +1768,8 @@ function init() {
     els.shadowBlurValue.textContent = appState.shadowBlurRatio.toFixed(3);
     saveToLocalStorage();
   });
-  els.shadowAlphaSlider.addEventListener("input", function () {
-    appState.shadowAlpha = Number(els.shadowAlphaSlider.value);
-    els.shadowAlphaValue.textContent = appState.shadowAlpha.toFixed(2);
-    saveToLocalStorage();
-  });
   els.outputModeSelect.addEventListener("change", function () {
     appState.outputMode = els.outputModeSelect.value;
-    // 出力解像度が変わると「ズレ量スライダー(px)」の基準幅も変わるので、
-    // 比率(appState.filmOffsetRatio)は保ったまま表示だけ更新する
-    els.filmOffsetSlider.value = String(filmOffsetPxFromRatio(appState.filmOffsetRatio, getReferenceOutputWidth()));
-    els.filmOffsetValue.textContent = els.filmOffsetSlider.value + "px";
-    els.shadowOffsetSlider.value = String(filmOffsetPxFromRatio(appState.shadowOffsetRatio, getReferenceOutputWidth()));
-    els.shadowOffsetValue.textContent = els.shadowOffsetSlider.value + "px";
     saveToLocalStorage();
   });
 
@@ -2010,7 +2039,6 @@ function startNewFreeze() {
     brushShape: "round",
     maskMode: "brush",
     brushEditMode: "add",
-    filmColor: "",
     titlePos: null,
     titleSize: null,
     titleAlign: null,
@@ -2144,7 +2172,6 @@ function enterDrawMode() {
   els.sfxSelect.value = draft.sfx || "";
   els.backgroundSelect.value = draft.background || "mono";
   els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
-  els.filmColorOverrideSelect.value = draft.filmColor || "";
   els.maskModeSelect.value = resolveMaskMode(draft.maskMode);
   setBrushEditMode(draft.brushEditMode || "add");
   updateMaskModeUI();
@@ -2222,7 +2249,7 @@ function commitFreezeEdit() {
   draft.brushShape = els.brushShapeSelect.value;
   draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
   // titleSize/titleAlignは、titleSizeSlider/titleAlignSelectの自前のイベントリスナーが
-  // 実際に操作された時だけdraft側へ反映する（filmColorOverrideSelectと同じ方針）。
+  // 実際に操作された時だけdraft側へ反映する。
   // ここで表示中の値を無条件に書き戻すと、未操作でも「上書きした」ことになり
   // JSON出力でtitle_size/title_alignキーが常に出てしまう（全体設定の継承ができなくなる）。
 
@@ -2873,6 +2900,26 @@ function stopPreviewPlayback() {
   if (draft) setPlayStatus("フリーズ編集中");
 }
 
+/**
+ * 完成した人物マスク（キャンバス）から、影演出のスライド着地先ベクトル(dx, dy)（px）を返す。
+ * render.pyのcompute_shadow_slide_vectorと同じ考え方。direction="auto"の場合のみ、
+ * マスクのアルファ値からX重心を計算して自動判定する（resolveShadowAutoDirection）。
+ */
+function computeShadowSlideVectorForPreview(maskCanvas, W, H, shadowCfg) {
+  var direction = shadowCfg.direction;
+  if (direction !== "left" && direction !== "right") {
+    var data = maskCanvas.getContext("2d").getImageData(0, 0, W, H).data;
+    var alpha = new Uint8Array(W * H);
+    for (var i = 0; i < W * H; i++) alpha[i] = data[i * 4 + 3];
+    direction = resolveShadowAutoDirection(alpha, W, H);
+  }
+  var sign = direction === "right" ? 1 : -1;
+  return {
+    dx: sign * (shadowCfg.distanceRatio || 0) * W,
+    dy: (shadowCfg.offsetYRatio || 0) * W
+  };
+}
+
 function startPreviewPlayback() {
   if (!frozenFrameCanvas) {
     showError("プレビューを表示できませんでした（静止フレームがありません）。");
@@ -2908,9 +2955,12 @@ function startPreviewPlayback() {
   var revealMode = resolveReveal(appState.reveal);
   var shadowCfg = {
     enabled: appState.shadowEnabled,
-    offsetRatio: appState.shadowOffsetRatio,
+    color: appState.shadowColor,
+    alpha: appState.shadowAlpha,
     blurRatio: appState.shadowBlurRatio,
-    alpha: appState.shadowAlpha
+    direction: resolveShadowDirection(appState.shadowDirection),
+    distanceRatio: appState.shadowDistanceRatio,
+    offsetYRatio: DEFAULT_SHADOW.offsetY
   };
   // mask="brush"はbrush_anim_sec（ユーザー設定）、それ以外は固定のreveal時間
   // （render.pyのAUTO_REVEAL_WIPE_SEC/AUTO_REVEAL_FADE_SECと同じ考え方）
@@ -2919,7 +2969,6 @@ function startPreviewPlayback() {
         : (revealMode === "fade" ? AUTO_REVEAL_FADE_SEC : AUTO_REVEAL_WIPE_SEC),
       REST = 1.0;
   var start = performance.now();
-  var filmColor = draft.filmColor || appState.filmColor;
 
   // mask="auto"/"auto+brush"の代用マスクは、フリーズ中は変化しない静的な形状なので、
   // アニメーション開始前に1回だけ作っておく（毎フレーム作り直さない）。
@@ -2931,6 +2980,30 @@ function startPreviewPlayback() {
       draft.strokes, W, H, resolveBrushShape(draft.brushShape), Number(els.brushWidthSlider.value));
   }
 
+  // 出現アニメが完了した状態のマスク（render.pyのdone_maskと同じ考え方。フリーズ中は
+  // 変化しないので1回だけ作る）。影のスライド量・出現後（着地〜保持〜スライドバック）の
+  // 表示はすべてこれを使う。
+  var doneMaskCanvas = document.createElement("canvas");
+  doneMaskCanvas.width = W; doneMaskCanvas.height = H;
+  if (maskMode === "brush") {
+    if (geoInfo.total > 0) {
+      var dmctx = doneMaskCanvas.getContext("2d");
+      dmctx.filter = "blur(2px)";
+      drawStampedGeo(dmctx, resolveBrushShape(draft.brushShape), geoInfo.geo, 0, geoInfo.total);
+    }
+  } else {
+    var doneBaseMask = maskMode === "auto+brush" ? autoBrushStrokeMaskCanvas : autoPlaceholderMaskCanvas;
+    doneMaskCanvas.getContext("2d").drawImage(doneBaseMask, 0, 0);
+  }
+
+  // 影の着地先ベクトル（px）。人物マスクのX重心から方向を自動判定する場合もこの時点で1回だけ確定する。
+  var slideDxFull = 0, slideDyFull = 0;
+  if (shadowCfg.enabled) {
+    var slideVec = computeShadowSlideVectorForPreview(doneMaskCanvas, W, H, shadowCfg);
+    slideDxFull = slideVec.dx;
+    slideDyFull = slideVec.dy;
+  }
+
   // ロゴ（last_freeze指定・かつこのフリーズが一番遅い時刻の場合のみ）は「着地とスイープの
   // 雰囲気が分かる程度」の簡易アニメーションで表示する（本番の厳密なタイミング・フラッシュ・
   // 暗転までは再現しない）。REST開始と同時に一度だけ読み込む。
@@ -2940,6 +3013,12 @@ function startPreviewPlayback() {
     logoImgEl = new Image();
     logoImgEl.src = previewLogoObjectURL;
   }
+
+  // 影のスライドイン（着地）と、保持終了→通常再生に戻る前のスライドバック。
+  // render.pyと同じく、このフリーズでラストロゴを表示する場合はスライドバックを行わない
+  // （＝通常再生に戻る演出そのものが無いため、人物を戻す必要がない）。
+  var SLIDE_IN = shadowCfg.enabled ? DEFAULT_SHADOW.slideSec : 0;
+  var SLIDE_BACK = (shadowCfg.enabled && !logoImgEl) ? SHADOW_SLIDE_BACK_SEC : 0;
 
   document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
 
@@ -2993,31 +3072,53 @@ function startPreviewPlayback() {
       pctx.drawImage(bgCanvas, 0, 0, W, H);
 
       if (elapsed >= HOLD) {
-        var progress = Math.min(1, (elapsed - HOLD) / BRUSH);
-        if (maskMode === "brush") {
-          if (geoInfo.total > 0) {
-            drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape,
-              filmColor, appState.filmAlpha, appState.filmOffsetRatio, shadowCfg);
+        var revealElapsed = elapsed - HOLD;
+        if (revealElapsed < BRUSH) {
+          // 人物の出現中：まだ「元の位置」のまま＝影（あれば）は完全に隠れている
+          var progress = BRUSH > 0 ? Math.min(1, revealElapsed / BRUSH) : 1;
+          if (maskMode === "brush") {
+            if (geoInfo.total > 0) {
+              drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape, shadowCfg);
+            }
+          } else {
+            var baseMask = maskMode === "auto+brush" ? autoBrushStrokeMaskCanvas : autoPlaceholderMaskCanvas;
+            var revealedMask = applyRevealToMask(baseMask, W, H, revealMode, progress);
+            drawMaskComposite(pctx, frameCanvas, revealedMask, W, H, shadowCfg, 0, 0);
+            if (maskMode === "auto") drawAutoLabel(pctx, W, H, progress);
           }
         } else {
-          var baseMask = maskMode === "auto+brush" ? autoBrushStrokeMaskCanvas : autoPlaceholderMaskCanvas;
-          var revealedMask = applyRevealToMask(baseMask, W, H, revealMode, progress);
-          drawMaskComposite(pctx, frameCanvas, revealedMask, W, H,
-            filmColor, appState.filmAlpha, appState.filmOffsetRatio, shadowCfg);
-          if (maskMode === "auto") drawAutoLabel(pctx, W, H, progress);
-        }
-        if (elapsed >= HOLD + BRUSH) {
-          var fade = Math.min(1, (elapsed - HOLD - BRUSH) / 0.15);
+          // 出現完了後：影のスライドイン → 保持 → （ラストロゴを出さない場合のみ）スライドバック
+          var afterReveal = revealElapsed - BRUSH;
+          var slideDx = slideDxFull, slideDy = slideDyFull;
+          if (afterReveal < SLIDE_IN) {
+            var slideT = easeOutExpo(afterReveal / SLIDE_IN);
+            slideDx = slideDxFull * slideT;
+            slideDy = slideDyFull * slideT;
+          } else {
+            var afterLanding = afterReveal - SLIDE_IN;
+            if (afterLanding >= REST && SLIDE_BACK > 0) {
+              var backT = Math.min(1, (afterLanding - REST) / SLIDE_BACK);
+              var remaining = 1 - easeOutExpo(backT);
+              slideDx = slideDxFull * remaining;
+              slideDy = slideDyFull * remaining;
+            }
+          }
+          drawMaskComposite(pctx, frameCanvas, doneMaskCanvas, W, H, shadowCfg, slideDx, slideDy);
+          if (maskMode === "auto") drawAutoLabel(pctx, W, H, 1);
+
+          // テロップ（バウンス可）と着地演出は、影のスライドインが着地した瞬間に発火する
+          var sinceLanding = afterReveal - SLIDE_IN;
+          var fade = Math.min(1, sinceLanding / 0.15);
           var scale = (appState.titleBounce && fade < 1) ? telopBounceScale(fade) : 1;
           drawTelop(pctx, draft.name, W, H, fade, scale,
             resolveTitleField(draft.titlePos, appState.titlePos),
             resolveTitleField(draft.titleSize, appState.titleSize),
             resolveTitleField(draft.titleAlign, appState.titleAlign));
-          drawLogoIfReady(elapsed - HOLD - BRUSH);
+          drawLogoIfReady(sinceLanding);
         }
       }
 
-      if (elapsed < HOLD + BRUSH + REST) {
+      if (elapsed < HOLD + BRUSH + SLIDE_IN + REST + SLIDE_BACK) {
         previewRAF = requestAnimationFrame(frame);
         return;
       }
@@ -3054,51 +3155,32 @@ function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
 }
 
 /**
- * 影・フィルム縁取り・人物カラーの合成（マスクの作り方＝ブラシ／自動／自動＋ブラシ修正
- * には依存しない、共通の「マスクさえあればいい」部分）。render.pyのcomposite_layersと
- * 同じレイヤー順：背景（呼び出し側で描画済み）→影→フィルム縁取り→人物カラー。
- * shadowCfg = { enabled, offsetRatio, blurRatio, alpha } | null
+ * 影・人物カラーの合成（マスクの作り方＝ブラシ／自動／自動＋ブラシ修正には依存しない、
+ * 共通の「マスクさえあればいい」部分）。render.pyのcomposite_layersと同じレイヤー順・考え方：
+ * 背景（呼び出し側で描画済み）→影（人物の「元の位置」。動かさない）→
+ * 人物カラー（(slideDx, slideDy)だけずらした位置）。
+ * shadowCfg = { enabled, color, alpha, blurRatio } | null
  */
-function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, filmColor, filmAlpha, filmOffsetRatio, shadowCfg) {
+function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slideDx, slideDy) {
+  slideDx = slideDx || 0;
+  slideDy = slideDy || 0;
+
   if (shadowCfg && shadowCfg.enabled) {
-    var sdx = (shadowCfg.offsetRatio || 0) * W, sdy = (shadowCfg.offsetRatio || 0) * W;
     var shadowCanvas = document.createElement("canvas");
     shadowCanvas.width = W; shadowCanvas.height = H;
     var sctx = shadowCanvas.getContext("2d");
     var blurPx = Math.max(0, (shadowCfg.blurRatio || 0) * W);
     if (blurPx > 0) sctx.filter = "blur(" + blurPx + "px)";
-    sctx.drawImage(maskCanvas, sdx, sdy);
+    sctx.drawImage(maskCanvas, 0, 0);
     sctx.filter = "none";
-    // 平行移動・ぼかし後のアルファ形状はそのままに、色だけ黒に置き換える
+    // ぼかし後のアルファ形状はそのままに、色だけ影色に置き換える
     sctx.globalCompositeOperation = "source-in";
-    sctx.fillStyle = "#000000";
+    sctx.fillStyle = shadowCfg.color || DEFAULT_SHADOW.color;
     sctx.fillRect(0, 0, W, H);
 
     pctx.save();
     pctx.globalAlpha = shadowCfg.alpha != null ? shadowCfg.alpha : DEFAULT_SHADOW.alpha;
     pctx.drawImage(shadowCanvas, 0, 0);
-    pctx.restore();
-  }
-
-  // フィルム縁取り：本番マスクを film_offset（出力幅比、x・yとも同じ量）だけズラし、
-  // film_color を film_alpha で塗ってから、その上に人物カラーを重ねる（render.pyのcomposite_layersと同じ考え方）
-  var dx = (filmOffsetRatio || 0) * W, dy = (filmOffsetRatio || 0) * W;
-  if (filmAlpha > 0 && (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5)) {
-    var filmMaskCanvas = document.createElement("canvas");
-    filmMaskCanvas.width = W; filmMaskCanvas.height = H;
-    filmMaskCanvas.getContext("2d").drawImage(maskCanvas, dx, dy);
-
-    var filmCanvas = document.createElement("canvas");
-    filmCanvas.width = W; filmCanvas.height = H;
-    var flctx = filmCanvas.getContext("2d");
-    flctx.fillStyle = filmColor || DEFAULT_STYLE.film_color;
-    flctx.fillRect(0, 0, W, H);
-    flctx.globalCompositeOperation = "destination-in";
-    flctx.drawImage(filmMaskCanvas, 0, 0);
-
-    pctx.save();
-    pctx.globalAlpha = filmAlpha;
-    pctx.drawImage(filmCanvas, 0, 0);
     pctx.restore();
   }
 
@@ -3109,10 +3191,10 @@ function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, filmColor, filmA
   cctx.globalCompositeOperation = "destination-in";
   cctx.drawImage(maskCanvas, 0, 0);
 
-  pctx.drawImage(colorCanvas, 0, 0);
+  pctx.drawImage(colorCanvas, slideDx, slideDy);
 }
 
-function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, filmColor, filmAlpha, filmOffsetRatio, shadowCfg) {
+function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, shadowCfg) {
   if (geoInfo.total <= 0) return;
   var head = geoInfo.total * progress;
   shape = resolveBrushShape(shape);
@@ -3123,7 +3205,8 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, f
   mctx.filter = "blur(2px)";
   drawStampedGeo(mctx, shape, geoInfo.geo, 0, head);
 
-  drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, filmColor, filmAlpha, filmOffsetRatio, shadowCfg);
+  // 出現アニメ中（ブラシが伸びている間）は人物は「元の位置」のまま＝影は完全に隠れている
+  drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, 0, 0);
 
   if (progress < 1) {
     var maxThick = Math.max.apply(null, geoInfo.geo.map(function (g) { return g.thick; }));
@@ -3274,16 +3357,11 @@ function buildFilmColorControls() {
     btn.dataset.filmColor = hex;
     btn.innerHTML = '<span class="swatch" style="background:' + hex + '"></span>' + FILM_COLOR_LABELS[key];
     btn.addEventListener("click", function () {
-      appState.filmColor = hex;
+      appState.shadowColor = hex;
       updateFilmColorPresetSelection();
       saveToLocalStorage();
     });
     els.filmColorPresetRow.appendChild(btn);
-
-    var opt = document.createElement("option");
-    opt.value = hex;
-    opt.textContent = FILM_COLOR_LABELS[key];
-    els.filmColorOverrideSelect.appendChild(opt);
   });
   updateFilmColorPresetSelection();
 }
@@ -3291,16 +3369,9 @@ function buildFilmColorControls() {
 function updateFilmColorPresetSelection() {
   var buttons = els.filmColorPresetRow.querySelectorAll(".film-color-btn");
   for (var i = 0; i < buttons.length; i++) {
-    var match = (buttons[i].dataset.filmColor || "").toLowerCase() === (appState.filmColor || "").toLowerCase();
+    var match = (buttons[i].dataset.filmColor || "").toLowerCase() === (appState.shadowColor || "").toLowerCase();
     buttons[i].classList.toggle("selected", match);
   }
-}
-
-/** film_offset のpxスライダーの基準幅。出力解像度が固定ならそれを、元のままなら動画の実解像度を使う */
-function getReferenceOutputWidth() {
-  var preset = OUTPUT_PRESETS[appState.outputMode];
-  if (preset) return preset.width;
-  return getEffectiveVideoDims().width || 1080;
 }
 
 /* ---------------- ラストロゴ ---------------- */
@@ -3417,11 +3488,6 @@ function applySettingsToInputs() {
   els.brushAnimSecInput.value = appState.brushAnimSec;
   els.monoContrastSlider.value = appState.monoContrast;
   els.monoContrastValue.textContent = Number(appState.monoContrast).toFixed(2);
-  var offsetPx = filmOffsetPxFromRatio(appState.filmOffsetRatio, getReferenceOutputWidth());
-  els.filmOffsetSlider.value = String(offsetPx);
-  els.filmOffsetValue.textContent = offsetPx + "px";
-  els.filmAlphaSlider.value = appState.filmAlpha;
-  els.filmAlphaValue.textContent = Number(appState.filmAlpha).toFixed(2);
   els.titleBounceCheckbox.checked = !!appState.titleBounce;
   els.titleSizeDefaultSlider.value = appState.titleSize;
   els.titleSizeDefaultValue.textContent = Number(appState.titleSize).toFixed(3);
@@ -3431,13 +3497,13 @@ function applySettingsToInputs() {
   els.revealSelect.value = resolveReveal(appState.reveal);
   els.shadowEnabledCheckbox.checked = !!appState.shadowEnabled;
   els.shadowOptionsBody.hidden = !appState.shadowEnabled;
-  var shadowOffsetPx = filmOffsetPxFromRatio(appState.shadowOffsetRatio, getReferenceOutputWidth());
-  els.shadowOffsetSlider.value = String(shadowOffsetPx);
-  els.shadowOffsetValue.textContent = shadowOffsetPx + "px";
-  els.shadowBlurSlider.value = appState.shadowBlurRatio;
-  els.shadowBlurValue.textContent = Number(appState.shadowBlurRatio).toFixed(3);
   els.shadowAlphaSlider.value = appState.shadowAlpha;
   els.shadowAlphaValue.textContent = Number(appState.shadowAlpha).toFixed(2);
+  els.shadowDistanceSlider.value = appState.shadowDistanceRatio;
+  els.shadowDistanceValue.textContent = Number(appState.shadowDistanceRatio).toFixed(3);
+  els.shadowDirectionSelect.value = resolveShadowDirection(appState.shadowDirection);
+  els.shadowBlurSlider.value = appState.shadowBlurRatio;
+  els.shadowBlurValue.textContent = Number(appState.shadowBlurRatio).toFixed(3);
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
@@ -3453,16 +3519,15 @@ function saveToLocalStorage() {
       freezeSec: appState.freezeSec,
       brushAnimSec: appState.brushAnimSec,
       monoContrast: appState.monoContrast,
-      filmOffsetRatio: appState.filmOffsetRatio,
-      filmColor: appState.filmColor,
-      filmAlpha: appState.filmAlpha,
       titleBounce: appState.titleBounce,
       audioDuringFreeze: appState.audioDuringFreeze,
       reveal: appState.reveal,
       shadowEnabled: appState.shadowEnabled,
-      shadowOffsetRatio: appState.shadowOffsetRatio,
-      shadowBlurRatio: appState.shadowBlurRatio,
+      shadowColor: appState.shadowColor,
       shadowAlpha: appState.shadowAlpha,
+      shadowDistanceRatio: appState.shadowDistanceRatio,
+      shadowDirection: appState.shadowDirection,
+      shadowBlurRatio: appState.shadowBlurRatio,
       outputMode: appState.outputMode,
       freezes: appState.freezes,
       // logo画像本体(File)は保存できないため、ファイル名等の設定だけ保存する
@@ -3488,16 +3553,15 @@ function loadFromLocalStorage(videoFileName) {
     appState.freezeSec = numOr(data.freezeSec, DEFAULT_STYLE.freeze_sec);
     appState.brushAnimSec = numOr(data.brushAnimSec, DEFAULT_STYLE.brush_anim_sec);
     appState.monoContrast = numOr(data.monoContrast, DEFAULT_STYLE.mono_contrast);
-    appState.filmOffsetRatio = numOr(data.filmOffsetRatio, DEFAULT_STYLE.film_offset[0]);
-    appState.filmColor = data.filmColor || DEFAULT_STYLE.film_color;
-    appState.filmAlpha = numOr(data.filmAlpha, DEFAULT_STYLE.film_alpha);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
     appState.shadowEnabled = !!data.shadowEnabled;
-    appState.shadowOffsetRatio = numOr(data.shadowOffsetRatio, DEFAULT_SHADOW.offsetRatio);
-    appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blurRatio);
+    appState.shadowColor = data.shadowColor || DEFAULT_SHADOW.color;
     appState.shadowAlpha = numOr(data.shadowAlpha, DEFAULT_SHADOW.alpha);
+    appState.shadowDistanceRatio = numOr(data.shadowDistanceRatio, DEFAULT_SHADOW.distance);
+    appState.shadowDirection = resolveShadowDirection(data.shadowDirection);
+    appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blur);
     appState.outputMode = data.outputMode || "original";
     appState.freezes = data.freezes || [];
     appState.logo = (data.logo && data.logo.imageName) ? {
@@ -4035,16 +4099,15 @@ function handleJsonFileChange(e) {
       appState.freezeSec = loaded.freezeSec;
       appState.brushAnimSec = loaded.brushAnimSec;
       appState.monoContrast = loaded.monoContrast;
-      appState.filmOffsetRatio = loaded.filmOffsetRatio;
-      appState.filmColor = loaded.filmColor;
-      appState.filmAlpha = loaded.filmAlpha;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;
       appState.shadowEnabled = loaded.shadowEnabled;
-      appState.shadowOffsetRatio = loaded.shadowOffsetRatio;
-      appState.shadowBlurRatio = loaded.shadowBlurRatio;
+      appState.shadowColor = loaded.shadowColor;
       appState.shadowAlpha = loaded.shadowAlpha;
+      appState.shadowDistanceRatio = loaded.shadowDistanceRatio;
+      appState.shadowDirection = loaded.shadowDirection;
+      appState.shadowBlurRatio = loaded.shadowBlurRatio;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
       appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };

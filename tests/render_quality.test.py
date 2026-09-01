@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 
+import cv2
 import numpy as np
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -324,49 +325,210 @@ try:
     check(ci_layout_info["duration"] > 0, f"CI相当レイアウトでの出力の尺が正常: {ci_layout_info['duration']:.2f}s")
 
     # ------------------------------------------------------------------
-    # 6.7) 自動切り抜き（mask="auto"/"auto+brush"）＋「影」演出
-    #      shadowは「差分ベース」で検証する：shadow付き/無しでdoneフレームを作り、
-    #      影のずれ量ぶんだけ離れた位置（本来は背景のまま）で画素が変化していることを見る。
+    # 6.7) 「影」演出（フィルム色統合・人物スライドで影を見せる新方式）
+    #      shadowは「差分ベース」で検証する：shadow付き/無しで着地後フレームを作り、
+    #      スライド距離ぶんだけ離れた位置（本来は背景のまま）で画素が変化していることを見る。
     # ------------------------------------------------------------------
     print("")
-    print("=== shadow演出：mask='brush'でも影が指定オフセット方向にずれて乗る ===")
-    shadow_cfg = {"offset": [0.08, 0.08], "blur": 0.0, "color": "#000000", "alpha": 0.9}
+    print("=== shadow演出：人物をスライドさせ、元の位置に残る影が指定方向に見える ===")
+    shadow_cfg = {"color": "#000000", "alpha": 0.9, "distance": 0.08, "direction": "right",
+                  "offset_y": 0.0, "blur": 0.0, "slide_sec": 0.3}
     base_style = dict(render.DEFAULT_STYLE)
-    base_style.update({"freeze_sec": 1.0, "brush_anim_sec": 0.2, "background": "mono"})
+    # brush_fade_sec=0：ブラシ完了直後の「乾いていない白い絵の具」の余韻を無効化する。
+    # 影のテストは人物の元の位置（＝ストロークの位置そのもの）を画素比較するため、
+    # 有効なままだとその余韻（白フェード）が同じ位置に重なってしまい判定を邪魔する。
+    base_style.update({"freeze_sec": 1.0, "brush_anim_sec": 0.2, "background": "mono", "brush_fade_sec": 0})
 
-    def make_dot_freeze(shadow=None):
+    def make_dot_freeze(shadow=None, extra=None):
         fz = dict(base_style)
         fz.update({
             "time": 2.5, "name": "", "sfx": None,
             "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
             "shadow": shadow,
         })
+        if extra:
+            fz.update(extra)
         return fz
 
-    def render_done_frame(fz):
+    def render_freeze_frames(fz):
         plan = render.plan_freezes([fz], fps, src_frames)[0]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
         frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}))
-        return frames[plan["n_hold"] + plan["n_brush"]]
+        return plan, frames
 
-    frame_no_shadow = render_done_frame(make_dot_freeze(shadow=None))
-    frame_with_shadow = render_done_frame(make_dot_freeze(shadow=shadow_cfg))
+    plan_shadow, frames_shadow = render_freeze_frames(make_dot_freeze(shadow=shadow_cfg))
+    _plan_noshadow, frames_noshadow = render_freeze_frames(make_dot_freeze(shadow=None))
+    landed_idx = plan_shadow["n_hold"] + plan_shadow["n_brush"] + plan_shadow["n_slide_in"]
+    frame_with_shadow = frames_shadow[landed_idx]
+    frame_no_shadow = frames_noshadow[plan_shadow["n_hold"] + plan_shadow["n_brush"]]
 
-    # ドットの中心(0.5,0.5)からoffset(0.05,0.05)*Wだけ右下にずれた位置は、
-    # ドット自体の外（マスク範囲外）かつ影の範囲内になる想定
-    dx = int(shadow_cfg["offset"][0] * W)
-    shadow_probe = (int(0.5 * H) + dx, int(0.5 * W) + dx)
-    far_probe = (10, 10)  # 影・ドットどちらの影響も受けないはずの隅
-    diff_shadow_area = int(np.abs(
-        frame_no_shadow[shadow_probe].astype(int) - frame_with_shadow[shadow_probe].astype(int)).sum())
+    check(plan_shadow["n_slide_in"] > 0, "shadowを指定するとn_slide_in（スライドインのフレーム数）が0より大きい")
+    check(plan_shadow["n_slide_back"] > 0, "shadowを指定するとn_slide_back（スライドバックのフレーム数）が0より大きい")
+
+    # 影は人物の「元の位置」（ドットの中心 0.5,0.5）に静止したまま残る。人物自身は
+    # distance(0.08)*Wだけ右にスライドするため、元の位置では着地後、人物ではなく
+    # 影（指定色をalphaで重ねたもの）が見えているはず。素の背景（影も人物も無い状態）
+    # と比較することで、「影の色が乗って暗くなっている」ことを正しく検証する。
+    bg_probe_frame = render.grab_frame_at(video_path, plan_shadow["frame_index"] / fps, W, H, fps)
+    plain_bg = render.make_background(bg_probe_frame, "mono", 1.0)
+    dx = int(shadow_cfg["distance"] * W)
+    origin_probe = (int(0.5 * H), int(0.5 * W))          # 人物の元の位置＝影が見えるはず
+    slid_probe = (int(0.5 * H), int(0.5 * W) + dx)        # 人物のスライド先＝人物の色が見えるはず
+    far_probe = (10, 10)                                   # 影・人物どちらの影響も受けないはずの隅
+
+    origin_bg = plain_bg[origin_probe].astype(int)
+    origin_shadow = frame_with_shadow[origin_probe].astype(int)
+    diff_origin_from_bg = int(np.abs(origin_bg - origin_shadow).sum())
+    check(diff_origin_from_bg > 20,
+          f"人物の元の位置は、影が無い場合の素の背景と異なる画素になっている（diff={diff_origin_from_bg}）")
+    check(bool(np.all(origin_shadow <= origin_bg + 1)),
+          "元の位置に残った影の画素は、素の背景より暗い（指定色（黒）をalphaで重ねているため）")
+
+    diff_slid_area = int(np.abs(
+        frame_no_shadow[slid_probe].astype(int) - frame_with_shadow[slid_probe].astype(int)).sum())
+    check(diff_slid_area > 20,
+          f"人物はdistance方向のスライド先に実際に現れている（shadow無効時はそこに何も無い, diff={diff_slid_area}）")
+
     diff_far_area = int(np.abs(
         frame_no_shadow[far_probe].astype(int) - frame_with_shadow[far_probe].astype(int)).sum())
-    check(diff_shadow_area > 20,
-          f"影のオフセット方向の画素がshadow有無で変化している（画素は暗くなる想定, diff={diff_shadow_area}）")
     check(diff_far_area == 0,
           f"影・人物から離れた隅の画素はshadow有無で変化しない（diff={diff_far_area}）")
-    check(bool(np.all(frame_with_shadow[shadow_probe] <= frame_no_shadow[shadow_probe] + 1)),
-          "影が乗った画素は、影が無い場合より暗い（黒を alpha で重ねているため）")
+
+    print("")
+    print("=== shadow演出：スライドインは瞬時ではなく、複数フレームにわたる連続アニメーション ===")
+    early_i = 0
+    late_i = plan_shadow["n_slide_in"] - 1
+    check(early_i < late_i, "テスト前提：スライドインが複数フレームある（n_slide_inが小さすぎない）")
+    frame_early = frames_shadow[plan_shadow["n_hold"] + plan_shadow["n_brush"] + early_i]
+    frame_late = frames_shadow[plan_shadow["n_hold"] + plan_shadow["n_brush"] + late_i]
+    diff_early = int(np.abs(
+        frame_no_shadow[origin_probe].astype(int) - frame_early[origin_probe].astype(int)).sum())
+    diff_late = int(np.abs(
+        frame_no_shadow[origin_probe].astype(int) - frame_late[origin_probe].astype(int)).sum())
+    check(diff_late >= diff_early,
+          f"スライドイン序盤(diff={diff_early})より終盤(diff={diff_late})のほうが影がしっかり見えている"
+          "（Ease-Out Expoで段階的にスライドしている）")
+
+    print("")
+    print("=== shadow演出：効果音は「着地の瞬間」（hold+brush+slide_in後）に鳴る ===")
+    fz_sfx = make_dot_freeze(shadow=shadow_cfg, extra={"sfx": "shakin"})
+    plan_sfx = render.plan_freezes([fz_sfx], fps, src_frames)[0]
+    check(plan_sfx["n_slide_in"] == plan_shadow["n_slide_in"],
+          "sfx指定してもn_slide_inの計算は変わらない")
+    audio = render.build_audio(video_path, [plan_sfx], fps, src_frames, True)
+    landed_frame_offset = plan_sfx["n_hold"] + plan_sfx["n_brush"] + plan_sfx["n_slide_in"]
+    expected_sample = render.frames_to_samples(plan_sfx["frame_index"] + landed_frame_offset, fps, render.AUDIO_SR)
+    # 効果音(shakin.wav)そのものの立ち上がり位置を探し、期待位置に近いことを確認する
+    # （無音区間の判定と同じ考え方：しきい値を超える最初のサンプルを「発火位置」とみなす）
+    window = audio[max(0, expected_sample - render.AUDIO_SR // 2):expected_sample + render.AUDIO_SR]
+    check(bool(np.any(np.abs(window) > 0.02)),
+          f"着地予定位置({expected_sample}サンプル)付近に効果音の音量が実際に存在する")
+
+    print("")
+    print("=== shadow演出：旧film_offset/film_color/film_alphaは後方互換で読み替えられる ===")
+    legacy_fz = make_dot_freeze(shadow=None, extra={
+        "film_offset": [0.08, 0.0], "film_color": "#000000", "film_alpha": 0.9,
+    })
+    legacy_cfg = render.resolve_shadow_config(legacy_fz)
+    check(legacy_cfg is not None, "film_offsetが非ゼロならshadow未指定でも影設定が解決される（後方互換）")
+    check(legacy_cfg is not None and legacy_cfg["direction"] == "right" and abs(legacy_cfg["distance"] - 0.08) < 1e-6,
+          f"film_offset=[0.08, 0.0] は distance=0.08 / direction='right' に読み替えられる: {legacy_cfg}")
+    _plan_legacy, frames_legacy = render_freeze_frames(legacy_fz)
+    legacy_landed_idx = _plan_legacy["n_hold"] + _plan_legacy["n_brush"] + _plan_legacy["n_slide_in"]
+    frame_legacy = frames_legacy[legacy_landed_idx]
+    diff_legacy = int(np.abs(
+        frame_no_shadow[origin_probe].astype(int) - frame_legacy[origin_probe].astype(int)).sum())
+    check(diff_legacy > 20, f"film_offsetのみを指定した旧JSONでも実際に影が描画される（diff={diff_legacy}）")
+
+    zero_legacy_cfg = render.resolve_shadow_config(make_dot_freeze(shadow=None))
+    check(zero_legacy_cfg is None, "film_offsetが[0,0]（既定）のままなら、shadowもNone（影演出なし。完全後方互換）")
+
+    print("")
+    print("=== shadow演出：direction='auto'は人物マスクの位置に応じて左右が反転する ===")
+
+    def make_side_freeze(cx_ratio, direction="auto"):
+        fz = dict(base_style)
+        fz.update({
+            "time": 2.5, "name": "", "sfx": None,
+            "strokes": [{"width": 0.12, "points": [[cx_ratio, 0.5], [cx_ratio, 0.5]]}],
+            "shadow": {"color": "#000000", "alpha": 0.9, "distance": 0.08, "direction": direction,
+                       "offset_y": 0.0, "blur": 0.0, "slide_sec": 0.1},
+        })
+        return fz
+
+    def landed_frame_for(fz):
+        plan, frames = render_freeze_frames(fz)
+        idx = plan["n_hold"] + plan["n_brush"] + plan["n_slide_in"]
+        return frames[idx]
+
+    right_dummy_landed = landed_frame_for(make_side_freeze(0.8))    # 右寄りの人物
+    left_dummy_landed = landed_frame_for(make_side_freeze(0.2))     # 左寄りの人物
+    # 右寄りダミー：中心(cx=0.8*W)より右側に影が漏れているはず（右へスライドしたと分かる）
+    right_probe = (int(0.5 * H), min(W - 1, int(0.8 * W) + dx))
+    # 比較対象として、影を完全に無効化した同じ位置の人物フレームを作る
+    _plan_right_ns, frames_right_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
+        "strokes": [{"width": 0.12, "points": [[0.8, 0.5], [0.8, 0.5]]}],
+    }))
+    right_no_shadow = frames_right_ns[_plan_right_ns["n_hold"] + _plan_right_ns["n_brush"]]
+    diff_right_at_right_probe = int(np.abs(
+        right_no_shadow[right_probe].astype(int) - right_dummy_landed[right_probe].astype(int)).sum())
+    check(diff_right_at_right_probe > 20,
+          f"人物が右寄りのダミーでは、direction='auto'が'right'を選び、右側で影が見える（diff={diff_right_at_right_probe}）")
+
+    _plan_left_ns, frames_left_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
+        "strokes": [{"width": 0.12, "points": [[0.2, 0.5], [0.2, 0.5]]}],
+    }))
+    left_no_shadow = frames_left_ns[_plan_left_ns["n_hold"] + _plan_left_ns["n_brush"]]
+    left_probe = (int(0.5 * H), max(0, int(0.2 * W) - dx))
+    diff_left_at_left_probe = int(np.abs(
+        left_no_shadow[left_probe].astype(int) - left_dummy_landed[left_probe].astype(int)).sum())
+    check(diff_left_at_left_probe > 20,
+          f"人物が左寄りのダミーでは、direction='auto'が'left'を選び、左側で影が見える（diff={diff_left_at_left_probe}）")
+
+    # 単体関数レベルでも同じことを確認（マスク重心のみからの判定）
+    right_mask = np.zeros((H, W), np.uint8)
+    right_mask[:, int(0.75 * W):int(0.85 * W)] = 255
+    left_mask = np.zeros((H, W), np.uint8)
+    left_mask[:, int(0.15 * W):int(0.25 * W)] = 255
+    center_mask = np.zeros((H, W), np.uint8)
+    center_mask[:, int(0.48 * W):int(0.52 * W)] = 255
+    check(render.resolve_shadow_auto_direction(right_mask, W) == "right",
+          "resolve_shadow_auto_direction: 画面右寄りのマスクは'right'と判定される")
+    check(render.resolve_shadow_auto_direction(left_mask, W) == "left",
+          "resolve_shadow_auto_direction: 画面左寄りのマスクは'left'と判定される")
+    check(render.resolve_shadow_auto_direction(center_mask, W) == "right",
+          "resolve_shadow_auto_direction: 画面中心±5%以内のマスクは既定の'right'になる")
+
+    print("")
+    print("=== --preview：影のスライド前後で2枚のPNGを出力する ===")
+    import json as json_mod
+    preview_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"freeze_sec": 1.0, "brush_anim_sec": 0.2, "audio_during_freeze": "mute"},
+        "freezes": [{
+            "time": 2.5, "name": "",
+            "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+            "shadow": shadow_cfg,
+        }],
+    }
+    preview_json_path = os.path.join(tmpdir, "preview_project.json")
+    with open(preview_json_path, "w", encoding="utf-8") as f:
+        json_mod.dump(preview_project, f, ensure_ascii=False)
+    loaded_preview = render.load_project(preview_json_path)
+    preview_png_arg = os.path.join(tmpdir, "shadow_preview.png")
+    before_path, after_path = render.render(loaded_preview, preview_json_path, video_path, "unused.mp4",
+                                             preview_path=preview_png_arg)
+    check(before_path == os.path.join(tmpdir, "shadow_preview_before.png"),
+          f"スライド前PNGのパスが_before付きになる: {before_path}")
+    check(after_path == os.path.join(tmpdir, "shadow_preview_after.png"),
+          f"スライド後PNGのパスが_after付きになる: {after_path}")
+    check(os.path.exists(before_path) and os.path.getsize(before_path) > 0, "スライド前PNGが実際に書き出される")
+    check(os.path.exists(after_path) and os.path.getsize(after_path) > 0, "スライド後PNGが実際に書き出される")
+    before_img = cv2.imread(before_path)
+    after_img = cv2.imread(after_path)
+    diff_preview = int(np.abs(before_img.astype(int) - after_img.astype(int)).sum())
+    check(diff_preview > 0, f"スライド前後のPNGは見た目が異なる（影の有無, diff={diff_preview}）")
 
     has_rembg = False
     try:

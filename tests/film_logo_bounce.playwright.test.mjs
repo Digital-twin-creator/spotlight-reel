@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // -*- coding: utf-8 -*-
 //
-// 「演出追加：フィルム色オフセット縁取り／テロップバウンス／ラストロゴ」で
-// index.html に追加したUI（全体設定のフィルム縁取り・title_bounce、フリーズ単位の
-// フィルム色上書き、ラストロゴのファイル選択）が、実際に project.json の
-// 契約どおりのキーを書き出すことを、headless Chromium + iPhoneデバイスエミュレーションで
-// 検証する回帰テスト。
+// 「演出追加：影（フィルム色）／テロップバウンス／ラストロゴ」で
+// index.html に追加したUI（全体設定のfreeze_sec・title_bounce、ラストロゴのファイル選択）が、
+// 実際に project.json の契約どおりのキーを書き出すことを、
+// headless Chromium + iPhoneデバイスエミュレーションで検証する回帰テスト。
+// 影（フィルム色）まわりのUI（色プリセット・濃さ・ズレ距離・方向・ぼかし）は
+// tests/mask_shadow_ui.playwright.test.mjs で検証する。
 //
 // 実行方法:
 //   npm install --no-save playwright-core
@@ -70,58 +71,31 @@ async function main() {
     document.getElementById("logoSection").open = true;
   });
 
-  console.log("=== 全体設定：freeze_secの既定値・フィルム縁取り・title_bounce ===");
+  console.log("=== 全体設定：freeze_secの既定値・title_bounce ===");
   check(await page.inputValue("#freezeSecInput") === "1.2",
     "freeze_secの入力欄の既定値が1.2になっている: " + (await page.inputValue("#freezeSecInput")));
 
-  const presetLabels = await page.$$eval("#filmColorPresetRow button", (btns) => btns.map((b) => b.textContent.trim()));
-  check(presetLabels.length === 4, "フィルム色プリセットが4色分表示される: " + JSON.stringify(presetLabels));
-
-  await page.click('#filmColorPresetRow button[data-film-color="#00C8FF"]');
-  await page.fill("#filmOffsetSlider", "8");
-  await page.dispatchEvent("#filmOffsetSlider", "input");
-  const offsetLabel = await page.textContent("#filmOffsetValue");
-  check(offsetLabel === "8px", "ズレ量スライダーをpx単位で操作すると表示に反映される: " + offsetLabel);
+  check(await page.$("#filmColorOverrideSelect") === null,
+    "フリーズ単位のフィルム色上書きセレクトは廃止され存在しない（影は全体設定に一本化）");
+  check(await page.$("#filmOffsetSlider") === null,
+    "旧フィルム縁取りズレ量スライダーは廃止され存在しない（影のズレ距離に統合）");
 
   await page.check("#titleBounceCheckbox");
 
   let project = await page.evaluate(() => buildProjectJSON(appState));
-  check(project.style.film_color === "#00C8FF", "全体設定のフィルム色プリセットがJSONに反映される: " + project.style.film_color);
-  check(Math.abs(project.style.film_offset[0] - 8 / 1080) < 0.0005,
-    "ズレ量(px)が出力幅比のfilm_offsetに変換される: " + JSON.stringify(project.style.film_offset));
   check(project.style.title_bounce === true, "title_boundeチェックボックスがJSONに反映される: " + project.style.title_bounce);
 
   console.log("");
-  console.log("=== フリーズ単位のフィルム色上書き ===");
+  console.log("=== フリーズを追加してもfilm_color系のキーは出力されない（旧・per-freeze上書きの完全撤去） ===");
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
-
-  const overrideOptions = await page.$$eval("#filmColorOverrideSelect option", (opts) => opts.map((o) => o.value));
-  check(overrideOptions[0] === "", "フリーズ単位の上書きセレクトの先頭は「全体設定を使う」(空文字)");
-  check(overrideOptions.length === 5, "フリーズ単位の上書きセレクトに4色分の選択肢がある: " + overrideOptions.length);
-
-  await page.selectOption("#filmColorOverrideSelect", "#FF32C8");
-  await page.fill("#nameInput", "縁取りテスト");
-  await page.click("#commitFreezeBtn");
-  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
-
-  project = await page.evaluate(() => buildProjectJSON(appState));
-  check(project.freezes.length === 1 && project.freezes[0].film_color === "#FF32C8",
-    "フリーズ単位で選んだ色がfreezes[0].film_colorに載る: " + JSON.stringify(project.freezes[0] && project.freezes[0].film_color));
-
-  console.log("");
-  console.log("=== 全体設定の色を上書きしていないフリーズはfilm_colorキーを持たない ===");
-  await page.click("#addFreezeBtn");
-  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
-  const inheritedValue = await page.inputValue("#filmColorOverrideSelect");
-  check(inheritedValue === "", "新規フリーズの上書きセレクトは既定で「全体設定を使う」: " + JSON.stringify(inheritedValue));
   await page.fill("#nameInput", "継承テスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   project = await page.evaluate(() => buildProjectJSON(appState));
   const inheritedFreeze = project.freezes.filter((f) => f.name === "継承テスト")[0];
   check(inheritedFreeze && !("film_color" in inheritedFreeze),
-    "上書きしなかったフリーズはfilm_colorキーを持たない（全体設定を継承）");
+    "フリーズはfilm_colorキーを持たない（影は全体設定 style.shadow のみに一本化）");
 
   console.log("");
   console.log("=== ラストロゴ：画像選択でlogoブロックが組み立てられる ===");

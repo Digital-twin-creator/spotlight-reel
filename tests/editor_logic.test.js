@@ -305,19 +305,64 @@ test("parseProjectJSON: style が省略されていても既定値を補う", ()
   assert.strictEqual(loaded.audioDuringFreeze, "mute");
 });
 
-/* ---- 演出追加：フィルム色オフセット縁取り／テロップバウンス／ラストロゴ ---- */
+/* ---- 演出追加：影（フィルム色）／テロップバウンス／ラストロゴ ---- */
 
-test("DEFAULT_STYLE: freeze_secの既定値は1.2、film系はrender.pyと同じ無効化デフォルト", () => {
+test("DEFAULT_STYLE: freeze_secの既定値は1.2、film_offset等は後方互換パース専用の無効化デフォルト", () => {
   assert.strictEqual(core.DEFAULT_STYLE.freeze_sec, 1.2);
   assert.strictEqual(core.DEFAULT_STYLE.mono_contrast, 1.0);
   assert.deepStrictEqual(core.DEFAULT_STYLE.film_offset, [0, 0]);
   assert.strictEqual(core.DEFAULT_STYLE.title_bounce, false);
 });
 
-test("filmOffsetRatioFromPx / filmOffsetPxFromRatio: 出力幅を基準に相互変換できる（render.pyと同じ考え方）", () => {
-  assert.strictEqual(core.filmOffsetRatioFromPx(8, 1080), 8 / 1080);
-  assert.strictEqual(core.filmOffsetPxFromRatio(8 / 1080, 1080), 8);
-  assert.strictEqual(core.filmOffsetRatioFromPx(10, 0), 0); // 参照幅0での0除算を避ける
+test("DEFAULT_SHADOW: render.pyのSHADOW_*_DEFAULTと同じ値", () => {
+  assert.strictEqual(core.DEFAULT_SHADOW.color, "#FF6432");
+  assert.strictEqual(core.DEFAULT_SHADOW.alpha, 0.8);
+  assert.strictEqual(core.DEFAULT_SHADOW.distance, 0.03);
+  assert.strictEqual(core.DEFAULT_SHADOW.direction, "auto");
+  assert.strictEqual(core.DEFAULT_SHADOW.offsetY, 0.02);
+  assert.strictEqual(core.DEFAULT_SHADOW.blur, 0.0);
+  assert.strictEqual(core.DEFAULT_SHADOW.slideSec, 0.2);
+  assert.strictEqual(core.SHADOW_SLIDE_BACK_SEC, 0.1);
+});
+
+test("resolveShadowDirection: auto/left/right以外はautoにフォールバックする", () => {
+  assert.strictEqual(core.resolveShadowDirection("left"), "left");
+  assert.strictEqual(core.resolveShadowDirection("right"), "right");
+  assert.strictEqual(core.resolveShadowDirection("auto"), "auto");
+  assert.strictEqual(core.resolveShadowDirection("nonsense"), "auto");
+  assert.strictEqual(core.resolveShadowDirection(undefined), "auto");
+});
+
+test("resolveShadowAutoDirection: 人物マスクのX重心が画面中心より右／左寄りのダミーで方向が反転する", () => {
+  const W = 100, H = 10;
+  const rightMask = new Uint8Array(W * H); // X=70〜89（中心50より右寄り）に人物がいるダミー
+  const leftMask = new Uint8Array(W * H);  // X=10〜29（中心50より左寄り）に人物がいるダミー
+  for (let y = 0; y < H; y++) {
+    for (let x = 70; x < 90; x++) rightMask[y * W + x] = 255;
+    for (let x = 10; x < 30; x++) leftMask[y * W + x] = 255;
+  }
+  assert.strictEqual(core.resolveShadowAutoDirection(rightMask, W, H), "right");
+  assert.strictEqual(core.resolveShadowAutoDirection(leftMask, W, H), "left");
+});
+
+test("resolveShadowAutoDirection: 中心±5%以内のあいまいなマスク、または空マスクはrightにフォールバックする", () => {
+  const W = 100, H = 10;
+  const centerMask = new Uint8Array(W * H); // X=48〜51（中心50のすぐ近く）
+  for (let y = 0; y < H; y++) {
+    for (let x = 48; x < 52; x++) centerMask[y * W + x] = 255;
+  }
+  assert.strictEqual(core.resolveShadowAutoDirection(centerMask, W, H), "right");
+  assert.strictEqual(core.resolveShadowAutoDirection(new Uint8Array(W * H), W, H), "right");
+});
+
+test("easeOutExpo: t=0で0、t=1で1、序盤速く終盤で急停止するイージング（render.pyのease_out_expoと同じ）", () => {
+  assert.strictEqual(core.easeOutExpo(0), 0);
+  assert.strictEqual(core.easeOutExpo(1), 1);
+  assert.strictEqual(core.easeOutExpo(0.1), 1 - Math.pow(2, -1)); // 1 - 2^(-10*0.1)
+  // 序盤(0→0.3)の伸びが終盤(0.7→1.0)の伸びよりずっと大きい（急停止イージングの形）
+  const earlyGain = core.easeOutExpo(0.3) - core.easeOutExpo(0);
+  const lateGain = core.easeOutExpo(1.0) - core.easeOutExpo(0.7);
+  assert.ok(earlyGain > lateGain);
 });
 
 test("telopBounceScale: t=0で130%、t=1で100%になる急停止イージング", () => {
@@ -331,38 +376,38 @@ test("logoAssetName: 拡張子を保ったまま logo.<ext> にする（大文�
   assert.strictEqual(core.logoAssetName("noext"), "logo.png");
 });
 
-test("buildProjectJSON: 新しいstyleキー（mono_contrast/film_offset/film_color/film_alpha/title_bounce）を出力する", () => {
+test("buildProjectJSON: shadowEnabledがtrueならstyle.shadowを契約どおりに出力する", () => {
   const state = sampleState();
   state.monoContrast = 1.3;
-  state.filmOffsetRatio = 8 / 1080;
-  state.filmColor = "#00C8FF";
-  state.filmAlpha = 0.8;
   state.titleBounce = true;
+  state.shadowEnabled = true;
+  state.shadowColor = "#00C8FF";
+  state.shadowAlpha = 0.9;
+  state.shadowDistanceRatio = 0.05;
+  state.shadowDirection = "left";
+  state.shadowBlurRatio = 0.02;
   const project = core.buildProjectJSON(state);
   assert.strictEqual(project.style.mono_contrast, 1.3);
-  assert.deepStrictEqual(project.style.film_offset, [0.00741, 0.00741]);
-  assert.strictEqual(project.style.film_color, "#00C8FF");
-  assert.strictEqual(project.style.film_alpha, 0.8);
   assert.strictEqual(project.style.title_bounce, true);
+  assert.deepStrictEqual(project.style.shadow, {
+    color: "#00C8FF", alpha: 0.9, distance: 0.05, direction: "left",
+    offset_y: core.DEFAULT_SHADOW.offsetY, blur: 0.02, slide_sec: core.DEFAULT_SHADOW.slideSec
+  });
 });
 
-test("buildProjectJSON: 新キーを何も設定しなければ、render.pyと同じ無効化デフォルトのまま出力される（後方互換）", () => {
+test("buildProjectJSON: shadowEnabledがfalseならstyle.shadowを省略する（render.pyの無効化デフォルトと同じ）", () => {
   const state = sampleState();
   const project = core.buildProjectJSON(state);
   assert.strictEqual(project.style.mono_contrast, 1.0);
-  assert.deepStrictEqual(project.style.film_offset, [0, 0]);
   assert.strictEqual(project.style.title_bounce, false);
+  assert.strictEqual("shadow" in project.style, false);
   assert.strictEqual(project.logo, undefined);
 });
 
-test("buildProjectJSON: フリーズに filmColor があれば film_color を出力し、無ければ省略する（全体設定を継承）", () => {
+test("buildProjectJSON: フリーズごとの film_color 上書きは廃止され出力されない（影は全体設定に一本化）", () => {
   const state = sampleState();
-  state.freezes[0].filmColor = "#FF32C8";
   const project = core.buildProjectJSON(state);
-  const withColor = project.freezes.filter(f => f.time === 5.5)[0];
-  const withoutColor = project.freezes.filter(f => f.time === 2.5)[0];
-  assert.strictEqual(withColor.film_color, "#FF32C8");
-  assert.strictEqual("film_color" in withoutColor, false);
+  project.freezes.forEach(fz => assert.strictEqual("film_color" in fz, false));
 });
 
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
@@ -399,23 +444,25 @@ test("buildProjectJSON: logo.backgroundに色指定(#RRGGBB)や'video'をその�
   assert.strictEqual(withVideo.logo.background, "video");
 });
 
-test("parseProjectJSON: 新しいstyleキー・フリーズ単位のfilm_color・logo(background込み)ブロックを読み込める", () => {
+test("parseProjectJSON: 新しいstyleキー・style.shadow・logo(background込み)ブロックを読み込める", () => {
   const project = {
     version: 1, video: "v.mp4",
     style: {
-      freeze_sec: 1.8, mono_contrast: 1.3, film_offset: [0.0074, 0.0074],
-      film_color: "#FF6432", film_alpha: 0.8, title_bounce: true
+      freeze_sec: 1.8, mono_contrast: 1.3, title_bounce: true,
+      shadow: { color: "#00C8FF", alpha: 0.9, distance: 0.05, direction: "left", offset_y: 0.01, blur: 0.02, slide_sec: 0.3 }
     },
-    freezes: [{ time: 2.5, name: "赤い人", brush_shape: "round", film_color: "#FF6432", strokes: [] }],
+    freezes: [{ time: 2.5, name: "赤い人", brush_shape: "round", strokes: [] }],
     logo: { image: "store_logo.png", at: "last_freeze", background: "#00C8FF", duration_sec: 1.2, sfx: "don" }
   };
   const loaded = core.parseProjectJSON(project);
   assert.strictEqual(loaded.monoContrast, 1.3);
-  assert.strictEqual(loaded.filmOffsetRatio, 0.0074);
-  assert.strictEqual(loaded.filmColor, "#FF6432");
-  assert.strictEqual(loaded.filmAlpha, 0.8);
   assert.strictEqual(loaded.titleBounce, true);
-  assert.strictEqual(loaded.freezes[0].filmColor, "#FF6432");
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowColor, "#00C8FF");
+  assert.strictEqual(loaded.shadowAlpha, 0.9);
+  assert.strictEqual(loaded.shadowDistanceRatio, 0.05);
+  assert.strictEqual(loaded.shadowDirection, "left");
+  assert.strictEqual(loaded.shadowBlurRatio, 0.02);
   assert.deepStrictEqual(loaded.logo, {
     imageFile: null, imageName: "store_logo.png", at: "last_freeze", background: "#00C8FF",
     durationSec: 1.2, sfx: "don", autoColorHex: ""
@@ -430,18 +477,51 @@ test("parseProjectJSON: logo.backgroundが省略されていれば既定値'auto
   assert.strictEqual(loaded.logo.background, "auto");
 });
 
-test("parseProjectJSON: 新キーを含まない旧JSONは、render.pyと同じ無効化デフォルトに解決される（後方互換）", () => {
+test("parseProjectJSON: 新キーを含まない旧JSONは、影なし(shadowEnabled=false)に解決される（後方互換）", () => {
   const loaded = core.parseProjectJSON({
     version: 1, video: "x.mp4",
     style: { freeze_sec: 2.5, font: "assets/fonts/CustomFont.ttf" },
     freezes: [{ time: 1, name: "旧フリーズ", strokes: [] }]
   });
   assert.strictEqual(loaded.monoContrast, 1.0);
-  assert.strictEqual(loaded.filmOffsetRatio, 0);
-  assert.strictEqual(loaded.filmColor, core.DEFAULT_STYLE.film_color);
   assert.strictEqual(loaded.titleBounce, false);
-  assert.strictEqual(loaded.freezes[0].filmColor, "");
+  assert.strictEqual(loaded.shadowEnabled, false);
+  assert.strictEqual(loaded.shadowColor, core.DEFAULT_SHADOW.color);
   assert.strictEqual(loaded.logo, null);
+});
+
+test("parseProjectJSON: 旧film_offset/film_color/film_alpha（film_offsetが非ゼロ）はshadowへ後方互換で読み替える", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { film_offset: [0.02, 0.0], film_color: "#112233", film_alpha: 0.7 },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowColor, "#112233");
+  assert.strictEqual(loaded.shadowAlpha, 0.7);
+  assert.strictEqual(loaded.shadowDistanceRatio, 0.02);
+  assert.strictEqual(loaded.shadowDirection, "right");
+  assert.strictEqual(loaded.shadowBlurRatio, 0);
+});
+
+test("parseProjectJSON: 旧film_offsetが負の値なら方向leftに読み替える", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { film_offset: [-0.015, 0.0], film_color: "#112233", film_alpha: 0.7 },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowDistanceRatio, 0.015);
+  assert.strictEqual(loaded.shadowDirection, "left");
+});
+
+test("parseProjectJSON: 旧film_offsetが[0,0]（既定のまま）なら影なしのまま", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { film_offset: [0, 0], film_color: "#112233", film_alpha: 0.7 },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, false);
 });
 
 test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として1.2秒", () => {
@@ -455,22 +535,27 @@ test("logoLandingScale/logoLandingEase: t=0で初期スケール(200%)・不透�
   assert.strictEqual(core.logoLandingEase(1), 1);
 });
 
-test("buildProjectJSON/parseProjectJSON: 新キーを含めて往復できる", () => {
+test("buildProjectJSON/parseProjectJSON: shadowを含めて往復できる", () => {
   const state = sampleState();
   state.monoContrast = 1.4;
-  state.filmOffsetRatio = 0.01;
-  state.filmColor = "#FFC832";
-  state.filmAlpha = 0.6;
   state.titleBounce = true;
-  state.freezes[0].filmColor = "#00C8FF";
+  state.shadowEnabled = true;
+  state.shadowColor = "#FFC832";
+  state.shadowAlpha = 0.6;
+  state.shadowDistanceRatio = 0.04;
+  state.shadowDirection = "right";
+  state.shadowBlurRatio = 0.01;
   state.logo = { imageName: "logo.png", at: "end", background: "video", durationSec: 2.0, sfx: "shakin" };
   const project = core.buildProjectJSON(state);
   const loaded = core.parseProjectJSON(project);
   assert.strictEqual(loaded.monoContrast, 1.4);
-  assert.strictEqual(loaded.filmOffsetRatio, 0.01);
-  assert.strictEqual(loaded.filmColor, "#FFC832");
-  assert.strictEqual(loaded.filmAlpha, 0.6);
   assert.strictEqual(loaded.titleBounce, true);
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowColor, "#FFC832");
+  assert.strictEqual(loaded.shadowAlpha, 0.6);
+  assert.strictEqual(loaded.shadowDistanceRatio, 0.04);
+  assert.strictEqual(loaded.shadowDirection, "right");
+  assert.strictEqual(loaded.shadowBlurRatio, 0.01);
   assert.strictEqual(loaded.logo.imageName, "logo.png");
   assert.strictEqual(loaded.logo.at, "end");
   assert.strictEqual(loaded.logo.background, "video");

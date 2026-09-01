@@ -323,7 +323,8 @@ def make_sample_json(video_filename):
             "name": "赤い人",              # 日本語 → title_font_jp（NotoSansJP）が使われる
             "sfx": "shakin",
             "brush_shape": "round",
-            "film_color": "#FF6432",       # オレンジのフィルム縁取り（フリーズ単位で上書き）
+            # circle_positions(2.5)の1人目は画面中心より左寄りに描かれるため、
+            # style.shadow.direction="auto" により影は左へスライドして現れる見本になる
             "strokes": [{"width": 0.10, "points": stroke_over_circle(2.5, 0)}],
         },
         {
@@ -331,7 +332,8 @@ def make_sample_json(video_filename):
             "name": "BLUE GUY",            # 欧文 → title_font（Anton）が使われる
             "sfx": "don",
             "brush_shape": "hake",
-            "film_color": "#00C8FF",       # シアンのフィルム縁取り（人物ごとに色を変える例）
+            # circle_positions(5.5)の2人目は画面中心より右寄りに描かれるため、
+            # style.shadow.direction="auto" により影は右へスライドして現れる見本になる
             "strokes": [{"width": 0.09, "points": stroke_over_circle(5.5, 1)}],
         },
     ]
@@ -346,15 +348,20 @@ def make_sample_json(video_filename):
             "brush_width": 0.12,
             "brush_shape": "round",
             "mono_contrast": 1.3,
-            "film_offset": [0.0074, 0.0074],   # 出力幅比。1080px換算でおよそ8px
-            "film_color": "#FF6432",
-            "film_alpha": 0.8,
             "background": "mono",
             "font": "assets/fonts/NotoSansJP-Bold.ttf",
             "title_font": "assets/fonts/Anton-Regular.ttf",
             "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
             "title_bounce": True,
             "audio_during_freeze": "mute",
+            # 影（フィルム色）演出：人物出現完了後、人物だけをdistanceぶんスライドさせ、
+            # 元の位置に残る影(color/alpha)を覗かせる。direction="auto"は人物マスクの
+            # X重心が画面中心より右か左かで自動的に左右を切り替える（後述のfreezesの
+            # コメント参照。2つのフリーズでそれぞれ左・右にスライドする見本になっている）
+            "shadow": {
+                "color": "#1A1A2E", "alpha": 0.8, "distance": 0.03,
+                "direction": "auto", "offset_y": 0.02, "blur": 0.0, "slide_sec": 0.2,
+            },
         },
         "freezes": freezes,
         "logo": {

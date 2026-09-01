@@ -46,10 +46,10 @@ spotlight-reel/
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── brush_shape.playwright.test.mjs         # ブラシ形状選択・筆先スタンプ描画の回帰テスト（任意、要playwright-core）
-│   ├── film_logo_bounce.playwright.test.mjs    # フィルム縁取り・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
+│   ├── film_logo_bounce.playwright.test.mjs    # freeze_sec・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
 │   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
 │   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
-│   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影/revealのUI回帰テスト（任意、要playwright-core）
+│   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのUI回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
@@ -75,20 +75,19 @@ spotlight-reel/
 2. シークバーや微調整ボタン（−1秒/−0.1秒/+0.1秒/+1秒）で止めたい瞬間に合わせ、
    「＋ フリーズ追加」をタップする。
 3. 表示された静止フレームの上を指でなぞって軌跡を描き、名前・効果音・背景処理・
-   ブラシ形状（round/hake/marker/spray）・フィルム縁取り色（このフリーズだけ全体設定の
-   色を上書きしたい場合）を選んで「完了」。
+   ブラシ形状（round/hake/marker/spray）を選んで「完了」。
    ブラシ形状は描いている途中で切り替えると、その場でストロークの見た目が変わる。
    名前を入力すると映像の上にテロップが仮表示され、それを指でドラッグすると
    このフリーズだけの表示位置（`title_pos`）を指定できる（テロップの上をタッチした時だけ
    移動モードになるので、ブラシ描画とは干渉しない。画面外に出ないよう端で止まる）。
    大きさは小さなスライダー、寄せ（左/中央/右）はセレクトで調整でき、どちらも
    「▶ プレビュー」の簡易再生に反映される。
-   「▶ プレビュー」で、フィルム縁取り・テロップのバウンス・（ラストフリーズなら）ロゴの
-   着地とスイープ演出も含めた雰囲気をその場で確認できる。
-4. 「全体設定」でフリーズの長さ・フィルム縁取り（ズレ量・色プリセット・不透明度）・
-   テロップのバウンスON/OFFなどを、「ラストロゴ」で動画末尾やラストフリーズに重ねる
-   ロゴ画像・背景（ロゴに合わせる／動画に重ねる／色指定）・表示時間・タイミングを、
-   それぞれ必要に応じて調整できる。
+   「▶ プレビュー」で、影（フィルム色）のスライド演出・テロップのバウンス・
+   （ラストフリーズなら）ロゴの着地とスイープ演出も含めた雰囲気をその場で確認できる。
+4. 「全体設定」でフリーズの長さ・影（フィルム色。色プリセット・濃さ・ズレ距離・
+   方向（自動/左/右）・ぼかし）・テロップのバウンスON/OFFなどを、「ラストロゴ」で
+   動画末尾やラストフリーズに重ねるロゴ画像・背景（ロゴに合わせる／動画に重ねる／
+   色指定）・表示時間・タイミングを、それぞれ必要に応じて調整できる。
 5. 必要なだけフリーズを追加したら（一覧のカードから編集・削除・シークが可能）、
    「⑦ 動画を作る」の「🎬 動画を作る」を押す（初回のみ下記のGitHub連携設定が必要）。
    進捗（アップロード％→起動待ち→レンダリング中→完了）が画面に表示され、完了すると
@@ -190,7 +189,7 @@ pip install -r requirements.txt
 python make_dummy.py                                   # テスト用の動画・JSON・SFX・フォントを生成
 python render.py examples/sample.json --out examples/out.mp4
 python render.py examples/sample.json --video other.mp4 --out out.mp4   # 動画を差し替え
-python render.py examples/sample.json --preview preview.png             # 確認用PNGを1枚だけ出力
+python render.py examples/sample.json --preview preview.png             # 確認用PNGを出力（後述）
 ```
 
 プロジェクトJSONで `mask: "auto"` / `"auto+brush"` を使う場合は、別途
@@ -270,9 +269,6 @@ python extract.py input.png --out outdir/ \
     "brush_width": 0.12,
     "brush_shape": "round",
     "mono_contrast": 1.3,
-    "film_offset": [0.0074, 0.0074],
-    "film_color": "#FF6432",
-    "film_alpha": 0.8,
     "background": "mono",
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     "title_font": "assets/fonts/Anton-Regular.ttf",
@@ -284,7 +280,10 @@ python extract.py input.png --out outdir/ \
     "brush_fade_sec": 0.3,
     "audio_during_freeze": "mute",
     "reveal": "wipe",
-    "shadow": { "offset": [0.02, 0.03], "blur": 0.02, "color": "#000000", "alpha": 0.6 }
+    "shadow": {
+      "color": "#FF6432", "alpha": 0.8, "distance": 0.03,
+      "direction": "auto", "offset_y": 0.02, "blur": 0, "slide_sec": 0.2
+    }
   },
   "freezes": [
     {
@@ -292,7 +291,6 @@ python extract.py input.png --out outdir/ \
       "name": "山田 太郎",
       "sfx": "shakin",
       "brush_shape": "hake",
-      "film_color": "#00C8FF",
       "title_pos": [0.15, 0.15],
       "title_size": 0.08,
       "title_align": "left",
@@ -333,10 +331,11 @@ python extract.py input.png --out outdir/ \
   `x` は幅、`y` は高さ、`width` は幅を基準にします。
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
-  `film_color` / `film_alpha` / `background` / `font` / `audio_during_freeze` /
+  `background` / `font` / `audio_during_freeze` /
   `title_pos` / `title_size` / `title_align` / `brush_fade_sec` / `mask` / `mask_options` /
-  `reveal` / `shadow` を個別上書き可能。
-  `film_offset` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
+  `reveal` を個別上書き可能。
+  `shadow` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します。
+  影演出は人物ごとの上書きを廃止し `style.shadow` 1つに一本化されています）。
 - `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
   `x` はそれぞれテロップの左端／右端の位置として扱われる（`center` のときのみ中心）。
@@ -364,38 +363,42 @@ python extract.py input.png --out outdir/ \
   `fade`（0.3秒でフェードイン） / `brush`（`mask: "auto+brush"` のときのみ有効。従来どおり
   ストロークで塗って出す）のいずれか。`mask: "brush"` のときは無関係（常にストローク自体の
   伸びるアニメーションになる）。
-- `shadow`：影演出。`{"offset": [x, y], "blur": r, "color": "#RRGGBB", "alpha": 0〜1}`。
-  省略・`null`で無効（既定）。`offset`・`blur`は出力幅に対する比率。詳細は次項。
+- `shadow`：影（フィルム色）演出。省略・`null` で無効（既定）。詳細は
+  [「影（`shadow`）演出」](#影shadow演出)を参照。
 - `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
-- 新しいキー（`mono_contrast` / `film_offset` / `film_color` / `film_alpha` / `title_font` /
+- 新しいキー（`mono_contrast` / `shadow` / `title_font` /
   `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo` /
-  `mask` / `mask_options` / `reveal` / `shadow`）は
+  `mask` / `mask_options` / `reveal`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
   （後方互換。詳細は次項）。`brush_fade_sec` だけは例外で、省略時は既定値 `0.3` が
   使われます（＝白い絵の具がフェードアウトする、見た目の不具合修正が既定で有効）。
+  旧バージョンの `film_offset` / `film_color` / `film_alpha`（`style` のみ・人物ごとの
+  上書き不可）は今も読み込めますが、`film_offset` が非ゼロなら `shadow` の設定へ
+  自動的に読み替えられます（詳細は次項）。新規プロジェクトでは `shadow` を使ってください。
 
 ### 演出仕様（1フリーズあたり）
 
 1. **フリーズ開始〜ブラシ開始（0.3秒固定）**：静止フレームを `background` で処理して表示
    - `mono`：グレースケール化（`mono_contrast` でコントラストを強調。1.0が無効化＝既定値）
    - `dark`：元のカラーを30%の明るさに減光
-2. **ブラシ描画（`brush_anim_sec`）**：ストロークが先頭から順に伸びていく。静止画レイヤーは
-   下から順に「①モノクロ／減光背景 → ②フィルム縁取り → ③人物カラー」の3枚重ねになる
+2. **人物の出現（ブラシは `brush_anim_sec`、`mask: "auto"`/`"auto+brush"` は `reveal` に従う
+   固定時間）**：人物は「元の位置」に出現する。この間、`shadow` があってもまだ人物の真下に
+   完全に隠れているため見えない
    - `brush_shape` の筆先画像（`assets/brushes/<shape>.png`、白＋アルファ）を軌跡に沿って
      一定間隔でスタンプする「筆先スタンプ方式」。各スタンプは進行方向に合わせて回転する
    - `round`：柔らかい縁の丸筆（従来の丸キャップ相当）
    - `hake`：毛筋（縦方向の濃淡バンド）・縁のギザつき・わずかな不透明度ムラを持つ平たいハケ
    - `marker`：角の丸い長方形。縁はくっきりしていて、重なった部分は自然と少し濃くなる
    - `spray`：円形範囲にランダムな点をまき散らしたスプレー
-   - **フィルム縁取り**：本番のブラシマスクを `film_offset`（出力幅に対する比率。x・yとも
-     同じ量）だけ平行移動し、`film_color` を `film_alpha` の不透明度で敷いてから、その上に
-     本来の位置の人物カラーを重ねる。人物ごとに縁取りの色を変えたい場合は、`freezes[]` の
-     `film_color` で個別に上書きできる。`film_offset` が `[0, 0]`（既定値）のときは
-     人物カラーの真下に完全に隠れるため、見た目には現れない（＝後方互換）
    - 複数ストロークがある場合は合計時間 `brush_anim_sec` の中で順番に描く
-3. **ブラシ完了時点**：ブラシ先端にまだ残っている白い絵の具を `brush_fade_sec`
+3. **影演出のスライドイン（`shadow` があれば、`slide_sec` 秒。既定0.2秒）**：
+   人物レイヤー（マスク＋カラー）だけを、元の位置から `distance` ぶんEase-Out Expoで
+   ずらす。影自体は元の位置に固定されたまま動かないため、そのズレ量ぶん影が
+   覗くように「現れる」。`shadow` が無ければこの区間は無い（0秒）。詳細は
+   [「影（`shadow`）演出」](#影shadow演出)を参照
+4. **着地の瞬間**：ブラシ先端にまだ残っている白い絵の具を `brush_fade_sec`
    （既定0.3秒）かけてフェードアウトさせ、人物カラーだけが残るようにする
    （`brush_fade_sec: 0` で無効化＝旧バージョンと同じ即時消灯）。同時に名前テロップ
    （位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、寄せは `title_align`・
@@ -409,11 +412,16 @@ python extract.py input.png --out outdir/ \
    差し替えれば、差し替えた音がそのまま使われる。詳細は
    [「効果音を差し替える」](#効果音を差し替える)）を鳴らす。`title_bounce: true` なら
    フェードインと同じ0.15秒の間に130%→100%へ急停止イージングで縮む「はずむ」演出になる
-   （このときテロップの外接矩形の中心を基準に拡大縮小する）
-4. **残り時間**：`freeze_sec` になるまでカラー化＋テロップを保持
+   （このときテロップの外接矩形の中心を基準に拡大縮小する）。`shadow` が無い場合、
+   この「着地の瞬間」はブラシ完了と同時（従来どおり）
+5. **残り時間**：`freeze_sec` になるまでカラー化＋テロップを保持
    （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの保持時間が
    ラストロゴの表示に必要な長さを満たすよう自動的に延長される。詳細は次項）
-5. 通常再生に戻る
+6. **影演出のスライドバック（`shadow` があり、かつこのフリーズでラストロゴを表示しない場合、
+   0.1秒固定）**：通常再生に戻る直前に、人物を元の位置へ戻し影を隠す（戻さないと
+   再生再開時に人物が飛んで見えるため）。ラストロゴを表示するフリーズではこの区間は無い
+   （＝通常再生に戻る演出自体がそこには無いため）
+7. 通常再生に戻る
 
 ### マスクの作り方（`mask`）と出現アニメ（`reveal`）
 
@@ -446,22 +454,43 @@ python extract.py input.png --out outdir/ \
 ### 影（`shadow`）演出
 
 人物アルファ（`mask` が `brush` / `auto` / `auto+brush` のいずれでも）がある場合に、
-影を落とす演出です。省略・`null` で無効（既定）。
+人物が少しスライドして自分の「元の位置」に影を覗かせる演出です。
+省略・`null` で無効（既定）。以前の「フィルム色縁取り」（旧 `film_offset` /
+`film_color` / `film_alpha`）と統合されており、影レイヤーの実体はそのフィルム色の
+ベタ塗りです（`blur: 0` が既定のため、既定では従来どおりのベタ塗りに見えます）。
 
 ```json
-"shadow": { "offset": [0.02, 0.03], "blur": 0.02, "color": "#000000", "alpha": 0.6 }
+"shadow": {
+  "color": "#FF6432", "alpha": 0.8, "distance": 0.03,
+  "direction": "auto", "offset_y": 0.02, "blur": 0, "slide_sec": 0.2
+}
 ```
 
-- `offset`：影のズレ量 `[x, y]`。出力幅に対する比率（プラスで右・下へずれる）
-- `blur`：影のぼかし量。出力幅に対する比率
-- `color`：影の色（`"#RRGGBB"`）
-- `alpha`：影の濃さ（不透明度、0〜1）
-- 現在の人物アルファ（マスク）を `offset` だけ平行移動し、`blur` でぼかし、`color` を
-  `alpha` の濃さで敷く。既存の `film_offset`（フィルム縁取り）と併用可能で、
-  レイヤー順は **背景 → 影 → フィルム縁取り → 人物 → テロップ → ロゴ**（影は必ず
-  フィルム縁取り・人物の下、背景の上に敷かれる）。
-- 影の出現タイミングは人物と同じ（`reveal` に追従する。`mask: "brush"` ならストロークが
-  伸びるのと同時に、影も少しずつ伸びていく）。
+- `color`：影の色（`"#RRGGBB"`。既定 `"#FF6432"`）
+- `alpha`：影の濃さ（不透明度、0〜1。既定 `0.8`）
+- `distance`：人物がスライドする距離。出力幅に対する比率（既定 `0.03`）。
+  影自体は動かず「人物の元の位置」に固定されたままなので、このスライド量ぶんだけ
+  影が覗いて見える
+- `direction`：スライドする向き。`"auto"`（既定）／`"left"`／`"right"`。
+  `"auto"` の場合、人物マスクのX重心を計算し、画面中心より右なら右へ・左なら左へ
+  自動判定する（中心±5%以内は判定があいまいなため、既定の `"right"` になる）
+- `offset_y`：Y方向のズレ量。出力幅に対する比率、下方向がプラス（既定 `0.02`）。
+  X方向とは違い自動判定は無く、常にこの比率がそのまま使われる
+- `blur`：影のぼかし量。出力幅に対する比率（既定 `0`＝ぼかし無し）
+- `slide_sec`：人物がスライドインする時間・秒（既定 `0.2`）。人物の出現アニメ
+  （ブラシ／`reveal`）が完了した直後から、この時間かけて Ease-Out Expo イージングで
+  0〜`distance` までスライドし、着地の瞬間にテロップ（`title_bounce` があればバウンス）
+  と効果音が発火する。保持時間が終わり通常再生に戻る直前には、0.1秒（固定）かけて
+  人物を元の位置へ戻し、影を隠す（詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)参照）
+- レイヤー順は **背景 → 影（人物の元の位置。動かない） → 人物（スライド後の位置）
+  → テロップ → ロゴ**
+- 旧バージョンの `film_offset` / `film_color` / `film_alpha` は、`film_offset` が
+  非ゼロなら次のように `shadow` へ自動的に読み替えられます（後方互換）：
+  `color` ← `film_color`、`alpha` ← `film_alpha`、`distance` ← `|film_offset.x|`、
+  `direction` ← `film_offset.x >= 0 ? "right" : "left"`、`offset_y` ← `film_offset.y`、
+  `blur` ← `0`、`slide_sec` ← 既定値 `0.2`。ただし旧バージョンの縁取りは静止した
+  演出だったのに対し、読み替え後は新しいスライドアニメが付くため、見た目は
+  「フィルム色そのもの」から「スライドして現れる影」に変わります。
 
 ### ラストロゴ（`logo`）演出「インパクト着地＋光彩スイープ」
 
@@ -553,6 +582,10 @@ python make_dummy.py   # assets/brushes/*.png（筆先スタンプ画像）も�
 python render.py examples/sample.json --out examples/out.mp4
 ffprobe examples/out.mp4   # 長さ・音声トラックを確認
 python render.py examples/sample.json --preview examples/preview.png   # brush_shapeはJSON側で指定
+# --preview <path> は <path> から拡張子を除いた名前を基準に、
+# <name>_before.png（影のスライド前＝影が隠れている）と
+# <name>_after.png（スライド後＝影が見えている）の2枚を出力する
+# （shadowが無効なプロジェクトでは2枚とも同じ内容になる）
 
 node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 
@@ -576,9 +609,9 @@ node tests/freeze_black_screen.playwright.test.mjs
 node tests/resize_scroll_black_screen.playwright.test.mjs
 node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動画それぞれでフリーズ3件追加→JSON件数一致を確認
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
-node tests/film_logo_bounce.playwright.test.mjs # フィルム縁取り・テロップバウンス・ラストロゴ設定のE2E
+node tests/film_logo_bounce.playwright.test.mjs # freeze_sec・テロップバウンス・ラストロゴ設定のE2E
 node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
-node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影/revealのE2E
+node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
 
 # 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）
