@@ -408,6 +408,71 @@ def gen_dummy_logo(out_path):
 
 
 # ---------------------------------------------------------------------------
+# extract.py 検証用のシルエット画像（examples/extract_test_silhouette.png）
+#
+# 髪風の細線・指風の隙間など「細かい構造」を含む人物シルエットを合成し、
+# extract.py（rembgベースの自動切り抜き）が、この細部の境界で0/255の二値
+# ではなく連続値のアルファを出せているかを確認するためのテスト画像。
+# 実写に近い写真の代わりに使う（examples/には人物写真が無いため）。
+# ---------------------------------------------------------------------------
+
+def gen_extract_test_silhouette(out_path, w=W, h=H):
+    """extract.py の検証用：髪風の細線と指風の隙間を持つシルエット画像を作る"""
+    ss = 4  # スーパーサンプリングで縁を滑らかにする
+    W2, H2 = w * ss, h * ss
+    img = Image.new("RGB", (W2, H2), (60, 110, 190))
+    draw = ImageDraw.Draw(img)
+    band_h = H2 // 20
+    for yband in range(0, H2, band_h):
+        shade = 190 - int(40 * yband / H2)
+        draw.rectangle([0, yband, W2, yband + band_h], fill=(60, 100, shade))
+
+    skin = (230, 200, 170)
+    shirt = (200, 60, 60)
+    hair = (70, 45, 30)
+
+    cx, cy = W2 * 0.5, H2 * 0.26
+    head_r = W2 * 0.12
+    draw.ellipse([cx - head_r, cy - head_r, cx + head_r, cy + head_r], fill=skin)
+
+    rng = np.random.default_rng(42)
+    n_strands = 50
+    for i in range(n_strands):
+        ang = math.pi * 1.15 + math.pi * 0.7 * (i / (n_strands - 1))
+        length = head_r * (1.05 + 0.5 * rng.random())
+        x0 = cx + math.cos(ang) * head_r * 0.95
+        y0 = cy + math.sin(ang) * head_r * 0.95
+        x1 = cx + math.cos(ang) * length
+        y1 = cy + math.sin(ang) * length
+        midx = (x0 + x1) / 2 + rng.normal(0, W2 * 0.008)
+        midy = (y0 + y1) / 2 + rng.normal(0, W2 * 0.004)
+        draw.line([(x0, y0), (midx, midy), (x1, y1)], fill=hair, width=max(1, int(W2 * 0.0012)))
+
+    body_top = cy + head_r * 0.85
+    body_w = W2 * 0.24
+    body_bottom = H2 * 0.60
+    draw.rounded_rectangle([cx - body_w / 2, body_top, cx + body_w / 2, body_bottom],
+                            radius=W2 * 0.03, fill=shirt)
+
+    hand_y0, hand_y1 = H2 * 0.58, H2 * 0.70
+    hand_x0 = cx - body_w * 0.85
+    n_fingers = 4
+    finger_w = W2 * 0.028
+    gap_w = W2 * 0.007
+    for f in range(n_fingers):
+        fx0 = hand_x0 + f * (finger_w + gap_w)
+        draw.rounded_rectangle([fx0, hand_y0, fx0 + finger_w, hand_y1],
+                                radius=finger_w * 0.35, fill=skin)
+    palm_x1 = hand_x0 + n_fingers * (finger_w + gap_w)
+    draw.rounded_rectangle([hand_x0 - W2 * 0.01, hand_y1 - W2 * 0.015, palm_x1, hand_y1 + W2 * 0.05],
+                            radius=W2 * 0.02, fill=skin)
+
+    img = img.resize((w, h), Image.LANCZOS)
+    img.save(out_path)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # ブラシ筆先画像（assets/brushes/<shape>.png）
 #
 # render.py / index.html の両方が同じPNG（白RGB＋アルファ）を「筆先スタンプ」として使う。
@@ -576,6 +641,10 @@ def main():
     log("=== ダミーロゴを生成 ===")
     logo_path = gen_dummy_logo(os.path.join(EXAMPLES_DIR, "store_logo.png"))
     log(f"  {logo_path} を生成しました")
+
+    log("=== extract.py 検証用シルエット画像を生成 ===")
+    silhouette_path = gen_extract_test_silhouette(os.path.join(EXAMPLES_DIR, "extract_test_silhouette.png"))
+    log(f"  {silhouette_path} を生成しました")
 
     log("=== サンプルJSONを生成 ===")
     project = make_sample_json("dummy_input.mp4")

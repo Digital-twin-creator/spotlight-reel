@@ -7,5 +7,8 @@ examples/preview.png
 __pycache__/
 *.pyc
 
+# render.py が自動切り抜き（mask: "auto"/"auto+brush"）のアルファをキャッシュするディレクトリ
+cache/
+
 # `npm install --no-save playwright-core` でPlaywright回帰テストを実行した際に生成される
 node_modules/

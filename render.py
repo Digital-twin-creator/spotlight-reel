@@ -55,6 +55,10 @@ DEFAULT_STYLE = {
     "title_align": "center",      # テロップの水平寄せ（left | center | right、title_posのxを基準）
     "brush_fade_sec": 0.3,        # ブラシ完了後、先端に残る白い絵の具をフェードアウトさせる時間（秒）。0でフェードなし
     "audio_during_freeze": "mute",  # mute | keep
+    "mask": "brush",              # brush | auto | auto+brush（マスクの作り方。省略時は従来どおりブラシ）
+    "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool}（mask="auto"/"auto+brush"時のみ使用）
+    "reveal": "wipe",             # wipe | fade | brush（人物の出現アニメ。brushはauto+brushでのみ有効）
+    "shadow": None,               # {"offset": [x,y], "blur": r, "color": "#RRGGBB", "alpha": 0〜1}。省略/Noneで無効
 }
 
 TITLE_ALIGNS = ("left", "center", "right")
@@ -99,6 +103,12 @@ LOGO_DURATION_SEC_DEFAULT = 1.2   # 着地からの表示時間の既定値
 AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
 KEEP_LOOP_SEC = 0.5           # audio_during_freeze="keep" のときにループする長さ
+
+MASK_MODES = ("brush", "auto", "auto+brush")
+REVEALS = ("wipe", "fade", "brush")
+CACHE_DIR_NAME = "cache"      # 自動切り抜きのアルファをキャッシュするディレクトリ（cwd基準）
+AUTO_REVEAL_WIPE_SEC = 0.4    # mask="auto"/"auto+brush"（reveal="wipe"）の出現アニメの長さ（固定）
+AUTO_REVEAL_FADE_SEC = 0.3    # 同上、reveal="fade"の場合の長さ（固定）
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +459,30 @@ def resolve_brush_shape(shape):
     return shape
 
 
+def resolve_mask_mode(mode):
+    """未知の値は brush（従来どおり完全後方互換）にフォールバックする"""
+    mode = mode or "brush"
+    if mode not in MASK_MODES:
+        warn(f"mask='{mode}' は未知の値です。brush として扱います。")
+        return "brush"
+    return mode
+
+
+def resolve_reveal(reveal, mask_mode):
+    """
+    未知の値は wipe にフォールバックする。
+    reveal="brush" は mask="auto+brush" の場合のみ有効（それ以外はwipeにフォールバック）。
+    """
+    reveal = reveal or "wipe"
+    if reveal not in REVEALS:
+        warn(f"reveal='{reveal}' は未知の値です。wipe として扱います。")
+        reveal = "wipe"
+    if reveal == "brush" and mask_mode != "auto+brush":
+        warn("reveal='brush' は mask='auto+brush' の場合のみ有効です。wipe として扱います。")
+        reveal = "wipe"
+    return reveal
+
+
 _TIP_CACHE = {}
 
 
@@ -570,44 +604,205 @@ def draw_stroke_mask(geo, W, H, start_len, end_len, shape):
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 
-def composite_brush(bg, color, geo, total_len, progress, W, shape,
-                     film_offset=(0.0, 0.0), film_color_bgr=None, film_alpha=0.0):
+def render_shadow_layer(person_mask_u8, W, H, shadow_cfg):
     """
-    進捗 progress(0〜1) の時点の合成フレームを作る。
-      - 背景の上に、本番マスクを film_offset だけズラした「フィルム縁取り」を
-        film_color/film_alpha で敷く（film_offsetが[0,0]なら人物カラーの下に
-        完全に隠れるため、見た目には現れない＝既定で無効化される）
-      - 描画済みの領域だけ元のカラーが見える（筆先スタンプによるマスクで復元）
-      - 描いたばかりの先端付近には白い絵の具（alpha 0.85）が乗り、
-        少し後ろでフェードして消える（＝最終的にはカラーだけが残る）
+    現在の人物マスク（0〜255）から「影」レイヤーを作る。
+    offset・blur は出力幅(W)に対する比率。人物マスクを offset だけ平行移動し、
+    blur でぼかしたものを影の形として使う（＝人物と同じタイミングで出現・消失する）。
+    戻り値: (影マスク uint8, alpha, BGR色) または、無効時は (None, 0.0, None)
     """
-    if total_len <= 0:
-        return bg.copy()
+    alpha = float(np.clip((shadow_cfg or {}).get("alpha", 0.6), 0.0, 1.0))
+    if alpha <= 0:
+        return None, 0.0, None
+    offset = shadow_cfg.get("offset") or (0.0, 0.0)
+    dx, dy = float(offset[0]) * W, float(offset[1]) * W
+    shifted = translate_mask(person_mask_u8, dx, dy)
+    blur_ratio = float(shadow_cfg.get("blur", 0.0))
+    k = int(round(blur_ratio * W))
+    if k > 0:
+        k = max(3, k + (1 - k % 2))   # 奇数に丸める（GaussianBlurの制約）
+        shifted = cv2.GaussianBlur(shifted, (k, k), 0)
+    color_bgr = hex_to_bgr(shadow_cfg.get("color"), default=(0, 0, 0))
+    return shifted, alpha, color_bgr
 
-    head = total_len * float(np.clip(progress, 0.0, 1.0))
-    mask = draw_stroke_mask(geo, W, bg.shape[0], 0.0, head, shape)
 
+def composite_layers(bg, color, mask_u8, W, H,
+                      film_offset=(0.0, 0.0), film_color_bgr=None, film_alpha=0.0,
+                      shadow_cfg=None, paint_mask_u8=None):
+    """
+    1フレーム分の合成処理（マスクの作り方＝ブラシ／自動／自動＋ブラシ には依存しない、
+    共通の「マスクさえあれば合成できる」部分）。
+    レイヤー順: 背景 → 影 → フィルム縁取り → 人物 → （描いている最中の白い絵の具、あれば）。
+    """
     out = bg.astype(np.float32)
+
+    if shadow_cfg:
+        shadow_mask, shadow_alpha, shadow_color = render_shadow_layer(mask_u8, W, H, shadow_cfg)
+        if shadow_mask is not None:
+            sm = (shadow_mask.astype(np.float32) / 255.0)[:, :, None] * shadow_alpha
+            out = out * (1.0 - sm) + np.array(shadow_color, dtype=np.float32) * sm
 
     dx, dy = float(film_offset[0]) * W, float(film_offset[1]) * W
     if film_alpha > 0 and (abs(dx) >= 0.5 or abs(dy) >= 0.5):
-        film_mask = translate_mask(mask, dx, dy)
+        film_mask = translate_mask(mask_u8, dx, dy)
         fm = (film_mask.astype(np.float32) / 255.0)[:, :, None] * float(np.clip(film_alpha, 0.0, 1.0))
         film_bgr = np.array(film_color_bgr or (50, 100, 255), dtype=np.float32)
         out = out * (1.0 - fm) + film_bgr * fm
 
-    m = (mask.astype(np.float32) / 255.0)[:, :, None]
+    m = (mask_u8.astype(np.float32) / 255.0)[:, :, None]
     out = out * (1.0 - m) + color.astype(np.float32) * m
 
-    if progress < 1.0:
-        # 先端付近の「まだ乾いていない絵の具」の長さ
-        max_thick = max(g["thick"] for g in geo)
-        tail = max(2.0 * max_thick, total_len * 0.12)
-        paint = draw_stroke_mask(geo, W, bg.shape[0], max(head - tail, 0.0), head, shape)
-        pm = (paint.astype(np.float32) / 255.0)[:, :, None] * BRUSH_PAINT_ALPHA
+    if paint_mask_u8 is not None:
+        pm = (paint_mask_u8.astype(np.float32) / 255.0)[:, :, None] * BRUSH_PAINT_ALPHA
         out = out * (1.0 - pm) + 255.0 * pm
 
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def apply_reveal_wipe(base_mask_u8, H, progress):
+    """下から上へ progress(0〜1) の割合だけアルファを拭き取るように表示する（境界は1px程度のアンチエイリアス）"""
+    progress = float(np.clip(progress, 0.0, 1.0))
+    if progress <= 0.0:
+        return np.zeros_like(base_mask_u8)
+    if progress >= 1.0:
+        return base_mask_u8
+    yy = np.arange(H, dtype=np.float32).reshape(H, 1)
+    thresh_y = H * (1.0 - progress)
+    gate = np.clip((yy - thresh_y) + 1.0, 0.0, 1.0)
+    return np.clip(base_mask_u8.astype(np.float32) * gate, 0, 255).astype(np.uint8)
+
+
+def apply_reveal_fade(base_mask_u8, progress):
+    """base_mask_u8 全体を progress(0〜1) の濃さでフェードインする"""
+    progress = float(np.clip(progress, 0.0, 1.0))
+    return np.clip(base_mask_u8.astype(np.float32) * progress, 0, 255).astype(np.uint8)
+
+
+def apply_brush_correction(alpha_u8, strokes, W, H, default_width, shape):
+    """
+    mask="auto+brush"：自動切り抜きのアルファ(alpha_u8)を、ブラシストロークで補正する。
+    mode="add"（省略時の既定）は該当領域をα=1相当に塗り足し、mode="erase"はα=0相当に削る。
+    フリーズごとに1回だけ計算する静的な補正（時間変化はreveal側が担当する）。
+    """
+    strokes = strokes or []
+    add_strokes = [s for s in strokes if (s.get("mode") or "add") == "add"]
+    erase_strokes = [s for s in strokes if s.get("mode") == "erase"]
+    out = alpha_u8.astype(np.float32)
+
+    if add_strokes:
+        geo, total = build_stroke_geometry(add_strokes, W, H, default_width)
+        if total > 0:
+            add_mask = draw_stroke_mask(geo, W, H, 0.0, total, shape).astype(np.float32)
+            out = np.maximum(out, add_mask)
+
+    if erase_strokes:
+        geo, total = build_stroke_geometry(erase_strokes, W, H, default_width)
+        if total > 0:
+            erase_mask = draw_stroke_mask(geo, W, H, 0.0, total, shape).astype(np.float32)
+            out = out * (1.0 - erase_mask / 255.0)
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def cache_path_for_alpha(video_path, t, cache_dir):
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    return os.path.join(cache_dir, f"{base}_{t:.3f}.npz")
+
+
+def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options):
+    """
+    extract.py（自動切り抜き）でアルファ（0〜255連続値、H×W）を得る。
+    cache_dir/<動画名>_<時刻>.npz にキャッシュし、同じ動画・同じフリーズ時刻の
+    再レンダリング時は再計算しない。
+    extract のimportはこの関数の中でのみ行うため、mask="brush"のみのプロジェクトは
+    rembg/onnxruntimeが未インストールでも問題なく動く。
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = cache_path_for_alpha(video_path, t, cache_dir)
+
+    if os.path.exists(cache_file):
+        try:
+            data = np.load(cache_file)
+            alpha = data["alpha"]
+            if alpha.shape == (H, W):
+                log(f"  切り抜きキャッシュを使用します: {cache_file}")
+                return alpha
+            warn(f"切り抜きキャッシュのサイズが現在の出力解像度と一致しないため再計算します: {cache_file}")
+        except Exception as exc:  # noqa: BLE001 - 壊れたキャッシュ等は再計算にフォールバック
+            warn(f"切り抜きキャッシュを読み込めませんでした（再計算します）: {exc}")
+
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+    import extract  # 遅延import（mask="brush"のみのプロジェクトではここに到達しない）
+
+    opts = mask_options or {}
+    model = opts.get("model") or extract.DEFAULT_MODEL
+    refine = opts.get("refine")
+    decontaminate = bool(opts.get("decontaminate"))
+
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    img = Image.fromarray(rgb)
+    rgba_img, elapsed, _session = extract.extract_alpha(img, model, refine, decontaminate)
+    if rgba_img.size != (W, H):
+        rgba_img = rgba_img.resize((W, H), Image.LANCZOS)
+    alpha = np.array(rgba_img)[:, :, 3]
+    log(f"  自動切り抜き完了: {elapsed:.2f}秒（モデル={model}, refine={refine}, decontaminate={decontaminate}）")
+
+    np.savez_compressed(cache_file, alpha=alpha)
+    return alpha
+
+
+def build_mask_context(fz, frame, W, H, cache_dir, video_path):
+    """
+    フリーズ1回分の「マスクの作り方」に関する下ごしらえを1回だけ計算する
+    （iter_freeze_frames と render_preview の両方から使う共通処理）。
+    """
+    shape = resolve_brush_shape(fz.get("brush_shape"))
+    strokes = fz.get("strokes") or []
+    default_width = float(fz.get("brush_width", 0.12))
+    all_geo, all_total = build_stroke_geometry(strokes, W, H, default_width)
+
+    mask_mode = resolve_mask_mode(fz.get("mask"))
+    reveal = resolve_reveal(fz.get("reveal"), mask_mode)
+
+    base_mask = None
+    if mask_mode in ("auto", "auto+brush"):
+        base_mask = get_or_extract_alpha(frame, video_path, float(fz.get("time", 0.0)),
+                                          W, H, cache_dir, fz.get("mask_options"))
+        if mask_mode == "auto+brush":
+            base_mask = apply_brush_correction(base_mask, strokes, W, H, default_width, shape)
+
+    return {
+        "mask_mode": mask_mode, "reveal": reveal, "shape": shape,
+        "all_geo": all_geo, "all_total": all_total, "base_mask": base_mask,
+    }
+
+
+def mask_and_paint_at(ctx, W, H, progress):
+    """
+    ctx（build_mask_context の戻り値）と進捗 progress(0〜1) から、
+    (現在の人物マスク uint8, 描いている最中の白い絵の具マスク uint8 or None) を返す。
+    """
+    mask_mode, reveal, shape = ctx["mask_mode"], ctx["reveal"], ctx["shape"]
+    all_geo, all_total, base_mask = ctx["all_geo"], ctx["all_total"], ctx["base_mask"]
+
+    if mask_mode == "brush" or reveal == "brush":
+        head = all_total * float(np.clip(progress, 0.0, 1.0))
+        mask = draw_stroke_mask(all_geo, W, H, 0.0, head, shape)
+        if mask_mode == "auto+brush":
+            # ストロークが「なぞった/なぞっていない」領域として、自動アルファの出現をゲートする
+            gate = mask.astype(np.float32) / 255.0
+            mask = np.clip(base_mask.astype(np.float32) * gate, 0, 255).astype(np.uint8)
+        paint = None
+        if progress < 1.0 and all_geo:
+            max_thick = max(g["thick"] for g in all_geo)
+            tail = max(2.0 * max_thick, all_total * 0.12)
+            paint = draw_stroke_mask(all_geo, W, H, max(head - tail, 0.0), head, shape)
+        return mask, paint
+
+    if reveal == "fade":
+        return apply_reveal_fade(base_mask, progress), None
+    return apply_reveal_wipe(base_mask, H, progress), None
 
 
 # ---------------------------------------------------------------------------
@@ -1060,9 +1255,18 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
             idx = min(idx, max(src_frames - 1, 0))
         idx = max(idx, 0)
 
+        mask_mode = resolve_mask_mode(fz.get("mask"))
+        reveal = resolve_reveal(fz.get("reveal"), mask_mode)
+        if mask_mode == "brush" or reveal == "brush":
+            reveal_anim_sec = float(fz["brush_anim_sec"])
+        elif reveal == "fade":
+            reveal_anim_sec = AUTO_REVEAL_FADE_SEC
+        else:
+            reveal_anim_sec = AUTO_REVEAL_WIPE_SEC
+
         n_total = max(1, int(round(float(fz["freeze_sec"]) * fps)))
         n_hold = int(round(HOLD_BEFORE_BRUSH_SEC * fps))
-        n_brush = max(1, int(round(float(fz["brush_anim_sec"]) * fps)))
+        n_brush = max(1, int(round(reveal_anim_sec * fps)))
 
         # freeze_sec が短すぎる場合は、前半2フェーズを比例縮小して収める
         if n_hold + n_brush > n_total:
@@ -1092,6 +1296,8 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
             "show_logo": False,
             "logo_crossfade_frames": 0,
             "logo_total_frames": 0,
+            "mask_mode": mask_mode,
+            "reveal": reveal,
         })
     plans.sort(key=lambda p: p["frame_index"])
 
@@ -1109,25 +1315,28 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
     return plans
 
 
-def iter_freeze_frames(frame, plan, W, H, fps, font_cache,
+def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video_path=None,
                         logo_bgr=None, logo_alpha=None, logo_luma=None,
                         logo_params=None, logo_bg_color=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
       1. 静止（背景処理のみ）
-      2. ブラシが伸びる（フィルム縁取り→人物カラーの順に復元）
-      3. ブラシ完了 → テロップがフェードイン（バウンス可）、そのまま保持
+      2. 人物が出現する（マスクの作り方はmask="brush"/"auto"/"auto+brush"で異なるが、
+         出現アニメ自体はreveal="wipe"/"fade"/"brush"で統一的に扱う。
+         フィルム縁取り→影→人物カラーの順に復元）
+      3. 出現完了 → テロップがフェードイン（バウンス可）、そのまま保持
          （plan["show_logo"]がTrueなら、rest終盤で「静止フレーム→背景色のクロスフェード
            （logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」を行う）
     """
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
-    shape = resolve_brush_shape(fz.get("brush_shape"))
-    geo, total_len = build_stroke_geometry(
-        fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
     film_offset = fz.get("film_offset") or (0.0, 0.0)
     film_color_bgr = hex_to_bgr(fz.get("film_color"))
     film_alpha = float(fz.get("film_alpha", 0.0))
+    shadow_cfg = fz.get("shadow")
+
+    ctx = build_mask_context(fz, frame, W, H, cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME),
+                              video_path or "input")
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -1141,31 +1350,37 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache,
         fz.get("name", ""), W, H, font_cache[font_key], font_path, size_px, title_pos, title_align)
     bounce = bool(fz.get("title_bounce"))
 
-    # 1) ブラシ開始まで静止
+    # 1) 出現アニメ開始まで静止
     for _ in range(plan["n_hold"]):
         yield bg.copy()
 
-    # 2) ブラシ描画
+    # 2) 人物の出現（ブラシが伸びる／自動マスクをワイプ・フェード）
     for i in range(plan["n_brush"]):
         progress = (i + 1) / float(plan["n_brush"])
-        yield composite_brush(bg, frame, geo, total_len, progress, W, shape,
-                               film_offset, film_color_bgr, film_alpha)
+        mask, paint = mask_and_paint_at(ctx, W, H, progress)
+        yield composite_layers(bg, frame, mask, W, H, film_offset, film_color_bgr, film_alpha,
+                                shadow_cfg=shadow_cfg, paint_mask_u8=paint)
 
     # 3) 完成状態＋テロップのフェードイン（バウンス可）→保持。ロゴがあれば終盤で表示する
-    done = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
-                            film_offset, film_color_bgr, film_alpha)
+    done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
+    done = composite_layers(bg, frame, done_mask, W, H, film_offset, film_color_bgr, film_alpha,
+                             shadow_cfg=shadow_cfg)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
 
-    # ブラシ完了時点で先端に残っている「乾いていない白い絵の具」
-    # （composite_brushのtail計算と同じ範囲）を、brush_fade_sec秒かけてフェードアウトさせる。
+    # ブラシ（またはauto+brushのreveal="brush"）で描いた場合のみ、完了時点で先端に残っている
+    # 「乾いていない白い絵の具」を brush_fade_sec 秒かけてフェードアウトさせる。
+    # auto/auto+brush(wipe/fade)にはこの「絵の具」の概念自体が無いため対象外。
     # 0（既定は0.3）を指定すると、この後続フェードを行わず従来どおり即座に消える。
+    brush_driven = ctx["mask_mode"] == "brush" or ctx["reveal"] == "brush"
+    all_geo, all_total = ctx["all_geo"], ctx["all_total"]
+    shape = ctx["shape"]
     brush_fade_sec = float(fz.get("brush_fade_sec", DEFAULT_STYLE["brush_fade_sec"]))
     n_brush_fade = max(0, int(round(brush_fade_sec * fps))) if brush_fade_sec > 0 else 0
     tail_paint_alpha = None
-    if n_brush_fade > 0 and geo and total_len > 0:
-        max_thick = max(g["thick"] for g in geo)
-        tail_len = max(2.0 * max_thick, total_len * 0.12)
-        tail_mask = draw_stroke_mask(geo, W, H, max(total_len - tail_len, 0.0), total_len, shape)
+    if brush_driven and n_brush_fade > 0 and all_geo and all_total > 0:
+        max_thick = max(g["thick"] for g in all_geo)
+        tail_len = max(2.0 * max_thick, all_total * 0.12)
+        tail_mask = draw_stroke_mask(all_geo, W, H, max(all_total - tail_len, 0.0), all_total, shape)
         tail_paint_alpha = (tail_mask.astype(np.float32) / 255.0)[:, :, None]
 
     crossfade_frames = plan.get("logo_crossfade_frames", 0)
@@ -1209,18 +1424,20 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache,
         yield out
 
 
-def render_preview(frame, plan, W, H, fps, font_cache, out_png):
-    """--preview 用：ブラシ完了＋テロップ全表示のフレームを1枚PNGで出す"""
+def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, video_path=None):
+    """--preview 用：人物の出現完了＋テロップ全表示のフレームを1枚PNGで出す"""
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
-    shape = resolve_brush_shape(fz.get("brush_shape"))
-    geo, total_len = build_stroke_geometry(
-        fz.get("strokes") or [], W, H, float(fz.get("brush_width", 0.12)))
     film_offset = fz.get("film_offset") or (0.0, 0.0)
     film_color_bgr = hex_to_bgr(fz.get("film_color"))
     film_alpha = float(fz.get("film_alpha", 0.0))
-    img = composite_brush(bg, frame, geo, total_len, 1.0, W, shape,
-                           film_offset, film_color_bgr, film_alpha)
+    shadow_cfg = fz.get("shadow")
+
+    ctx = build_mask_context(fz, frame, W, H, cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME),
+                              video_path or "input")
+    mask, _paint = mask_and_paint_at(ctx, W, H, 1.0)
+    img = composite_layers(bg, frame, mask, W, H, film_offset, film_color_bgr, film_alpha,
+                            shadow_cfg=shadow_cfg)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -1447,13 +1664,19 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_crossfade_frames=logo_crossfade_frames)
 
+        # 自動切り抜き（mask="auto"/"auto+brush"）のアルファは、動画名＋フリーズ時刻をキーに
+        # cwd基準の cache/ ディレクトリへキャッシュし、同じフレームの再レンダリング時は
+        # 再計算しない。
+        cache_dir = os.path.join(os.getcwd(), CACHE_DIR_NAME)
+
         # --- 確認用PNGだけ出して終了 ---
         if preview_path:
             if not plans:
                 raise RuntimeError("freezes が空なので preview を作れません。")
             plan = plans[0]
             frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
-            path = render_preview(frame, plan, W, H, fps, {}, preview_path)
+            path = render_preview(frame, plan, W, H, fps, {}, preview_path,
+                                   cache_dir=cache_dir, video_path=video_path)
             log(f"プレビューを書き出しました: {path}")
             return path
 
@@ -1479,8 +1702,9 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 while pending and pending[0]["frame_index"] == i:
                     plan = pending.pop(0)
                     for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
-                                                logo_bgr, logo_alpha, logo_luma,
-                                                logo_params, logo_bg_color):
+                                                cache_dir=cache_dir, video_path=video_path,
+                                                logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
+                                                logo_params=logo_params, logo_bg_color=logo_bg_color):
                         writer.stdin.write(f.tobytes())
                         last_out_frame = f
                         written += 1
@@ -1496,8 +1720,9 @@ def render(project, json_path, video_path, out_path, preview_path=None):
             # 動画末尾より後ろを指すフリーズが残っていたら最後のフレームで処理する
             for plan in pending:
                 for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
-                                            logo_bgr, logo_alpha, logo_luma,
-                                            logo_params, logo_bg_color):
+                                            cache_dir=cache_dir, video_path=video_path,
+                                            logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
+                                            logo_params=logo_params, logo_bg_color=logo_bg_color):
                     writer.stdin.write(f.tobytes())
                     last_out_frame = f
                     written += 1

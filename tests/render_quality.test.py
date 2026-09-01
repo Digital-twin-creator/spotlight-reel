@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -321,6 +322,110 @@ try:
           "（フォント/効果音のパス解決がcwdに依存せず、render.py自身の置き場所を基準にする）")
     ci_layout_info = render.probe_video(out_ci_layout)
     check(ci_layout_info["duration"] > 0, f"CI相当レイアウトでの出力の尺が正常: {ci_layout_info['duration']:.2f}s")
+
+    # ------------------------------------------------------------------
+    # 6.7) 自動切り抜き（mask="auto"/"auto+brush"）＋「影」演出
+    #      shadowは「差分ベース」で検証する：shadow付き/無しでdoneフレームを作り、
+    #      影のずれ量ぶんだけ離れた位置（本来は背景のまま）で画素が変化していることを見る。
+    # ------------------------------------------------------------------
+    print("")
+    print("=== shadow演出：mask='brush'でも影が指定オフセット方向にずれて乗る ===")
+    shadow_cfg = {"offset": [0.08, 0.08], "blur": 0.0, "color": "#000000", "alpha": 0.9}
+    base_style = dict(render.DEFAULT_STYLE)
+    base_style.update({"freeze_sec": 1.0, "brush_anim_sec": 0.2, "background": "mono"})
+
+    def make_dot_freeze(shadow=None):
+        fz = dict(base_style)
+        fz.update({
+            "time": 2.5, "name": "", "sfx": None,
+            "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+            "shadow": shadow,
+        })
+        return fz
+
+    def render_done_frame(fz):
+        plan = render.plan_freezes([fz], fps, src_frames)[0]
+        frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
+        frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}))
+        return frames[plan["n_hold"] + plan["n_brush"]]
+
+    frame_no_shadow = render_done_frame(make_dot_freeze(shadow=None))
+    frame_with_shadow = render_done_frame(make_dot_freeze(shadow=shadow_cfg))
+
+    # ドットの中心(0.5,0.5)からoffset(0.05,0.05)*Wだけ右下にずれた位置は、
+    # ドット自体の外（マスク範囲外）かつ影の範囲内になる想定
+    dx = int(shadow_cfg["offset"][0] * W)
+    shadow_probe = (int(0.5 * H) + dx, int(0.5 * W) + dx)
+    far_probe = (10, 10)  # 影・ドットどちらの影響も受けないはずの隅
+    diff_shadow_area = int(np.abs(
+        frame_no_shadow[shadow_probe].astype(int) - frame_with_shadow[shadow_probe].astype(int)).sum())
+    diff_far_area = int(np.abs(
+        frame_no_shadow[far_probe].astype(int) - frame_with_shadow[far_probe].astype(int)).sum())
+    check(diff_shadow_area > 20,
+          f"影のオフセット方向の画素がshadow有無で変化している（画素は暗くなる想定, diff={diff_shadow_area}）")
+    check(diff_far_area == 0,
+          f"影・人物から離れた隅の画素はshadow有無で変化しない（diff={diff_far_area}）")
+    check(bool(np.all(frame_with_shadow[shadow_probe] <= frame_no_shadow[shadow_probe] + 1)),
+          "影が乗った画素は、影が無い場合より暗い（黒を alpha で重ねているため）")
+
+    has_rembg = False
+    try:
+        import rembg  # noqa: F401
+        has_rembg = True
+    except ImportError:
+        pass
+
+    if not has_rembg:
+        print("  [skip] rembg が未インストールのため mask='auto'/'auto+brush' の検証は省略します"
+              "（requirements-extract.txt を pip install すれば実行されます）")
+    else:
+        print("")
+        print("=== mask='auto'：自動切り抜き（rembg）を使ったフルレンダリングが成功し、キャッシュが効く ===")
+        auto_cache_dir = os.path.join(tmpdir, "auto_cache")
+        auto_project = {
+            "version": 1, "video": "dummy_input.mp4",
+            "output": {"width": W, "height": int(H)},
+            "style": {
+                "freeze_sec": 1.0, "audio_during_freeze": "mute",
+                "mask": "auto", "mask_options": {"model": "isnet-general-use"},
+                "reveal": "wipe", "shadow": shadow_cfg,
+            },
+            "freezes": [{"time": 2.5, "name": "自動くん"}],
+        }
+        auto_json_path = os.path.join(tmpdir, "auto_project.json")
+        import json as json_mod
+        with open(auto_json_path, "w", encoding="utf-8") as f:
+            json_mod.dump(auto_project, f, ensure_ascii=False)
+        loaded_auto = render.load_project(auto_json_path)
+        out_auto = os.path.join(tmpdir, "auto_out.mp4")
+        old_cwd_auto = os.getcwd()
+        try:
+            os.chdir(tmpdir)  # render()のcache_dirはcwd基準のcache/なので、tmpdir配下に閉じ込める
+            t0 = time.time()
+            render.render(loaded_auto, auto_json_path, video_path, out_auto)
+            elapsed_auto = time.time() - t0
+        finally:
+            os.chdir(old_cwd_auto)
+        check(os.path.exists(out_auto) and os.path.getsize(out_auto) > 0,
+              f"mask='auto' のフルレンダリングが成功する（{elapsed_auto:.1f}秒）")
+        cache_dir_used = os.path.join(tmpdir, "cache")
+        cache_files = [f for f in os.listdir(cache_dir_used)] if os.path.isdir(cache_dir_used) else []
+        check(len(cache_files) >= 1, f"自動切り抜きのキャッシュ(.npz)が作られる: {cache_files}")
+
+        print("")
+        print("=== mask='auto+brush'：addストロークで自動アルファに領域を足し足せる ===")
+        rgb_frame = render.grab_frame_at(video_path, 2.5, W, H, fps)[:, :, ::-1]
+        from PIL import Image
+        import extract
+        base_alpha, _elapsed, _session = extract.extract_alpha(
+            Image.fromarray(rgb_frame), model_name="isnet-general-use")
+        base_alpha = np.array(base_alpha)[:, :, 3]
+        # 左上の隅（自動切り抜きでは前景と判定されないはずの領域）にaddストロークを描き足す
+        corrected = render.apply_brush_correction(
+            base_alpha, [{"width": 0.08, "mode": "add", "points": [[0.05, 0.05], [0.05, 0.05]]}],
+            W, H, 0.08, "round")
+        check(int(corrected[int(0.05 * H), int(0.05 * W)]) > int(base_alpha[int(0.05 * H), int(0.05 * W)]),
+              "addストロークを描いた場所は、自動アルファ単体より値が大きくなる（塗り足された）")
 
     # ------------------------------------------------------------------
     # 6) 効果音の外部ファイル優先（assets/sfx/を差し替えれば使われる）
