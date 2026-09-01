@@ -395,12 +395,15 @@ test("buildProjectJSON: shadowEnabledがtrueならstyle.shadowを契約どおり
   });
 });
 
-test("buildProjectJSON: shadowEnabledがfalseならstyle.shadowを省略する（render.pyの無効化デフォルトと同じ）", () => {
+test("buildProjectJSON: shadowEnabledがfalseならstyle.shadow={enabled:false}を明示的に出力する（キー省略はしない）", () => {
+  // render.pyのresolve_shadow_configは"shadow"キー省略時を「既定で有効」と解釈するため、
+  // オフにした意図を確実に伝えるには{"enabled": false}を明示する必要がある
+  // （キーを省略すると実機で意図せず影が有効になってしまう不具合の再発防止）。
   const state = sampleState();
   const project = core.buildProjectJSON(state);
   assert.strictEqual(project.style.mono_contrast, 1.0);
   assert.strictEqual(project.style.title_bounce, false);
-  assert.strictEqual("shadow" in project.style, false);
+  assert.deepStrictEqual(project.style.shadow, { enabled: false });
   assert.strictEqual(project.logo, undefined);
 });
 
@@ -477,7 +480,7 @@ test("parseProjectJSON: logo.backgroundが省略されていれば既定値'auto
   assert.strictEqual(loaded.logo.background, "auto");
 });
 
-test("parseProjectJSON: 新キーを含まない旧JSONは、影なし(shadowEnabled=false)に解決される（後方互換）", () => {
+test("parseProjectJSON: 'shadow'キーも旧film_offsetも含まない旧JSONは、既定で影が有効に解決される（実機で影が出ない不具合の再発防止）", () => {
   const loaded = core.parseProjectJSON({
     version: 1, video: "x.mp4",
     style: { freeze_sec: 2.5, font: "assets/fonts/CustomFont.ttf" },
@@ -485,9 +488,40 @@ test("parseProjectJSON: 新キーを含まない旧JSONは、影なし(shadowEna
   });
   assert.strictEqual(loaded.monoContrast, 1.0);
   assert.strictEqual(loaded.titleBounce, false);
-  assert.strictEqual(loaded.shadowEnabled, false);
+  assert.strictEqual(loaded.shadowEnabled, true);
   assert.strictEqual(loaded.shadowColor, core.DEFAULT_SHADOW.color);
+  assert.strictEqual(loaded.shadowAlpha, core.DEFAULT_SHADOW.alpha);
+  assert.strictEqual(loaded.shadowDistanceRatio, core.DEFAULT_SHADOW.distance);
+  assert.strictEqual(loaded.shadowDirection, core.DEFAULT_SHADOW.direction);
   assert.strictEqual(loaded.logo, null);
+});
+
+test("parseProjectJSON: \"shadow\": null は明示的な無効化として解決される", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { shadow: null },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, false);
+});
+
+test("parseProjectJSON: \"shadow\": {\"enabled\": false} は明示的な無効化として解決される", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { shadow: { enabled: false } },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, false);
+});
+
+test("parseProjectJSON: \"shadow\": {} （enabledキー無し）は有効のまま既定値で解決される", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    style: { shadow: {} },
+    freezes: []
+  });
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowColor, core.DEFAULT_SHADOW.color);
 });
 
 test("parseProjectJSON: 旧film_offset/film_color/film_alpha（film_offsetが非ゼロ）はshadowへ後方互換で読み替える", () => {
@@ -515,13 +549,16 @@ test("parseProjectJSON: 旧film_offsetが負の値なら方向leftに読み替�
   assert.strictEqual(loaded.shadowDirection, "left");
 });
 
-test("parseProjectJSON: 旧film_offsetが[0,0]（既定のまま）なら影なしのまま", () => {
+test("parseProjectJSON: 旧film_offsetが[0,0]（既定のまま）で'shadow'キーも無ければ、既定で影が有効になる", () => {
+  // film_offset=[0,0]は「後方互換の読み替えを起動しない」だけであり、"shadow"キー自体は
+  // やはり無いので、新仕様の「省略時は既定で有効」が適用される。
   const loaded = core.parseProjectJSON({
     version: 1, video: "x.mp4",
     style: { film_offset: [0, 0], film_color: "#112233", film_alpha: 0.7 },
     freezes: []
   });
-  assert.strictEqual(loaded.shadowEnabled, false);
+  assert.strictEqual(loaded.shadowEnabled, true);
+  assert.strictEqual(loaded.shadowColor, core.DEFAULT_SHADOW.color);
 });
 
 test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として1.2秒", () => {

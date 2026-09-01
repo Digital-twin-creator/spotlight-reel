@@ -256,6 +256,10 @@ try:
     print("=== ブラシ完了後の白フェード（brush_fade_sec） ===")
     for label, fade_sec in (("既定(0.3)", None), ("無効化(0)", 0.0)):
         fz = dict(freezes[0])
+        # このテストは brush_fade_sec 単体の挙動を見るためのものなので、
+        # 既定で有効になった影のスライドイン演出（無関係な画素変化の原因になる）は
+        # 明示的に無効化しておく。
+        fz["shadow"] = None
         if fade_sec is not None:
             fz["brush_fade_sec"] = fade_sec
         plan = render.plan_freezes([fz], fps, src_frames)[0]
@@ -426,9 +430,16 @@ try:
 
     print("")
     print("=== shadow演出：旧film_offset/film_color/film_alphaは後方互換で読み替えられる ===")
-    legacy_fz = make_dot_freeze(shadow=None, extra={
+    # make_dot_freeze(shadow=None) は "shadow" キーを明示的にNoneにする（＝新仕様での明示的な
+    # 無効化）ため、ここでは使えない。後方互換の読み替えが効くのは「"shadow" キー自体が
+    # 無い」場合だけなので、base_style（"shadow"キーを含まない）から直接組み立てる。
+    legacy_fz = dict(base_style)
+    legacy_fz.update({
+        "time": 2.5, "name": "", "sfx": None,
+        "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
         "film_offset": [0.08, 0.0], "film_color": "#000000", "film_alpha": 0.9,
     })
+    check("shadow" not in legacy_fz, "テスト前提：legacy_fzは'shadow'キー自体を持たない")
     legacy_cfg = render.resolve_shadow_config(legacy_fz)
     check(legacy_cfg is not None, "film_offsetが非ゼロならshadow未指定でも影設定が解決される（後方互換）")
     check(legacy_cfg is not None and legacy_cfg["direction"] == "right" and abs(legacy_cfg["distance"] - 0.08) < 1e-6,
@@ -442,6 +453,47 @@ try:
 
     zero_legacy_cfg = render.resolve_shadow_config(make_dot_freeze(shadow=None))
     check(zero_legacy_cfg is None, "film_offsetが[0,0]（既定）のままなら、shadowもNone（影演出なし。完全後方互換）")
+
+    print("")
+    print("=== shadow演出：'shadow'キー省略時は既定で有効になる（実機で影が出ない不具合の回帰防止） ===")
+    no_shadow_key_fz = dict(base_style)
+    no_shadow_key_fz.update({
+        "time": 2.5, "name": "", "sfx": None,
+        "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+    })
+    check("shadow" not in no_shadow_key_fz, "テスト前提：'shadow'キー自体を持たない")
+
+    default_cfg = render.resolve_shadow_config(no_shadow_key_fz)
+    check(default_cfg is not None, "'shadow'キー省略時、resolve_shadow_configはNoneではなく既定設定を返す")
+    check(default_cfg is not None
+          and default_cfg["color"] == render.SHADOW_COLOR_DEFAULT
+          and abs(default_cfg["alpha"] - render.SHADOW_ALPHA_DEFAULT) < 1e-9
+          and abs(default_cfg["distance"] - render.SHADOW_DISTANCE_DEFAULT) < 1e-9
+          and default_cfg["direction"] == "auto"
+          and abs(default_cfg["offset_y"] - render.SHADOW_OFFSET_Y_DEFAULT) < 1e-9
+          and default_cfg["blur"] == 0.0,
+          f"既定設定の内容がSHADOW_*_DEFAULTと一致する: {default_cfg}")
+
+    _plan_default, frames_default = render_freeze_frames(no_shadow_key_fz)
+    check(_plan_default["n_slide_in"] > 0,
+          "'shadow'キー省略時もn_slide_inが0より大きい（実際にスライド演出が動く）")
+    default_landed = frames_default[_plan_default["n_hold"] + _plan_default["n_brush"] + _plan_default["n_slide_in"]]
+    diff_default_origin = int(np.abs(
+        plain_bg[origin_probe].astype(int) - default_landed[origin_probe].astype(int)).sum())
+    check(diff_default_origin > 20,
+          f"'shadow'キー省略時も、実際にレンダリングすると影が描画される（diff={diff_default_origin}）")
+
+    check(render.resolve_shadow_config(dict(no_shadow_key_fz, shadow=None)) is None,
+          '"shadow": null は明示的に無効化される')
+    check(render.resolve_shadow_config(dict(no_shadow_key_fz, shadow={"enabled": False})) is None,
+          '"shadow": {"enabled": false} は明示的に無効化される')
+    check(render.resolve_shadow_config(dict(no_shadow_key_fz, shadow={})) is not None,
+          '"shadow": {} （enabledキー無し）は有効のまま既定値で埋められる')
+    enabled_true_cfg = render.resolve_shadow_config(
+        dict(no_shadow_key_fz, shadow={"enabled": True, "color": "#ABCDEF"}))
+    check(enabled_true_cfg is not None and enabled_true_cfg["color"] == "#ABCDEF",
+          '"shadow": {"enabled": true, "color": "#ABCDEF"} は指定値どおり有効になる: '
+          f"{enabled_true_cfg}")
 
     print("")
     print("=== shadow演出：direction='auto'は人物マスクの位置に応じて左右が反転する ===")
@@ -498,6 +550,20 @@ try:
           "resolve_shadow_auto_direction: 画面左寄りのマスクは'left'と判定される")
     check(render.resolve_shadow_auto_direction(center_mask, W) == "right",
           "resolve_shadow_auto_direction: 画面中心±5%以内のマスクは既定の'right'になる")
+
+    # 単体関数だけでなく、実際のレンダリングパイプライン（plan_freezes→iter_freeze_frames）を
+    # 通しても同じ結果になることを改めて確認する（中心ぴったりのダミー人物）
+    center_dummy_landed = landed_frame_for(make_side_freeze(0.5))
+    center_right_probe = (int(0.5 * H), min(W - 1, int(0.5 * W) + dx))
+    _plan_center_ns, frames_center_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
+        "strokes": [{"width": 0.12, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+    }))
+    center_no_shadow = frames_center_ns[_plan_center_ns["n_hold"] + _plan_center_ns["n_brush"]]
+    diff_center_at_right_probe = int(np.abs(
+        center_no_shadow[center_right_probe].astype(int) - center_dummy_landed[center_right_probe].astype(int)).sum())
+    check(diff_center_at_right_probe > 20,
+          "実レンダリングでも、画面中心ぴったりのダミー人物ではdirection='auto'が既定の'right'を選び、"
+          f"右側で影が見える（diff={diff_center_at_right_probe}）")
 
     print("")
     print("=== --preview：影のスライド前後で2枚のPNGを出力する ===")

@@ -61,10 +61,14 @@ DEFAULT_STYLE = {
     "mask": "brush",              # brush | auto | auto+brush（マスクの作り方。省略時は従来どおりブラシ）
     "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool}（mask="auto"/"auto+brush"時のみ使用）
     "reveal": "wipe",             # wipe | fade | brush（人物の出現アニメ。brushはauto+brushでのみ有効）
-    # 影（フィルム色）演出。省略/Noneで無効。
+    # 影（フィルム色）演出はキーをここに含めない（意図的）。
+    # style/freezeのJSONに"shadow"キーが無い場合、resolve_shadow_config()は既定で
+    # 影を有効にする（フルデフォルト値）。DEFAULT_STYLEにここで既定値を持たせてしまうと
+    # 「JSON側で省略された」ことと「明示的に"shadow": nullが指定された」ことを
+    # 区別できなくなってしまうため、あえて持たせていない。
     # {"color": "#RRGGBB", "alpha": 0〜1, "distance": 出力幅比, "direction": "auto"|"left"|"right",
     #  "offset_y": 出力幅比, "blur": 出力幅比（既定0＝従来のフィルム色ベタ塗り）, "slide_sec": 秒}
-    "shadow": None,
+    # 無効にしたい場合は "shadow": null または "shadow": {"enabled": false} を指定する。
 }
 
 TITLE_ALIGNS = ("left", "center", "right")
@@ -631,57 +635,81 @@ def draw_stroke_mask(geo, W, H, start_len, end_len, shape):
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 
+def _shadow_cfg_from_dict(shadow):
+    """shadow辞書（キー省略可）から、既定値で埋めた実効設定を組み立てる"""
+    shadow = shadow if isinstance(shadow, dict) else {}
+    direction = shadow.get("direction") or "auto"
+    if direction not in SHADOW_DIRECTIONS:
+        warn(f"shadow.direction='{direction}' は未知の値です。auto として扱います。")
+        direction = "auto"
+    return {
+        "color": shadow.get("color") or SHADOW_COLOR_DEFAULT,
+        "alpha": float(np.clip(shadow.get("alpha", SHADOW_ALPHA_DEFAULT), 0.0, 1.0)),
+        "distance": float(shadow.get("distance", SHADOW_DISTANCE_DEFAULT)),
+        "direction": direction,
+        "offset_y": float(shadow.get("offset_y", SHADOW_OFFSET_Y_DEFAULT)),
+        "blur": max(0.0, float(shadow.get("blur", 0.0))),
+        "slide_sec": max(1e-3, float(shadow.get("slide_sec", SHADOW_SLIDE_IN_SEC_DEFAULT))),
+    }
+
+
 def resolve_shadow_config(fz):
     """
     fz（style×freezeマージ済み辞書）から実効的な影(shadow)設定を解決する。
-    shadowが明示されていればそれを使う。無ければ、旧film_offset/film_color/film_alpha
-    （film_offsetのx・yのどちらかが非ゼロの場合のみ）から後方互換の設定を組み立てる。
-    どちらも無効なら None（影演出なし。スライドアニメも発生しない）。
+
+    - "shadow" キーが無ければ、既定で影を**有効**にする（フルデフォルト値）。
+      ただし旧 film_offset/film_color/film_alpha が明示されていれば
+      （film_offsetのx・yのどちらかが非ゼロの場合のみ）、そちらを後方互換で優先する。
+    - "shadow": null、または "shadow": {"enabled": false} は明示的な無効化。
+    - それ以外の "shadow": {...} は指定値（省略項目は既定値）で有効化する。
+
+    DEFAULT_STYLEには"shadow"キーを含めていないため、"shadow" in fz は
+    「JSON側（style/freezeのどちらか）で実際にこのキーが書かれていたか」を正しく表す
+    （書かれていなければ既定で有効、明示的にnull/enabled:falseなら無効、という区別に使う）。
     """
-    shadow = fz.get("shadow")
-    if shadow:
-        direction = shadow.get("direction") or "auto"
-        if direction not in SHADOW_DIRECTIONS:
-            warn(f"shadow.direction='{direction}' は未知の値です。auto として扱います。")
-            direction = "auto"
-        return {
-            "color": shadow.get("color") or SHADOW_COLOR_DEFAULT,
-            "alpha": float(np.clip(shadow.get("alpha", SHADOW_ALPHA_DEFAULT), 0.0, 1.0)),
-            "distance": float(shadow.get("distance", SHADOW_DISTANCE_DEFAULT)),
-            "direction": direction,
-            "offset_y": float(shadow.get("offset_y", SHADOW_OFFSET_Y_DEFAULT)),
-            "blur": max(0.0, float(shadow.get("blur", 0.0))),
-            "slide_sec": max(1e-3, float(shadow.get("slide_sec", SHADOW_SLIDE_IN_SEC_DEFAULT))),
-        }
+    if "shadow" in fz:
+        shadow = fz.get("shadow")
+        if shadow is None:
+            return None
+        if isinstance(shadow, dict) and shadow.get("enabled") is False:
+            return None
+        return _shadow_cfg_from_dict(shadow)
 
     film_offset = fz.get("film_offset") or (0.0, 0.0)
     fx, fy = float(film_offset[0]), float(film_offset[1])
-    if fx == 0.0 and fy == 0.0:
-        return None
-    return {
-        "color": fz.get("film_color") or SHADOW_COLOR_DEFAULT,
-        "alpha": float(np.clip(fz.get("film_alpha", SHADOW_ALPHA_DEFAULT), 0.0, 1.0)),
-        "distance": abs(fx),
-        "direction": "right" if fx >= 0 else "left",
-        "offset_y": fy,
-        "blur": 0.0,
-        "slide_sec": SHADOW_SLIDE_IN_SEC_DEFAULT,
-    }
+    if fx != 0.0 or fy != 0.0:
+        return {
+            "color": fz.get("film_color") or SHADOW_COLOR_DEFAULT,
+            "alpha": float(np.clip(fz.get("film_alpha", SHADOW_ALPHA_DEFAULT), 0.0, 1.0)),
+            "distance": abs(fx),
+            "direction": "right" if fx >= 0 else "left",
+            "offset_y": fy,
+            "blur": 0.0,
+            "slide_sec": SHADOW_SLIDE_IN_SEC_DEFAULT,
+        }
+
+    # "shadow"キーも旧film_offsetも無い → 既定で影を有効にする
+    return _shadow_cfg_from_dict(None)
+
+
+def mask_x_center_ratio(mask_u8, W):
+    """人物マスクのX重心を、画面幅に対する比率(0〜1)で返す。マスクが空なら0.5（中心）を返す"""
+    total = float(mask_u8.astype(np.float64).sum())
+    if total <= 0:
+        return 0.5
+    xs = np.arange(W, dtype=np.float64)
+    col_sums = mask_u8.astype(np.float64).sum(axis=0)
+    weighted_x = float((col_sums * xs).sum() / total)
+    return weighted_x / W
 
 
 def resolve_shadow_auto_direction(mask_u8, W):
     """人物マスクのX重心を計算し、画面中心より右／左／あいまい（既定right）を返す"""
-    total = float(mask_u8.astype(np.float64).sum())
-    if total <= 0:
+    ratio = mask_x_center_ratio(mask_u8, W)
+    band = SHADOW_DIRECTION_AMBIGUOUS_BAND
+    if ratio > 0.5 + band:
         return "right"
-    xs = np.arange(W, dtype=np.float64)
-    col_sums = mask_u8.astype(np.float64).sum(axis=0)
-    weighted_x = float((col_sums * xs).sum() / total)
-    center = W / 2.0
-    band = W * SHADOW_DIRECTION_AMBIGUOUS_BAND
-    if weighted_x > center + band:
-        return "right"
-    if weighted_x < center - band:
+    if ratio < 0.5 - band:
         return "left"
     return "right"
 
@@ -1471,6 +1499,18 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint)
 
     done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
+
+    # Actionsのログで各フリーズの影の状態を確認できるようにする（実機で影が出ない場合の
+    # 切り分け用：有効/無効・実際に使われる方向・人物マスクのX重心を毎回出力する）
+    mask_x_ratio = mask_x_center_ratio(done_mask, W)
+    freeze_label = f"t={float(fz.get('time', 0.0)):.2f}s 「{fz.get('name', '')}」"
+    if shadow_cfg:
+        shadow_direction = shadow_cfg.get("direction", "auto")
+        if shadow_direction not in ("left", "right"):
+            shadow_direction = resolve_shadow_auto_direction(done_mask, W)
+        log(f"  フリーズ {freeze_label}: 影=有効 方向={shadow_direction} マスクX中心={mask_x_ratio:.2f}")
+    else:
+        log(f"  フリーズ {freeze_label}: 影=無効 マスクX中心={mask_x_ratio:.2f}")
 
     # 3) 影演出のスライドイン：Ease-Out Expoで着地先ベクトルまでずらし、影を覗かせる
     slide_dx, slide_dy = 0.0, 0.0

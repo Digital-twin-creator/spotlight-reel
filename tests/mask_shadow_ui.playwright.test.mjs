@@ -155,9 +155,21 @@ async function main() {
   console.log("=== 全体設定：影（フィルム色）のオン/オフとスライダー・方向 ===");
   // 全体設定は <details class="card"> の中にあり既定で閉じているため、先に開く
   await page.evaluate(() => { document.getElementById("settingsSection").open = true; });
-  check(await page.isHidden("#shadowOptionsBody"), "影は既定でオフ（shadowOptionsBodyが隠れている）");
-  let styleNoShadow = (await page.evaluate(() => buildProjectJSON(appState))).style;
-  check(!("shadow" in styleNoShadow), "影オフ時はstyle.shadowキーが省略される");
+
+  // 実機で影が一切出ない不具合の再発防止：エディタの初期状態は必ずONで、
+  // 何も操作していない状態でもJSONにstyle.shadowが（{"enabled":false}ではなく）出力される。
+  check(await page.isChecked("#shadowEnabledCheckbox"), "影は初期状態でON（shadowEnabledCheckboxがチェック済み）");
+  check(await page.isVisible("#shadowOptionsBody"), "影は初期状態でON（shadowOptionsBodyが表示されている）");
+  const styleInitial = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(!!styleInitial.shadow && styleInitial.shadow.enabled !== false,
+    "初期状態（未操作）でもstyle.shadowが有効な設定として出力される: " + JSON.stringify(styleInitial.shadow));
+
+  await page.uncheck("#shadowEnabledCheckbox");
+  check(await page.isHidden("#shadowOptionsBody"), "オフにするとshadowOptionsBodyが隠れる");
+  const styleDisabled = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(JSON.stringify(styleDisabled.shadow) === JSON.stringify({ enabled: false }),
+    "オフにするとstyle.shadow={\"enabled\":false}が明示的に出力される（キー省略ではない）: " +
+    JSON.stringify(styleDisabled.shadow));
 
   await page.check("#shadowEnabledCheckbox");
   check(await page.isVisible("#shadowOptionsBody"), "影オンでshadowOptionsBodyが表示される");

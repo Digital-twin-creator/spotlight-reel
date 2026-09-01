@@ -363,20 +363,25 @@ python extract.py input.png --out outdir/ \
   `fade`（0.3秒でフェードイン） / `brush`（`mask: "auto+brush"` のときのみ有効。従来どおり
   ストロークで塗って出す）のいずれか。`mask: "brush"` のときは無関係（常にストローク自体の
   伸びるアニメーションになる）。
-- `shadow`：影（フィルム色）演出。省略・`null` で無効（既定）。詳細は
+- `shadow`：影（フィルム色）演出。**省略時は既定で有効**（`SHADOW_*_DEFAULT` の値。
+  詳細は次項）。無効にしたい場合は `"shadow": null` または
+  `"shadow": {"enabled": false}` を明示的に指定してください。詳細は
   [「影（`shadow`）演出」](#影shadow演出)を参照。
 - `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
-- 新しいキー（`mono_contrast` / `shadow` / `title_font` /
+- 新しいキー（`mono_contrast` / `title_font` /
   `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo` /
   `mask` / `mask_options` / `reveal`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
-  （後方互換。詳細は次項）。`brush_fade_sec` だけは例外で、省略時は既定値 `0.3` が
-  使われます（＝白い絵の具がフェードアウトする、見た目の不具合修正が既定で有効）。
+  （後方互換。詳細は次項）。`brush_fade_sec` と `shadow` は例外です：
+  `brush_fade_sec` は省略時に既定値 `0.3` が使われます（＝白い絵の具がフェードアウトする、
+  見た目の不具合修正が既定で有効）。`shadow` は省略時に**既定で有効**になります
+  （詳細は[「影（`shadow`）演出」](#影shadow演出)を参照。無効にするには明示的な指定が必要）。
   旧バージョンの `film_offset` / `film_color` / `film_alpha`（`style` のみ・人物ごとの
-  上書き不可）は今も読み込めますが、`film_offset` が非ゼロなら `shadow` の設定へ
-  自動的に読み替えられます（詳細は次項）。新規プロジェクトでは `shadow` を使ってください。
+  上書き不可）は今も読み込めますが、`shadow` キー自体が無く、かつ `film_offset` が
+  非ゼロの場合のみ `shadow` の設定へ自動的に読み替えられます（詳細は次項）。
+  新規プロジェクトでは `shadow` を使ってください。
 
 ### 演出仕様（1フリーズあたり）
 
@@ -455,9 +460,19 @@ python extract.py input.png --out outdir/ \
 
 人物アルファ（`mask` が `brush` / `auto` / `auto+brush` のいずれでも）がある場合に、
 人物が少しスライドして自分の「元の位置」に影を覗かせる演出です。
-省略・`null` で無効（既定）。以前の「フィルム色縁取り」（旧 `film_offset` /
-`film_color` / `film_alpha`）と統合されており、影レイヤーの実体はそのフィルム色の
-ベタ塗りです（`blur: 0` が既定のため、既定では従来どおりのベタ塗りに見えます）。
+以前の「フィルム色縁取り」（旧 `film_offset` / `film_color` / `film_alpha`）と
+統合されており、影レイヤーの実体はそのフィルム色のベタ塗りです（`blur: 0` が既定の
+ため、既定では従来どおりのベタ塗りに見えます）。
+
+**`shadow` キー省略時は既定で有効**（`SHADOW_*_DEFAULT` の値。下記JSON例と同じ内容）
+になります。無効にしたい場合は、次のいずれかを明示的に指定してください：
+
+- `"shadow": null`
+- `"shadow": {"enabled": false}`
+
+（`style.shadow` に `{"enabled": true, ...}` のように明示的に `enabled: true` を
+書いても、他のキーを省略すれば既定値で埋められます。`enabled` キー自体を持たない
+`"shadow": {...}` も同様に有効として扱われます。）
 
 ```json
 "shadow": {
@@ -484,13 +499,19 @@ python extract.py input.png --out outdir/ \
   人物を元の位置へ戻し、影を隠す（詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)参照）
 - レイヤー順は **背景 → 影（人物の元の位置。動かない） → 人物（スライド後の位置）
   → テロップ → ロゴ**
-- 旧バージョンの `film_offset` / `film_color` / `film_alpha` は、`film_offset` が
-  非ゼロなら次のように `shadow` へ自動的に読み替えられます（後方互換）：
+- 旧バージョンの `film_offset` / `film_color` / `film_alpha` は、`shadow` キー自体が
+  無く、かつ `film_offset` が非ゼロなら次のように `shadow` へ自動的に読み替えられます
+  （後方互換）：
   `color` ← `film_color`、`alpha` ← `film_alpha`、`distance` ← `|film_offset.x|`、
   `direction` ← `film_offset.x >= 0 ? "right" : "left"`、`offset_y` ← `film_offset.y`、
   `blur` ← `0`、`slide_sec` ← 既定値 `0.2`。ただし旧バージョンの縁取りは静止した
   演出だったのに対し、読み替え後は新しいスライドアニメが付くため、見た目は
   「フィルム色そのもの」から「スライドして現れる影」に変わります。
+- **確認用のログ**：`render.py` はフリーズごとに `影=有効/無効`・`方向=left/right`・
+  `マスクX中心=0.xx`（人物マスクのX重心、画面幅に対する比率。0が左端、1が右端）を
+  標準出力に出します（GitHub Actionsのログでも確認できます）。実機で影が出ない・
+  向きが想定と違う場合は、まずこのログで「影が無効になっていないか」「方向が
+  意図どおりか」を確認してください。
 
 ### ラストロゴ（`logo`）演出「インパクト着地＋光彩スイープ」
 

@@ -642,8 +642,10 @@ var DEFAULT_STYLE = {
   audio_during_freeze: "mute",
   mask: "brush",
   mask_options: null,
-  reveal: "wipe",
-  shadow: null
+  reveal: "wipe"
+  // 影（フィルム色）演出はここに既定値を含めない（意図的。render.pyのDEFAULT_STYLEと同じ理由）。
+  // JSON側に"shadow"キーが無ければ既定で有効（parseProjectJSON参照）。ここに既定値を
+  // 持たせてしまうと「省略された」ことと「明示的にnullが指定された」ことを区別できなくなる。
 };
 var TITLE_ALIGNS = ["left", "center", "right"];
 var MASK_MODES = ["brush", "auto", "auto+brush"];
@@ -899,17 +901,20 @@ function buildProjectJSON(state) {
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
   }
-  if (state.shadowEnabled) {
-    project.style.shadow = {
-      color: state.shadowColor || DEFAULT_SHADOW.color,
-      alpha: round(numOr(state.shadowAlpha, DEFAULT_SHADOW.alpha), 2),
-      distance: round(numOr(state.shadowDistanceRatio, DEFAULT_SHADOW.distance), 4),
-      direction: resolveShadowDirection(state.shadowDirection),
-      offset_y: DEFAULT_SHADOW.offsetY,
-      blur: round(numOr(state.shadowBlurRatio, DEFAULT_SHADOW.blur), 4),
-      slide_sec: DEFAULT_SHADOW.slideSec
-    };
-  }
+  // style.shadow は常に出力する（enabled/disabledどちらの状態も明示するため）。
+  // render.pyのresolve_shadow_configは"shadow"キー省略時を「既定で有効」と解釈するので、
+  // オフの意図を確実に伝えるにはキー自体を省略せず {"enabled": false} を明示する必要がある。
+  project.style.shadow = state.shadowEnabled
+    ? {
+        color: state.shadowColor || DEFAULT_SHADOW.color,
+        alpha: round(numOr(state.shadowAlpha, DEFAULT_SHADOW.alpha), 2),
+        distance: round(numOr(state.shadowDistanceRatio, DEFAULT_SHADOW.distance), 4),
+        direction: resolveShadowDirection(state.shadowDirection),
+        offset_y: DEFAULT_SHADOW.offsetY,
+        blur: round(numOr(state.shadowBlurRatio, DEFAULT_SHADOW.blur), 4),
+        slide_sec: DEFAULT_SHADOW.slideSec
+      }
+    : { enabled: false };
   if (state.logo && state.logo.imageName) {
     project.logo = {
       image: state.logo.imageName,
@@ -965,33 +970,64 @@ function parseProjectJSON(json) {
       })
     };
   });
-  // 影（フィルム色）：shadowが明示されていればそれを使う。無ければ、旧film_offset/
-  // film_color/film_alpha（film_offsetが非ゼロの場合のみ）から後方互換で読み替える
-  // （render.py の resolve_shadow_config と同じ考え方）。
-  var filmOffsetArr = Array.isArray(style.film_offset) ? style.film_offset : DEFAULT_STYLE.film_offset;
-  var shadowEnabled = false;
-  var shadowColor = DEFAULT_SHADOW.color;
-  var shadowAlpha = DEFAULT_SHADOW.alpha;
-  var shadowDistanceRatio = DEFAULT_SHADOW.distance;
-  var shadowDirection = DEFAULT_SHADOW.direction;
-  var shadowBlurRatio = DEFAULT_SHADOW.blur;
-  if (style.shadow && typeof style.shadow === "object") {
-    shadowEnabled = true;
-    shadowColor = style.shadow.color || DEFAULT_SHADOW.color;
-    shadowAlpha = numOr(style.shadow.alpha, DEFAULT_SHADOW.alpha);
-    shadowDistanceRatio = numOr(style.shadow.distance, DEFAULT_SHADOW.distance);
-    shadowDirection = resolveShadowDirection(style.shadow.direction);
-    shadowBlurRatio = numOr(style.shadow.blur, DEFAULT_SHADOW.blur);
+  // 影（フィルム色）の解決。render.pyのresolve_shadow_configと同じロジック：
+  //  - JSON（rawStyle）に"shadow"キーが無ければ、既定で影を有効にする（フルデフォルト値）。
+  //    ただし旧film_offset/film_color/film_alphaが明示されていれば
+  //    （film_offsetが非ゼロの場合のみ）、そちらを後方互換で優先する。
+  //  - "shadow": null、または "shadow": {"enabled": false} は明示的な無効化。
+  //  - それ以外の "shadow": {...} は指定値（省略項目は既定値）で有効化する。
+  // DEFAULT_STYLEには"shadow"キーを含めていないため、rawStyleの生の値（mergeされたstyle
+  // ではなく）で"shadow" in rawStyleを判定する必要がある（"省略"と"明示的なnull"を
+  // 区別するため）。
+  var rawStyle = json.style || {};
+  var shadowEnabled, shadowColor, shadowAlpha, shadowDistanceRatio, shadowDirection, shadowBlurRatio;
+  function shadowCfgFromDict(shadow) {
+    shadow = (shadow && typeof shadow === "object") ? shadow : {};
+    return {
+      color: shadow.color || DEFAULT_SHADOW.color,
+      alpha: numOr(shadow.alpha, DEFAULT_SHADOW.alpha),
+      distanceRatio: numOr(shadow.distance, DEFAULT_SHADOW.distance),
+      direction: resolveShadowDirection(shadow.direction),
+      blurRatio: numOr(shadow.blur, DEFAULT_SHADOW.blur)
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(rawStyle, "shadow")) {
+    var shadowRaw = rawStyle.shadow;
+    if (shadowRaw === null || (shadowRaw && typeof shadowRaw === "object" && shadowRaw.enabled === false)) {
+      shadowEnabled = false;
+      shadowColor = DEFAULT_SHADOW.color;
+      shadowAlpha = DEFAULT_SHADOW.alpha;
+      shadowDistanceRatio = DEFAULT_SHADOW.distance;
+      shadowDirection = DEFAULT_SHADOW.direction;
+      shadowBlurRatio = DEFAULT_SHADOW.blur;
+    } else {
+      shadowEnabled = true;
+      var resolved = shadowCfgFromDict(shadowRaw);
+      shadowColor = resolved.color;
+      shadowAlpha = resolved.alpha;
+      shadowDistanceRatio = resolved.distanceRatio;
+      shadowDirection = resolved.direction;
+      shadowBlurRatio = resolved.blurRatio;
+    }
   } else {
-    var legacyFx = numOr(filmOffsetArr[0], 0);
-    var legacyFy = numOr(filmOffsetArr[1], 0);
+    var filmOffsetArr = Array.isArray(rawStyle.film_offset) ? rawStyle.film_offset : null;
+    var legacyFx = filmOffsetArr ? numOr(filmOffsetArr[0], 0) : 0;
+    var legacyFy = filmOffsetArr ? numOr(filmOffsetArr[1], 0) : 0;
     if (legacyFx !== 0 || legacyFy !== 0) {
       shadowEnabled = true;
-      shadowColor = style.film_color || DEFAULT_SHADOW.color;
-      shadowAlpha = numOr(style.film_alpha, DEFAULT_SHADOW.alpha);
+      shadowColor = rawStyle.film_color || DEFAULT_SHADOW.color;
+      shadowAlpha = numOr(rawStyle.film_alpha, DEFAULT_SHADOW.alpha);
       shadowDistanceRatio = Math.abs(legacyFx);
       shadowDirection = legacyFx >= 0 ? "right" : "left";
       shadowBlurRatio = 0;
+    } else {
+      // "shadow"キーも旧film_offsetも無い → 既定で影を有効にする
+      shadowEnabled = true;
+      shadowColor = DEFAULT_SHADOW.color;
+      shadowAlpha = DEFAULT_SHADOW.alpha;
+      shadowDistanceRatio = DEFAULT_SHADOW.distance;
+      shadowDirection = DEFAULT_SHADOW.direction;
+      shadowBlurRatio = DEFAULT_SHADOW.blur;
     }
   }
   var logo = null;
@@ -1548,7 +1584,7 @@ var appState = {
   titleAlign: DEFAULT_STYLE.title_align,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   reveal: DEFAULT_STYLE.reveal,
-  shadowEnabled: false,
+  shadowEnabled: true,  // render.pyの既定（"shadow"キー省略時は有効）に合わせ、エディタも初期状態でON
   shadowColor: DEFAULT_SHADOW.color,
   shadowAlpha: DEFAULT_SHADOW.alpha,
   shadowDistanceRatio: DEFAULT_SHADOW.distance,
