@@ -321,8 +321,8 @@ test("DEFAULT_SHADOW: render.pyのSHADOW_*_DEFAULTと同じ値", () => {
   assert.strictEqual(core.DEFAULT_SHADOW.direction, "auto");
   assert.strictEqual(core.DEFAULT_SHADOW.offsetY, 0.02);
   assert.strictEqual(core.DEFAULT_SHADOW.blur, 0.0);
-  assert.strictEqual(core.DEFAULT_SHADOW.slideSec, 0.2);
-  assert.strictEqual(core.SHADOW_SLIDE_BACK_SEC, 0.1);
+  assert.strictEqual(core.DEFAULT_SHADOW.slideSec, 0.5);
+  assert.strictEqual(core.SHADOW_SLIDE_BACK_SEC, 0.25);
 });
 
 test("resolveShadowDirection: auto/left/right以外はautoにフォールバックする", () => {
@@ -355,14 +355,17 @@ test("resolveShadowAutoDirection: 中心±5%以内のあいまいなマスク、
   assert.strictEqual(core.resolveShadowAutoDirection(new Uint8Array(W * H), W, H), "right");
 });
 
-test("easeOutExpo: t=0で0、t=1で1、序盤速く終盤で急停止するイージング（render.pyのease_out_expoと同じ）", () => {
-  assert.strictEqual(core.easeOutExpo(0), 0);
-  assert.strictEqual(core.easeOutExpo(1), 1);
-  assert.strictEqual(core.easeOutExpo(0.1), 1 - Math.pow(2, -1)); // 1 - 2^(-10*0.1)
-  // 序盤(0→0.3)の伸びが終盤(0.7→1.0)の伸びよりずっと大きい（急停止イージングの形）
-  const earlyGain = core.easeOutExpo(0.3) - core.easeOutExpo(0);
-  const lateGain = core.easeOutExpo(1.0) - core.easeOutExpo(0.7);
+test("easeOutCubic: t=0で0、t=1で1、Ease-Out Expoのような急停止ではなく最後まで滑らかに減速するイージング（render.pyのease_out_cubicと同じ）", () => {
+  assert.strictEqual(core.easeOutCubic(0), 0);
+  assert.strictEqual(core.easeOutCubic(1), 1);
+  assert.strictEqual(core.easeOutCubic(0.5), 1 - Math.pow(0.5, 3)); // 1 - (1-0.5)^3
+  // 序盤(0→0.3)の伸びのほうが終盤(0.7→1.0)より大きい（ease-outの形は保つ）
+  const earlyGain = core.easeOutCubic(0.3) - core.easeOutCubic(0);
+  const lateGain = core.easeOutCubic(1.0) - core.easeOutCubic(0.7);
   assert.ok(earlyGain > lateGain);
+  // ただしEase-Out Expo（旧実装）ほど極端に序盤へ偏らない：終盤にも十分な伸びが残る
+  // （「急停止」しない滑らかな減速であることの確認）
+  assert.ok(lateGain > 0.02);
 });
 
 test("telopBounceScale: t=0で130%、t=1で100%になる急停止イージング", () => {
@@ -561,11 +564,11 @@ test("parseProjectJSON: 旧film_offsetが[0,0]（既定のまま）で'shadow'�
   assert.strictEqual(loaded.shadowColor, core.DEFAULT_SHADOW.color);
 });
 
-test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として1.2秒", () => {
-  assert.strictEqual(core.DEFAULT_LOGO_DURATION_SEC, 1.2);
+test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として2.2秒（以前は1.2秒。より重厚な表示に変更）", () => {
+  assert.strictEqual(core.DEFAULT_LOGO_DURATION_SEC, 2.2);
 });
 
-test("logoLandingScale/logoLandingEase: t=0で初期スケール(200%)・不透明度0、t=1で100%・不透明度1", () => {
+test("logoLandingScale/logoLandingEase: t=0で初期スケール(160%)・不透明度0、t=1で100%・不透明度1", () => {
   assert.strictEqual(core.logoLandingScale(0), core.LOGO_PREVIEW_SCALE_FROM);
   assert.strictEqual(core.logoLandingScale(1), 1);
   assert.strictEqual(core.logoLandingEase(0), 0);

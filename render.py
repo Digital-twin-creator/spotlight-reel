@@ -96,19 +96,24 @@ DEFAULT_LOGO_AT = "end"       # logo.at の既定値・不明値のフォール�
 DEFAULT_LOGO_BACKGROUND = "auto"  # logo.background の既定値・不明値のフォールバック先
 
 # ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
-# scale_from/landing_sec/sweep_sec/flash_strength/duration_sec は logo{} 配下でJSON上書き可能
-# （resolve_logo_paramsで読み取る）。それ以外（フラッシュの長さ・スイープ帯の幅比率・
-# 保持中に拡大する先・終了直前の暗転時間・last_freezeのクロスフェード時間）は固定値。
-LOGO_SCALE_FROM_DEFAULT = 2.0     # スタンバイ時の初期スケール（200%）
-LOGO_LANDING_SEC_DEFAULT = 0.15   # 着地（縮小＋フェードイン）にかかる時間
+# scale_from/landing_sec/sweep_start_sec/sweep_sec/flash_strength/shake_sec/shake_amplitude/
+# duration_sec/fade_sec/sfx_tail は logo{} 配下でJSON上書き可能（resolve_logo_paramsで読み取る）。
+# それ以外（フラッシュの長さ・スイープ帯の幅比率・保持中に拡大する先・
+# last_freezeのクロスフェード時間・SFXテールの長さ）は固定値。
+LOGO_SCALE_FROM_DEFAULT = 1.6     # スタンバイ時の初期スケール（160%。以前は200%）
+LOGO_LANDING_SEC_DEFAULT = 0.45   # 着地（縮小＋フェードイン）にかかる時間（以前は0.15秒）
 LOGO_FLASH_SEC = 0.05             # 着地直後の白フラッシュの長さ（固定）
-LOGO_FLASH_STRENGTH_DEFAULT = 0.6  # 白フラッシュの強さ（screen合成、0〜1）
-LOGO_SWEEP_SEC_DEFAULT = 0.30     # 光彩スイープにかかる時間
+LOGO_FLASH_STRENGTH_DEFAULT = 0.35  # 白フラッシュの強さ（screen合成、0〜1。以前は0.6）
+LOGO_SHAKE_SEC_DEFAULT = 0.25         # 着地の瞬間に画面全体をわずかに揺らす時間
+LOGO_SHAKE_AMPLITUDE_RATIO_DEFAULT = 0.004  # 揺れの振幅（出力幅に対する比率）
+LOGO_SWEEP_START_SEC_DEFAULT = 0.35   # 着地完了から光彩スイープ開始までの時間
+LOGO_SWEEP_SEC_DEFAULT = 0.70     # 光彩スイープにかかる時間（以前は0.3秒）
 LOGO_SWEEP_WIDTH_RATIO = 0.25     # 光彩帯の幅（ロゴ幅に対する比率、固定）
 LOGO_GROW_TO = 1.03               # 保持中にゆっくり拡大する先（103%、固定）
-LOGO_FADE_TO_BG_SEC = 0.3         # 終了直前、背景色へ暗転する時間（固定）
+LOGO_FADE_TO_BG_SEC_DEFAULT = 0.6  # 終了直前、背景色へ暗転する時間（以前は0.3秒）
 LOGO_BG_CROSSFADE_SEC = 0.15      # last_freeze時、静止フレーム→背景色へのフェード時間（固定）
-LOGO_DURATION_SEC_DEFAULT = 1.2   # 着地からの表示時間の既定値
+LOGO_DURATION_SEC_DEFAULT = 2.2   # 着地からの表示時間の既定値（以前は1.2秒）
+LOGO_SFX_TAIL_SEC = 0.6           # logo.sfx_tail=true（既定）のときに付ける減衰ディレイの長さ（固定）
 
 AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
@@ -128,8 +133,8 @@ SHADOW_ALPHA_DEFAULT = 0.8
 SHADOW_DISTANCE_DEFAULT = 0.03    # 出力幅に対する比率
 SHADOW_OFFSET_Y_DEFAULT = 0.02    # 出力幅に対する比率（下方向）
 SHADOW_DIRECTION_AMBIGUOUS_BAND = 0.05  # マスクX重心が画面中心からこの比率以内なら「あいまい」とみなす
-SHADOW_SLIDE_IN_SEC_DEFAULT = 0.2  # スライドインの時間（既定。shadow.slide_secで上書き可）
-SHADOW_SLIDE_BACK_SEC = 0.1        # 保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定）
+SHADOW_SLIDE_IN_SEC_DEFAULT = 0.5  # スライドインの時間（既定。shadow.slide_secで上書き可）
+SHADOW_SLIDE_BACK_SEC = 0.25       # 保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定）
 
 
 # ---------------------------------------------------------------------------
@@ -439,14 +444,15 @@ def translate_mask(img, dx, dy):
                            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
-def ease_out_expo(t):
-    """Ease-Out Expo：1 - 2^(-10t)（t=0→0, t=1→1、序盤速く終盤で急停止）"""
+def ease_out_cubic(t):
+    """
+    Ease-Out Cubic：1 - (1-t)^3（t=0→0, t=1→1）。
+    以前使っていたEase-Out Expoは終盤ほぼ完全に停止する「急停止」の動きだったが、
+    影のスライドをよりゆっくり・滑らかに見せるため、速度が最後まで滑らかに
+    減衰していくCubicに変更した（急停止ではない）。
+    """
     t = float(np.clip(t, 0.0, 1.0))
-    if t <= 0.0:
-        return 0.0
-    if t >= 1.0:
-        return 1.0
-    return 1.0 - 2.0 ** (-10.0 * t)
+    return 1.0 - (1.0 - t) ** 3
 
 
 # ---------------------------------------------------------------------------
@@ -1104,34 +1110,15 @@ def load_logo_image(path):
     return bgr, alpha
 
 
-def cubic_bezier_easing(x1, y1, x2, y2):
-    """
-    CSSのcubic-bezier(x1,y1,x2,y2)相当のイージング関数を返す。
-    制御点は (0,0)-(x1,y1)-(x2,y2)-(1,1)。x(u)=t となるuを二分探索で求め、y(u)を返す
-    （x1,x2が0〜1の通常のイージング曲線ではx(u)は単調増加なので二分探索で解ける）。
-    """
-    def bezier(u, p1, p2):
-        return 3 * (1 - u) ** 2 * u * p1 + 3 * (1 - u) * u ** 2 * p2 + u ** 3
-
-    def ease(t):
-        t = float(np.clip(t, 0.0, 1.0))
-        if t <= 0.0:
-            return 0.0
-        if t >= 1.0:
-            return 1.0
-        lo, hi = 0.0, 1.0
-        for _ in range(24):
-            mid = (lo + hi) / 2.0
-            if bezier(mid, x1, x2) < t:
-                lo = mid
-            else:
-                hi = mid
-        return bezier((lo + hi) / 2.0, y1, y2)
-    return ease
+def ease_out_quart(t):
+    """Ease-Out Quart：1 - (1-t)^4（t=0→0, t=1→1）。ロゴ着地アニメーションに使う"""
+    t = float(np.clip(t, 0.0, 1.0))
+    return 1.0 - (1.0 - t) ** 4
 
 
-# ロゴ着地アニメーションのイージング（Ease-Out Expo相当のcubic-bezier）
-LOGO_LANDING_EASE = cubic_bezier_easing(0.16, 1.0, 0.3, 1.0)
+# ロゴ着地アニメーションのイージング。より重厚な着地に見せるため、
+# 以前のEase-Out Expo相当から素直なEase-Out Quartへ変更した。
+LOGO_LANDING_EASE = ease_out_quart
 
 
 def logo_corner_avg_color(logo_bgr):
@@ -1174,9 +1161,14 @@ def resolve_logo_params(logo_cfg):
     return {
         "scale_from": float(logo_cfg.get("scale_from", LOGO_SCALE_FROM_DEFAULT)),
         "landing_sec": max(1e-3, float(logo_cfg.get("landing_sec", LOGO_LANDING_SEC_DEFAULT))),
+        "sweep_start_sec": max(0.0, float(logo_cfg.get("sweep_start_sec", LOGO_SWEEP_START_SEC_DEFAULT))),
         "sweep_sec": max(1e-3, float(logo_cfg.get("sweep_sec", LOGO_SWEEP_SEC_DEFAULT))),
         "flash_strength": float(np.clip(logo_cfg.get("flash_strength", LOGO_FLASH_STRENGTH_DEFAULT), 0.0, 1.0)),
+        "shake_sec": max(0.0, float(logo_cfg.get("shake_sec", LOGO_SHAKE_SEC_DEFAULT))),
+        "shake_amplitude": max(0.0, float(logo_cfg.get("shake_amplitude", LOGO_SHAKE_AMPLITUDE_RATIO_DEFAULT))),
         "duration_sec": max(0.0, float(logo_cfg.get("duration_sec", LOGO_DURATION_SEC_DEFAULT))),
+        "fade_sec": max(0.0, float(logo_cfg.get("fade_sec", LOGO_FADE_TO_BG_SEC_DEFAULT))),
+        "sfx_tail": bool(logo_cfg.get("sfx_tail", True)),
     }
 
 
@@ -1266,25 +1258,31 @@ def logo_animation_state(elapsed_sec, params):
       scale       : ロゴの表示スケール
       opacity     : ロゴ自体の不透明度（着地中のフェードイン用）
       flash_amt   : 画面全体に乗せる白フラッシュの強さ(0〜1)
+      shake_dx/dy : 画面全体のわずかな揺れ（出力幅に対する比率）
       sweep_t     : 光彩スイープの進行度(0〜1)。スイープ区間外は None
       fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
-    タイムライン（既定値の場合）:
-      0.00-0.15  着地（Scale 200%→100%・不透明度0→1、Ease-Out Expo）
-      0.15-0.20  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
-      0.20-0.50  光彩スイープ
-      0.50-終了  ゆっくり103%まで拡大、最後の0.3秒で背景色へ暗転
+    タイムライン（既定値の場合。より重厚でゆっくりした着地にするため、旧バージョンより
+    全体的に間を長く取っている）:
+      0.00-0.45  着地（Scale 160%→100%・不透明度0→1、Ease-Out Quart）
+      0.45-0.50  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
+      0.45-0.70  画面全体のわずかな揺れ（振幅0.4%、0.25秒で減衰）
+      0.80-1.50  光彩スイープ（着地から0.35秒後に開始、0.70秒かける）
+      1.50-終了  ゆっくり103%まで拡大、最後の0.6秒で背景色へ暗転
     """
     landing = params["landing_sec"]
     flash_sec = LOGO_FLASH_SEC
+    shake_sec = params["shake_sec"]
+    shake_amplitude = params["shake_amplitude"]
     sweep_sec = params["sweep_sec"]
     duration_sec = params["duration_sec"]
     scale_from = params["scale_from"]
+    fade_sec = params["fade_sec"]
 
     seg_end = landing + duration_sec
-    sweep_start = landing + flash_sec
+    sweep_start = landing + params["sweep_start_sec"]
     sweep_end = sweep_start + sweep_sec
     hold_start = sweep_end
-    fade_start = max(hold_start, seg_end - LOGO_FADE_TO_BG_SEC)
+    fade_start = max(hold_start, seg_end - fade_sec)
 
     t = float(np.clip(elapsed_sec, 0.0, seg_end))
 
@@ -1306,6 +1304,14 @@ def logo_animation_state(elapsed_sec, params):
     else:
         flash_amt = 0.0
 
+    if shake_sec > 0 and landing <= t < landing + shake_sec:
+        shake_t = (t - landing) / shake_sec
+        decay = 1.0 - shake_t  # 線形減衰（急停止ではなく徐々に収まる）
+        shake_dx = shake_amplitude * math.sin(shake_t * 2.0 * math.pi * 3.0) * decay
+        shake_dy = shake_amplitude * math.sin(shake_t * 2.0 * math.pi * 3.0 + math.pi / 2.0) * decay * 0.6
+    else:
+        shake_dx, shake_dy = 0.0, 0.0
+
     if sweep_start <= t < sweep_end:
         sweep_t = (t - sweep_start) / sweep_sec
     else:
@@ -1318,14 +1324,29 @@ def logo_animation_state(elapsed_sec, params):
 
     return {
         "scale": scale, "opacity": opacity, "flash_amt": flash_amt,
+        "shake_dx": shake_dx, "shake_dy": shake_dy,
         "sweep_t": sweep_t, "fade_amt": fade_amt,
     }
+
+
+def shake_translate(img, dx, dy):
+    """
+    画面シェイク用のごくわずかな平行移動。translate_mask（影演出用）とは異なり、
+    はみ出た縁を黒で埋めると視認できてしまうため、縁を伸ばして埋める
+    （cv2.BORDER_REPLICATE）。
+    """
+    if abs(dx) < 0.05 and abs(dy) < 0.05:
+        return img
+    H, W = img.shape[:2]
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REPLICATE)
 
 
 def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_sec, params, bg_color):
     """
     着地開始からの経過秒数 elapsed_sec における1フレームを作る
-    （スタンバイ→着地→白フラッシュ→光彩スイープ→ゆっくり拡大→背景色へ暗転）。
+    （スタンバイ→着地＋画面の揺れ→白フラッシュ→光彩スイープ→ゆっくり拡大→背景色へ暗転）。
     backdrop: ロゴの後ろに敷く画面（背景色の単色フレーム、または映像/静止フレーム）。
     """
     if logo_bgr is None:
@@ -1340,6 +1361,9 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
     logo_layer = np.clip(logo_layer, 0, 255).astype(np.uint8)
 
     frame = composite_logo(backdrop, logo_layer, logo_alpha, W, H, state["scale"], opacity=state["opacity"])
+
+    if state["shake_dx"] != 0.0 or state["shake_dy"] != 0.0:
+        frame = shake_translate(frame, state["shake_dx"] * W, state["shake_dy"] * W)
 
     if state["flash_amt"] > 0:
         f = screen_blend_white(frame.astype(np.float32), state["flash_amt"])
@@ -1461,7 +1485,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
          出現アニメ自体はreveal="wipe"/"fade"/"brush"で統一的に扱う。人物は「元の位置」に
          出現するため、この間は影（あれば）が人物の真下に完全に隠れて見えない）
       3. 影演出のスライドイン（shadowがあれば）：人物レイヤーだけを0→distanceまで
-         Ease-Out Expoでずらし、元の位置に静止したままの影を覗かせる。着地の瞬間に
+         Ease-Out Cubicでずらし、元の位置に静止したままの影を覗かせる。着地の瞬間に
          テロップ（バウンス可）と効果音が発火する
       4. 保持（plan["show_logo"]がTrueなら、rest終盤で「静止フレーム→背景色のクロスフェード
          （logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」を行う）
@@ -1512,13 +1536,13 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     else:
         log(f"  フリーズ {freeze_label}: 影=無効 マスクX中心={mask_x_ratio:.2f}")
 
-    # 3) 影演出のスライドイン：Ease-Out Expoで着地先ベクトルまでずらし、影を覗かせる
+    # 3) 影演出のスライドイン：Ease-Out Cubicで着地先ベクトルまでずらし、影を覗かせる
     slide_dx, slide_dy = 0.0, 0.0
     if shadow_cfg and plan["n_slide_in"] > 0:
         slide_dx, slide_dy = compute_shadow_slide_vector(done_mask, W, shadow_cfg)
         for i in range(plan["n_slide_in"]):
             t = (i + 1) / float(plan["n_slide_in"])
-            eased = ease_out_expo(t)
+            eased = ease_out_cubic(t)
             yield composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * eased, slide_dy=slide_dy * eased)
 
@@ -1588,7 +1612,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     if shadow_cfg and plan["n_slide_back"] > 0:
         for i in range(plan["n_slide_back"]):
             t = (i + 1) / float(plan["n_slide_back"])
-            remaining = 1.0 - ease_out_expo(t)
+            remaining = 1.0 - ease_out_cubic(t)
             out = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining)
             out = blend_telop(out, telop_bgr, telop_alpha, 1.0)
@@ -1687,6 +1711,32 @@ def mix_into(buf, snippet, start):
         buf[start:start + n] += snippet[:n]
 
 
+def apply_reverb_tail(samples, sr, tail_sec=LOGO_SFX_TAIL_SEC, num_taps=6, decay=0.55):
+    """
+    logo.sfx_tail=true（既定）のとき、ロゴ着地SEに簡易的な減衰ディレイ（コムフィルタ風の
+    エコーを tail_sec 秒かけて重ねる、簡易的なリバーブ近似）を付け、低音の余韻が残る
+    ようにする。本格的な畳み込みリバーブではなく、num_taps回、一定間隔で少しずつ
+    遅れて重なる減衰エコーを足すだけの簡易版。戻り値は元よりtail_sec秒分長くなる。
+    """
+    if samples.size == 0 or tail_sec <= 0:
+        return samples
+    tail_samples = int(round(tail_sec * sr))
+    if tail_samples <= 0:
+        return samples
+    out = np.zeros((len(samples) + tail_samples, samples.shape[1]), np.float32)
+    out[:len(samples)] += samples
+    tap_interval = max(1, tail_samples // num_taps)
+    amp = 1.0
+    for i in range(1, num_taps + 1):
+        amp *= decay
+        offset = tap_interval * i
+        n = min(len(samples), len(out) - offset)
+        if n <= 0:
+            break
+        out[offset:offset + n] += samples[:n] * amp
+    return out
+
+
 def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUDIO_CH,
                  logo_sfx_path=None, logo_at=None, logo_extra_frames=0, logo_params=None):
     """
@@ -1704,7 +1754,7 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         orig = np.concatenate([orig, np.zeros((need - len(orig), ch), np.float32)])
 
     pieces = []
-    sfx_jobs = []      # (新タイムライン上の開始サンプル, wavパス)
+    sfx_jobs = []      # (新タイムライン上の開始サンプル, wavパス, 減衰ディレイを付けるか)
     cursor = 0         # 元音声の読み出し位置
     written = 0        # 出力済みサンプル数（＝新タイムラインの位置）
 
@@ -1735,14 +1785,14 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         landed_frame_offset = plan["n_hold"] + plan["n_brush"] + plan.get("n_slide_in", 0)
         if plan["sfx_path"]:
             offset = frames_to_samples(landed_frame_offset, fps, sr)
-            sfx_jobs.append((written + offset, plan["sfx_path"]))
+            sfx_jobs.append((written + offset, plan["sfx_path"], False))
         # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）にSEを鳴らす
         if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
             logo_offset = frames_to_samples(
                 landed_frame_offset + plan.get("logo_crossfade_frames", 0) + landing_frames,
                 fps, sr)
-            sfx_jobs.append((written + logo_offset, logo_sfx_path))
+            sfx_jobs.append((written + logo_offset, logo_sfx_path, logo_params["sfx_tail"]))
         written += n_samples
 
     pieces.append(orig[cursor:])
@@ -1754,12 +1804,15 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         if logo_sfx_path and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
             landing_samples = frames_to_samples(landing_frames, fps, sr)
-            sfx_jobs.append((tail_start + landing_samples, logo_sfx_path))
+            sfx_jobs.append((tail_start + landing_samples, logo_sfx_path, logo_params["sfx_tail"]))
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
 
-    for start, path in sfx_jobs:
-        mix_into(out, decode_audio(path, sr, ch), start)
+    for start, path, apply_tail in sfx_jobs:
+        snippet = decode_audio(path, sr, ch)
+        if apply_tail:
+            snippet = apply_reverb_tail(snippet, sr)
+        mix_into(out, snippet, start)
 
     return np.clip(out, -1.0, 1.0)
 

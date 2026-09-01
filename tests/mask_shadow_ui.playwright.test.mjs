@@ -72,9 +72,36 @@ async function main() {
 
   await page.goto(BASE_URL, { waitUntil: "load" });
   await page.click("#guideCloseBtn").catch(() => {});
+
+  // 影の既定値をOFF→ONに変更した際、同じ動画ファイル名で保存されていた「旧バージョン
+  // (v1)・影OFFの復元データ」が動画選択のたびに自動復元され、新しい既定値(影ON)を
+  // 静かに上書きしてしまう回帰があった（storageKeyをv2へ変更して修正）。
+  // ここでは、その旧v1データを意図的に仕込んでから動画を選び、無視されることを確認する。
+  const videoBaseName = path.basename(videoPath);
+  await page.evaluate((name) => {
+    localStorage.setItem("spotlightReel:v1:" + name, JSON.stringify({
+      freezeSec: 1.2, brushAnimSec: 0.8, monoContrast: 1.0, titleBounce: false,
+      audioDuringFreeze: "mute", reveal: "wipe",
+      shadowEnabled: false, shadowOffsetRatio: 0, shadowBlurRatio: 0.02, shadowAlpha: 0.6,
+      outputMode: "original", freezes: [], logo: null
+    }));
+  }, videoBaseName);
+
   await page.setInputFiles("#videoFileInput", videoPath);
   await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+  // duration>0はメタデータ取得の合図でしかなく、ライブ描画ループがplayerCanvasに
+  // 最初の有効なフレームを描き終えるまでには一瞬かかる。ここで少し待たないと、
+  // 直後の「＋フリーズ追加」がcaptureFrozenFrame（黒フレーム検出＋1回だけ100ms再試行）の
+  // 両方の試行タイミングにぶつかり、静止フレーム取得に失敗することがある。
+  await page.waitForTimeout(300);
 
+  console.log("=== 影：旧v1形式のlocalStorageデータ(影OFF)は無視され、新しい既定値(影ON)が使われる ===");
+  check((await page.evaluate(() => appState.shadowEnabled)) === true,
+    "同名動画で保存されていた旧v1データ(影OFF)があっても、appState.shadowEnabledは新しい既定値trueのまま");
+  check(await page.isChecked("#shadowEnabledCheckbox"),
+    "同上：shadowEnabledCheckboxもチェック済みのまま（旧データに上書きされない）");
+
+  console.log("");
   console.log("=== 切り抜き方法セレクタの基本動作 ===");
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });

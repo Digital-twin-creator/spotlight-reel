@@ -494,6 +494,29 @@ try:
     check(enabled_true_cfg is not None and enabled_true_cfg["color"] == "#ABCDEF",
           '"shadow": {"enabled": true, "color": "#ABCDEF"} は指定値どおり有効になる: '
           f"{enabled_true_cfg}")
+    check(abs(default_cfg["slide_sec"] - render.SHADOW_SLIDE_IN_SEC_DEFAULT) < 1e-9
+          and abs(render.SHADOW_SLIDE_IN_SEC_DEFAULT - 0.5) < 1e-9,
+          f"slide_secの既定値は0.5秒（ゆっくりめのスライド）: {default_cfg['slide_sec']}")
+
+    print("")
+    print("=== shadow演出：スライドはEase-Out Cubic（急停止ではなく滑らかに減速）で行われる ===")
+    check(render.SHADOW_SLIDE_BACK_SEC == 0.25, "スライドバックの時間は0.25秒（既定0.1秒から変更）")
+    check(render.ease_out_cubic(0) == 0.0 and render.ease_out_cubic(1) == 1.0,
+          "ease_out_cubic: t=0で0、t=1で1")
+    check(abs(render.ease_out_cubic(0.5) - (1 - 0.5 ** 3)) < 1e-9,
+          "ease_out_cubic: t=0.5で 1-(1-0.5)^3 になる")
+    early_gain = render.ease_out_cubic(0.3) - render.ease_out_cubic(0.0)
+    late_gain = render.ease_out_cubic(1.0) - render.ease_out_cubic(0.7)
+    check(early_gain > late_gain > 0.02,
+          f"ease-outの形（序盤>終盤）は保ちつつ、終盤(0.7→1.0)にも十分な伸びが残る"
+          f"（急停止しない）: early={early_gain:.4f} late={late_gain:.4f}")
+    # 旧Ease-Out Expoと比べ、終盤の伸びが明らかに大きい（急停止ではなく滑らかに減速している証拠）
+    def _ease_out_expo_reference(t):
+        return 1.0 if t >= 1.0 else (0.0 if t <= 0.0 else 1.0 - 2.0 ** (-10.0 * t))
+    expo_late_gain = _ease_out_expo_reference(1.0) - _ease_out_expo_reference(0.7)
+    check(late_gain > expo_late_gain * 2,
+          f"旧Ease-Out Expo（終盤の伸びexpo_late={expo_late_gain:.4f}）より、"
+          f"新Ease-Out Cubic（late={late_gain:.4f}）のほうが終盤も滑らかに動き続ける")
 
     print("")
     print("=== shadow演出：direction='auto'は人物マスクの位置に応じて左右が反転する ===")
@@ -595,6 +618,146 @@ try:
     after_img = cv2.imread(after_path)
     diff_preview = int(np.abs(before_img.astype(int) - after_img.astype(int)).sum())
     check(diff_preview > 0, f"スライド前後のPNGは見た目が異なる（影の有無, diff={diff_preview}）")
+
+    # ------------------------------------------------------------------
+    # 6.8) ラストロゴ演出「ゆっくり・重厚」への変更
+    # ------------------------------------------------------------------
+    print("")
+    print("=== ラストロゴ：既定値がよりゆっくり・重厚になっている ===")
+    default_logo_params = render.resolve_logo_params({})
+    check(abs(default_logo_params["scale_from"] - 1.6) < 1e-9,
+          f"scale_fromの既定は1.6（以前は2.0）: {default_logo_params['scale_from']}")
+    check(abs(default_logo_params["landing_sec"] - 0.45) < 1e-9,
+          f"landing_secの既定は0.45秒（以前は0.15秒）: {default_logo_params['landing_sec']}")
+    check(abs(default_logo_params["flash_strength"] - 0.35) < 1e-9,
+          f"flash_strengthの既定は0.35（以前は0.6）: {default_logo_params['flash_strength']}")
+    check(abs(default_logo_params["sweep_start_sec"] - 0.35) < 1e-9,
+          f"sweep_start_secの既定は0.35秒（着地完了からスイープ開始まで）: {default_logo_params['sweep_start_sec']}")
+    check(abs(default_logo_params["sweep_sec"] - 0.70) < 1e-9,
+          f"sweep_secの既定は0.70秒（以前は0.30秒）: {default_logo_params['sweep_sec']}")
+    check(abs(default_logo_params["shake_sec"] - 0.25) < 1e-9,
+          f"shake_secの既定は0.25秒: {default_logo_params['shake_sec']}")
+    check(abs(default_logo_params["shake_amplitude"] - 0.004) < 1e-9,
+          f"shake_amplitudeの既定は0.004（出力幅比0.4%）: {default_logo_params['shake_amplitude']}")
+    check(abs(default_logo_params["duration_sec"] - 2.2) < 1e-9,
+          f"duration_secの既定は2.2秒（以前は1.2秒）: {default_logo_params['duration_sec']}")
+    check(abs(default_logo_params["fade_sec"] - 0.6) < 1e-9,
+          f"fade_secの既定は0.6秒（以前は0.3秒）: {default_logo_params['fade_sec']}")
+    check(default_logo_params["sfx_tail"] is True, "sfx_tailの既定はTrue")
+
+    custom_logo_cfg = {
+        "scale_from": 1.3, "landing_sec": 0.2, "sweep_start_sec": 0.1, "sweep_sec": 0.4,
+        "flash_strength": 0.5, "shake_sec": 0.1, "shake_amplitude": 0.01,
+        "duration_sec": 1.0, "fade_sec": 0.2, "sfx_tail": False,
+    }
+    custom_logo_params = render.resolve_logo_params(custom_logo_cfg)
+    check(all(abs(custom_logo_params[k] - custom_logo_cfg[k]) < 1e-9
+              for k in ("scale_from", "landing_sec", "sweep_start_sec", "sweep_sec",
+                        "flash_strength", "shake_sec", "shake_amplitude", "duration_sec", "fade_sec")),
+          f"logo{{}}配下で全パラメータを上書きできる: {custom_logo_params}")
+    check(custom_logo_params["sfx_tail"] is False, "sfx_tail: false も上書きできる")
+
+    print("")
+    print("=== ラストロゴ：着地タイミング（Ease-Out Quart・揺れ・スイープ開始の遅延） ===")
+    check(render.ease_out_quart(0.0) == 0.0 and render.ease_out_quart(1.0) == 1.0,
+          "ease_out_quart: t=0で0、t=1で1")
+    check(abs(render.ease_out_quart(0.5) - (1 - 0.5 ** 4)) < 1e-9,
+          "ease_out_quart: t=0.5で 1-(1-0.5)^4 になる")
+
+    landing = default_logo_params["landing_sec"]
+    state_start = render.logo_animation_state(0.0, default_logo_params)
+    check(abs(state_start["scale"] - default_logo_params["scale_from"]) < 1e-6 and state_start["opacity"] == 0.0,
+          f"t=0はスタンバイ状態（scale={default_logo_params['scale_from']}, opacity=0）: {state_start}")
+    state_landed = render.logo_animation_state(landing, default_logo_params)
+    check(abs(state_landed["scale"] - 1.0) < 1e-6 and abs(state_landed["opacity"] - 1.0) < 1e-6,
+          f"着地完了時点(t=landing_sec)はscale=1.0, opacity=1.0: {state_landed}")
+
+    state_mid_flash = render.logo_animation_state(landing + 0.01, default_logo_params)
+    check(state_mid_flash["flash_amt"] > 0.2,
+          f"着地直後はフラッシュが発火している: {state_mid_flash['flash_amt']:.3f}")
+
+    state_mid_shake = render.logo_animation_state(landing + 0.05, default_logo_params)
+    check(abs(state_mid_shake["shake_dx"]) > 0 or abs(state_mid_shake["shake_dy"]) > 0,
+          f"着地直後は画面の揺れが発生している: dx={state_mid_shake['shake_dx']:.5f} dy={state_mid_shake['shake_dy']:.5f}")
+    state_after_shake = render.logo_animation_state(
+        landing + default_logo_params["shake_sec"] + 0.01, default_logo_params)
+    check(state_after_shake["shake_dx"] == 0.0 and state_after_shake["shake_dy"] == 0.0,
+          "揺れはshake_sec経過後は収まる（振幅0に戻る）")
+
+    just_before_sweep = render.logo_animation_state(
+        landing + default_logo_params["sweep_start_sec"] - 0.02, default_logo_params)
+    check(just_before_sweep["sweep_t"] is None,
+          "スイープはsweep_start_sec経過前はまだ始まらない（着地直後にすぐ始まらない＝間を置く）")
+    just_after_sweep = render.logo_animation_state(
+        landing + default_logo_params["sweep_start_sec"] + 0.02, default_logo_params)
+    check(just_after_sweep["sweep_t"] is not None and 0.0 <= just_after_sweep["sweep_t"] < 0.2,
+          f"sweep_start_sec経過後にスイープが始まる: {just_after_sweep['sweep_t']}")
+
+    seg_end = landing + default_logo_params["duration_sec"]
+    state_near_end = render.logo_animation_state(seg_end - 0.01, default_logo_params)
+    check(state_near_end["fade_amt"] > 0.9,
+          f"終了直前はほぼ完全に背景色へ暗転している: {state_near_end['fade_amt']:.3f}")
+
+    print("")
+    print("=== ラストロゴ：着地の瞬間の画面の揺れ（shake_translate）は実際に画素をずらす ===")
+    shake_test_img = np.zeros((100, 100, 3), np.uint8)
+    shake_test_img[40:60, 40:60] = 255
+    shaken = render.shake_translate(shake_test_img, 5.0, 2.0)
+    check(not np.array_equal(shake_test_img, shaken), "shake_translateは実際に画素をずらす")
+    check(np.array_equal(render.shake_translate(shake_test_img, 0.0, 0.0), shake_test_img),
+          "揺れ量が0のときは元画像のまま変化しない")
+    check(shaken.shape == shake_test_img.shape, "揺らしても画像サイズは変わらない")
+
+    print("")
+    print("=== ラストロゴ：sfx_tailで着地SEに減衰ディレイ（簡易リバーブ風テール）を付けられる ===")
+    sr = render.AUDIO_SR
+    rng = np.random.RandomState(0)
+    dsp_test_samples = rng.uniform(-0.3, 0.3, size=(int(0.3 * sr), 2)).astype(np.float32)
+    tailed = render.apply_reverb_tail(dsp_test_samples, sr, tail_sec=0.6)
+    check(len(tailed) == len(dsp_test_samples) + int(round(0.6 * sr)),
+          "apply_reverb_tailは元の長さ+tail_secぶん長くなる: "
+          f"{len(dsp_test_samples)} -> {len(tailed)}")
+    check(bool(np.any(np.abs(tailed[len(dsp_test_samples):]) > 1e-4)),
+          "延長された部分にもエコー由来の音量が残っている（テールがある）")
+    check(np.array_equal(render.apply_reverb_tail(dsp_test_samples, sr, tail_sec=0), dsp_test_samples),
+          "tail_sec=0なら音声は変化しない（長さも同じ）")
+
+    don_path = render.resolve_path(os.path.join("assets", "sfx", "don.wav"), [render.SCRIPT_DIR])
+    raw_don = render.decode_audio(don_path, render.AUDIO_SR, render.AUDIO_CH)
+    check(len(raw_don) > 0, "assets/sfx/don.wavが読み込める（着地SEの実ファイルでテールを確認する）")
+
+    logo_fz = dict(base_style)
+    logo_fz.update({"time": 2.5, "name": "", "sfx": None, "strokes": [], "shadow": None})
+    logo_cfg_tail = {"image": "store_logo.png", "at": "last_freeze", "sfx": "don"}
+    logo_params_tail = render.resolve_logo_params(logo_cfg_tail)
+    logo_params_no_tail = render.resolve_logo_params(dict(logo_cfg_tail, sfx_tail=False))
+
+    plans_logo = render.plan_freezes(
+        [logo_fz], fps, src_frames, logo=logo_cfg_tail, logo_at="last_freeze",
+        logo_total_frames=render.logo_total_frames_for(logo_params_tail, fps), logo_crossfade_frames=0)
+    plan0 = plans_logo[0]
+    check(plan0["show_logo"], "テスト前提：このフリーズでラストロゴが表示される設定になっている")
+
+    audio_tail = render.build_audio(video_path, plans_logo, fps, src_frames, True,
+                                     logo_sfx_path=don_path, logo_at="last_freeze",
+                                     logo_params=logo_params_tail)
+    audio_no_tail = render.build_audio(video_path, plans_logo, fps, src_frames, True,
+                                        logo_sfx_path=don_path, logo_at="last_freeze",
+                                        logo_params=logo_params_no_tail)
+
+    landed_frame_offset = plan0["n_hold"] + plan0["n_brush"] + plan0.get("n_slide_in", 0)
+    landing_frames = int(round(logo_params_tail["landing_sec"] * fps))
+    sfx_start_sample = render.frames_to_samples(
+        plan0["frame_index"] + landed_frame_offset + landing_frames, fps, render.AUDIO_SR)
+    probe_start = sfx_start_sample + len(raw_don) + int(0.05 * render.AUDIO_SR)
+    probe_end = probe_start + int(0.05 * render.AUDIO_SR)
+    tail_energy = float(np.abs(audio_tail[probe_start:probe_end]).mean())
+    no_tail_energy = float(np.abs(audio_no_tail[probe_start:probe_end]).mean())
+    check(tail_energy > 1e-4 and tail_energy > no_tail_energy * 3,
+          f"sfx_tail=Trueだと、生のSE終了直後にもエコーの音量が残る"
+          f"（tail={tail_energy:.5f} / no_tail={no_tail_energy:.5f}）")
+    check(no_tail_energy < 1e-3,
+          f"sfx_tail=Falseなら生のSE終了直後はほぼ無音のまま: {no_tail_energy:.5f}")
 
     has_rembg = False
     try:

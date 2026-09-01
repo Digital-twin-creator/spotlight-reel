@@ -101,8 +101,8 @@ async function main() {
   console.log("=== ラストロゴ：画像選択でlogoブロックが組み立てられる ===");
   check(await page.textContent("#logoFileName") === "まだロゴ画像が選ばれていません",
     "ロゴ未選択時の表示文言");
-  check(await page.inputValue("#logoDurationSlider") === "1.2",
-    "duration_secスライダーの既定値が1.2秒: " + (await page.inputValue("#logoDurationSlider")));
+  check(await page.inputValue("#logoDurationSlider") === "2.2",
+    "duration_secスライダーの既定値が2.2秒（以前は1.2秒）: " + (await page.inputValue("#logoDurationSlider")));
 
   await page.setInputFiles("#logoFileInput", logoPath);
   await page.selectOption("#logoAtSelect", "end");

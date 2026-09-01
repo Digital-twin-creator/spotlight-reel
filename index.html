@@ -529,8 +529,8 @@
         <span class="muted" id="logoColorHint">検出色</span>
       </div>
       <div class="field">
-        <label>duration_sec（着地からの表示時間） <span class="brush-slider-value" id="logoDurationValue">1.2秒</span></label>
-        <input type="range" id="logoDurationSlider" min="0.3" max="5" step="0.1" value="1.2">
+        <label>duration_sec（着地からの表示時間） <span class="brush-slider-value" id="logoDurationValue">2.2秒</span></label>
+        <input type="range" id="logoDurationSlider" min="0.3" max="5" step="0.1" value="2.2">
       </div>
       <div class="field">
         <label>効果音（着地の瞬間に発火）</label>
@@ -654,17 +654,19 @@ var SHADOW_DIRECTIONS = ["auto", "left", "right"];
 /** 影（フィルム色）のJSON契約上の既定値（render.pyのSHADOW_*_DEFAULTと同じ値） */
 var DEFAULT_SHADOW = {
   color: "#FF6432", alpha: 0.8, distance: 0.03, direction: "auto",
-  offsetY: 0.02, blur: 0.0, slideSec: 0.2
+  offsetY: 0.02, blur: 0.0, slideSec: 0.5
 };
 /** render.pyのSHADOW_SLIDE_BACK_SECと同じ値。保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定） */
-var SHADOW_SLIDE_BACK_SEC = 0.1;
+var SHADOW_SLIDE_BACK_SEC = 0.25;
 
-/** Ease-Out Expo：1 - 2^(-10t)（t=0→0, t=1→1、序盤速く終盤で急停止。render.pyのease_out_exptoと同じ） */
-function easeOutExpo(t) {
+/**
+ * Ease-Out Cubic：1 - (1-t)^3（t=0→0, t=1→1。render.pyのease_out_cubicと同じ）。
+ * 以前のEase-Out Expoは終盤ほぼ完全に停止する「急停止」の動きだったが、影のスライドを
+ * よりゆっくり・滑らかに見せるため、速度が最後まで滑らかに減衰していくCubicに変更した。
+ */
+function easeOutCubic(t) {
   t = clamp01(t);
-  if (t <= 0) return 0;
-  if (t >= 1) return 1;
-  return 1 - Math.pow(2, -10 * t);
+  return 1 - Math.pow(1 - t, 3);
 }
 /** render.pyのAUTO_REVEAL_WIPE_SEC/AUTO_REVEAL_FADE_SECと同じ値（mask="auto"/"auto+brush"の出現時間・固定） */
 var AUTO_REVEAL_WIPE_SEC = 0.4;
@@ -682,7 +684,7 @@ var FILM_COLOR_PRESETS = {
   yellow: "#FFC832"
 };
 var DEFAULT_LOGO_AT = "end";
-var DEFAULT_LOGO_DURATION_SEC = 1.2;
+var DEFAULT_LOGO_DURATION_SEC = 2.2;
 var DEFAULT_LOGO_BACKGROUND = "auto";
 
 function round(n, decimals) {
@@ -1309,13 +1311,12 @@ function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H) {
 }
 
 /**
- * ラストロゴの「着地」演出の簡易プレビュー用イージング。
- * render.py側は厳密なcubic-bezier(0.16,1,0.3,1)を使うが、プレビューは
- * 雰囲気が伝わればよいので同系統のease-out-quartで近似する。
+ * ラストロゴの「着地」演出の簡易プレビュー用イージング（render.pyのLOGO_*_DEFAULTと
+ * 同じ値。厳密な揺れ・フラッシュ・SFXテールまでは簡易プレビューでは再現しない）。
  */
-var LOGO_PREVIEW_SCALE_FROM = 2.0;
-var LOGO_PREVIEW_LANDING_SEC = 0.15;
-var LOGO_PREVIEW_SWEEP_SEC = 0.30;
+var LOGO_PREVIEW_SCALE_FROM = 1.6;
+var LOGO_PREVIEW_LANDING_SEC = 0.45;
+var LOGO_PREVIEW_SWEEP_SEC = 0.70;
 function logoLandingEase(t) {
   t = clamp01(t);
   return 1.0 - Math.pow(1.0 - t, 4);
@@ -1514,7 +1515,7 @@ if (typeof module !== "undefined" && module.exports) {
     SHADOW_DIRECTIONS: SHADOW_DIRECTIONS,
     resolveShadowDirection: resolveShadowDirection,
     resolveShadowAutoDirection: resolveShadowAutoDirection,
-    easeOutExpo: easeOutExpo,
+    easeOutCubic: easeOutCubic,
     AUTO_REVEAL_WIPE_SEC: AUTO_REVEAL_WIPE_SEC,
     AUTO_REVEAL_FADE_SEC: AUTO_REVEAL_FADE_SEC,
     resolveMaskMode: resolveMaskMode,
@@ -3127,14 +3128,14 @@ function startPreviewPlayback() {
           var afterReveal = revealElapsed - BRUSH;
           var slideDx = slideDxFull, slideDy = slideDyFull;
           if (afterReveal < SLIDE_IN) {
-            var slideT = easeOutExpo(afterReveal / SLIDE_IN);
+            var slideT = easeOutCubic(afterReveal / SLIDE_IN);
             slideDx = slideDxFull * slideT;
             slideDy = slideDyFull * slideT;
           } else {
             var afterLanding = afterReveal - SLIDE_IN;
             if (afterLanding >= REST && SLIDE_BACK > 0) {
               var backT = Math.min(1, (afterLanding - REST) / SLIDE_BACK);
-              var remaining = 1 - easeOutExpo(backT);
+              var remaining = 1 - easeOutCubic(backT);
               slideDx = slideDxFull * remaining;
               slideDy = slideDyFull * remaining;
             }
@@ -3546,7 +3547,12 @@ function applySettingsToInputs() {
 
 /* ---------------- localStorage ---------------- */
 
-function storageKey(name) { return "spotlightReel:v1:" + name; }
+// v1→v2：影（フィルム色）の既定値をOFF→ONに変更したことに伴うバージョンアップ。
+// 同じ動画ファイル名で以前保存された v1 のデータ（旧既定＝影OFF）が、動画を
+// 選び直すたびに自動復元されて新しい既定値（影ON）を静かに上書きしてしまう
+// 不具合があったため、キーのバージョンを上げて古い保存データを読み込まないようにする
+// （実機のレンダリングで人物が全く動かず影も出ない不具合の原因の1つだった）。
+function storageKey(name) { return "spotlightReel:v2:" + name; }
 
 function saveToLocalStorage() {
   if (!appState.videoFileName) return;
