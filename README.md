@@ -20,22 +20,28 @@ spotlight-reel/
 ├── index.html            # スマホ用エディタ（GitHub Pagesで公開、ビルド不要の単一HTML）
 ├── diag.html              # 動画再生・シークの自己診断ツール（実機での不具合調査用）
 ├── render.py              # メイン：JSON + 動画 → MP4
+├── extract.py             # 自動切り抜き（アルファマット）モジュール。単体でも他プロジェクトからでも使える
 ├── make_dummy.py          # テスト用ダミー動画・ダミーJSON生成
-├── requirements.txt       # opencv-python-headless, numpy, pillow
+├── requirements.txt       # opencv-python-headless, numpy, pillow（render.py本体の依存。extract.pyは含まない）
+├── requirements-extract.txt # rembg, onnxruntime, numpy, pillow（extract.py / mask:"auto"系のみで必要）
 ├── assets/
 │   ├── fonts/             # NotoSansJP-Bold.ttf, Anton-Regular.ttf（欧文タイトル用）
 │   ├── sfx/                # shakin.wav, don.wav（差し替え可。後述「効果音を差し替える」参照）
 │   └── brushes/            # round/hake/marker/spray.png（筆先スタンプ画像、白＋アルファ）
+├── cache/                  # render.pyが自動切り抜きのアルファをキャッシュするディレクトリ（gitignore対象）
 ├── examples/
 │   ├── sample.json         # make_dummy.py が生成するサンプル
 │   ├── dummy_input.mp4     # ダミー動画（縦 1080x1920）
 │   ├── dummy_input_landscape.mp4 # ダミー動画（横 1920x1080。縦横回帰テスト用）
 │   ├── dummy_input_vfr.mp4 # ダミー動画（縦・可変フレームレート。VFR正規化の回帰テスト用）
+│   ├── extract_test_silhouette.png # extract.py検証用（髪風の細線・指風の隙間を持つシルエット画像）
 │   └── store_logo.png      # make_dummy.py が生成するダミーのラストロゴ画像
 ├── tests/
 │   ├── editor_logic.test.js                    # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 │   ├── render_quality.test.py                  # render.pyの品質回帰テスト（音声連続性・VFR正規化・テロップ描画・
-│   │                                            #   ブラシの白フェード・フォント読み込み失敗時のエラー終了。要ffmpeg/numpy）
+│   │                                            #   ブラシの白フェード・フォント読み込み失敗時のエラー終了・shadow/
+│   │                                            #   mask=auto/auto+brush。要ffmpeg/numpy。rembg未インストール時は
+│   │                                            #   mask=auto系の検証のみ自動でスキップされる）
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
 │   ├── resize_scroll_black_screen.playwright.test.mjs # スクロール/リサイズ時の黒画面回帰テスト（任意、要playwright-core）
@@ -43,6 +49,7 @@ spotlight-reel/
 │   ├── film_logo_bounce.playwright.test.mjs    # フィルム縁取り・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
 │   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
 │   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
+│   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影/revealのUI回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
@@ -186,8 +193,55 @@ python render.py examples/sample.json --video other.mp4 --out out.mp4   # 動画
 python render.py examples/sample.json --preview preview.png             # 確認用PNGを1枚だけ出力
 ```
 
+プロジェクトJSONで `mask: "auto"` / `"auto+brush"` を使う場合は、別途
+`pip install -r requirements-extract.txt` が必要です（詳細は次項「自動切り抜き」）。
+
 `--video` を省略した場合は、プロジェクトJSON内の `video` に指定されたパスが使われます
 （JSONファイルと同じディレクトリ、またはリポジトリ直下からの相対パスとして解決されます）。
+
+## 自動切り抜き（`extract.py`）
+
+画像1枚から被写体を自動で切り抜き、0/1ではない連続値の **アルファマット**（髪の毛や
+指の間などの半透明境界を含む）を得る、**独立実行可能な**モジュールです。
+[`rembg`](https://github.com/danielgatis/rembg)（MITライセンス）をラップしており、
+`render.py` から使われるほか、`python extract.py` 単体で他プロジェクトからも
+そのまま利用できます。
+
+```bash
+pip install -r requirements-extract.txt    # render.py本体の requirements.txt とは別（依存が重いため分離）
+python extract.py input.png --out outdir/ \
+    [--model birefnet-portrait|birefnet-general-lite|isnet-general-use] \
+    [--refine vitmatte] [--decontaminate]
+```
+
+- `--model`：切り抜きモデル。既定は **`birefnet-general-lite`**。
+  仕様上の既定は `birefnet-portrait` ですが、GitHub Actions（CPU/onnxruntime）想定で
+  1080x1920 1枚を実測したところモデル読み込み＋推論で **約64秒**（30秒を大きく超える）
+  かかったため、`birefnet-general-lite`（同条件で約20〜26秒）にフォールバックしています
+  （`birefnet-portrait` は人物にチューニングされたモデルで、実際の人物写真に対する精度は
+  より高い可能性があるため、処理時間に余裕がある用途では明示的に指定してください）。
+  `isnet-general-use` は最も高速（同条件で約7秒）ですが、古い汎用モデルです。
+- `--refine vitmatte`：rembg組み込みのViTMatteによる境界精密化（髪の毛など細い構造の
+  アルファを推定し直す。初回実行時に専用のONNXモデルを追加でダウンロードする）
+- `--decontaminate`：半透明の境界画素に残る背景色のにじみを、前景色を推定し直すことで
+  除去する（rembg組み込み、pymattingベース）。`--refine vitmatte` を指定した場合は
+  rembgの仕様により常に同等の処理が行われる
+- 出力（`outdir/` 配下、**固定のファイル名・形式**。他プロジェクトと共有できる契約）：
+
+  | ファイル | 内容 |
+  | --- | --- |
+  | `subject-rgba.png` | 前景RGB＋アルファ（透過PNG） |
+  | `alpha.png` | アルファチャンネルのみ（8bitグレースケール、0〜255の連続値） |
+  | `mask.png` | アルファ≥128 の2値マスク（0 または 255） |
+  | `preview.png` | チェッカー背景に合成した確認用プレビュー |
+  | `metadata.json` | `{"extractor", "refine", "decontaminate", "input", "size", "elapsedSec", "createdAt"}` |
+
+- モデルファイルは `~/.rembg/models/<model名>/` にダウンロード・キャッシュされます
+  （GitHub Actionsでは `actions/cache` でこのディレクトリをキャッシュし、2回目以降の
+  ダウンロードを省いています。詳細は [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)）。
+- `render.py` は `extract.py` の `extract_alpha()` を直接importして使います。import自体は
+  関数が実際に呼ばれるまで遅延されるため、`mask: "brush"` のみのプロジェクトでは
+  `rembg` / `onnxruntime` が未インストールでも `render.py` は問題なく動作します。
 
 ## プロジェクトJSON契約
 
@@ -214,7 +268,9 @@ python render.py examples/sample.json --preview preview.png             # 確認
     "title_size": 0.06,
     "title_align": "center",
     "brush_fade_sec": 0.3,
-    "audio_during_freeze": "mute"
+    "audio_during_freeze": "mute",
+    "reveal": "wipe",
+    "shadow": { "offset": [0.02, 0.03], "blur": 0.02, "color": "#000000", "alpha": 0.6 }
   },
   "freezes": [
     {
@@ -226,8 +282,24 @@ python render.py examples/sample.json --preview preview.png             # 確認
       "title_pos": [0.15, 0.15],
       "title_size": 0.08,
       "title_align": "left",
+      "mask": "brush",
       "strokes": [
         { "width": 0.12, "points": [[0.42, 0.31], [0.44, 0.45], [0.43, 0.60]] }
+      ]
+    },
+    {
+      "time": 5.5,
+      "name": "自動くん",
+      "mask": "auto",
+      "mask_options": { "model": "birefnet-general-lite", "refine": null, "decontaminate": false }
+    },
+    {
+      "time": 7.2,
+      "name": "自動＋修正くん",
+      "mask": "auto+brush",
+      "strokes": [
+        { "width": 0.08, "mode": "add", "points": [[0.30, 0.20], [0.34, 0.22]] },
+        { "width": 0.06, "mode": "erase", "points": [[0.55, 0.60], [0.58, 0.63]] }
       ]
     }
   ],
@@ -248,7 +320,8 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
   `film_color` / `film_alpha` / `background` / `font` / `audio_during_freeze` /
-  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` を個別上書き可能。
+  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` / `mask` / `mask_options` /
+  `reveal` / `shadow` を個別上書き可能。
   `film_offset` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
 - `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
@@ -266,11 +339,25 @@ python render.py examples/sample.json --preview preview.png             # 確認
 - `brush_shape` は `round`（丸筆・既定値）/ `hake`（ハケ）/ `marker`（平筆マーカー）/
   `spray`（スプレー）のいずれか。未指定・不明な値は `round` として扱われます
   （後方互換：この項目が無い既存のJSONもそのまま動きます）。
+- `mask`：人物マスクの作り方。`brush`（既定・従来どおりブラシスタンプ） /
+  `auto`（`extract.py` の自動切り抜きをそのまま使う） / `auto+brush`（自動アルファを
+  ブラシで修正）のいずれか。未指定・不明な値は `brush` として扱われます（完全後方互換）。
+  詳細は次項「[マスクの作り方（`mask`）と出現アニメ（`reveal`）](#マスクの作り方maskと出現アニメreveal)」参照。
+- `mask_options`：`mask: "auto"` / `"auto+brush"` のときの自動切り抜き設定。
+  `{"model": "...", "refine": "vitmatte"|null, "decontaminate": true|false}`。
+  省略可（省略時は `extract.py` の既定モデル・`refine: null`・`decontaminate: false`）。
+- `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ0.4秒で拭き取るように表示） /
+  `fade`（0.3秒でフェードイン） / `brush`（`mask: "auto+brush"` のときのみ有効。従来どおり
+  ストロークで塗って出す）のいずれか。`mask: "brush"` のときは無関係（常にストローク自体の
+  伸びるアニメーションになる）。
+- `shadow`：影演出。`{"offset": [x, y], "blur": r, "color": "#RRGGBB", "alpha": 0〜1}`。
+  省略・`null`で無効（既定）。`offset`・`blur`は出力幅に対する比率。詳細は次項。
 - `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
 - 新しいキー（`mono_contrast` / `film_offset` / `film_color` / `film_alpha` / `title_font` /
-  `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo`）は
+  `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo` /
+  `mask` / `mask_options` / `reveal` / `shadow`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
   （後方互換。詳細は次項）。`brush_fade_sec` だけは例外で、省略時は既定値 `0.3` が
   使われます（＝白い絵の具がフェードアウトする、見た目の不具合修正が既定で有効）。
@@ -313,6 +400,54 @@ python render.py examples/sample.json --preview preview.png             # 確認
    （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの保持時間が
    ラストロゴの表示に必要な長さを満たすよう自動的に延長される。詳細は次項）
 5. 通常再生に戻る
+
+### マスクの作り方（`mask`）と出現アニメ（`reveal`）
+
+人物の「どこをカラー復元するか」（マスク）の作り方を、フリーズ単位（または `style` で
+全体既定）で選べます。ブラシは「マスクの作り方の1つ」および「自動切り抜きの修正手段」
+として引き続き使えます。
+
+- **`mask: "brush"`**（既定）：従来どおり、ストロークを筆先スタンプで描いた範囲をマスクにする。
+  出現アニメは常にストローク自体が `brush_anim_sec` かけて伸びていく演出（`reveal` は無関係）。
+- **`mask: "auto"`**：`extract.py`（`mask_options` の設定で自動切り抜き）で得たアルファを
+  そのままマスクとして使う。ブラシは不要（ストロークがあっても無視される）。
+  出現は `reveal` に従う（`wipe` または `fade`）。
+- **`mask: "auto+brush"`**：自動アルファを、ブラシストロークで修正してからマスクにする。
+  ストロークに `"mode": "add"`（省略時の既定。塗った範囲のアルファを1相当に塗り足す）または
+  `"mode": "erase"`（塗った範囲のアルファを0相当に削る）を持たせる。修正はフリーズごとに
+  1回だけ計算する静的な補正で、時間変化（出現アニメ）は別途 `reveal` が担当する：
+  - `reveal: "wipe"`（既定）／`"fade"`：修正後のアルファ全体を、下から上へのワイプ
+    （0.4秒固定）／フェードイン（0.3秒固定）で出現させる（ストロークの形はマスクの
+    "どこを直したか" にのみ使われ、出現の順序には関係しない）
+  - `reveal: "brush"`：従来のブラシ演出と同じく、ストロークが伸びる進み具合（`brush_anim_sec`）
+    に沿って、なぞった範囲から順に修正後のアルファを出現させる（`add`/`erase`どちらの
+    ストロークも「なぞった」範囲として出現タイミングの判定に使われる）
+- 自動切り抜きの結果（アルファ）は `cache/<動画のファイル名>_<フリーズ時刻>.npz` に
+  キャッシュされ、同じ動画・同じフリーズ時刻での再レンダリング時は再計算されません
+  （`cache/` はプロジェクトのカレントディレクトリ基準。gitignore対象）。
+- `mask: "auto"` / `"auto+brush"` を使うプロジェクトは、`extract.py` の依存
+  （`requirements-extract.txt`。詳細は[「自動切り抜き（`extract.py`）」](#自動切り抜きextractpy)）
+  が別途必要です。`mask: "brush"` のみのプロジェクトはこの依存が無くても動作します。
+
+### 影（`shadow`）演出
+
+人物アルファ（`mask` が `brush` / `auto` / `auto+brush` のいずれでも）がある場合に、
+影を落とす演出です。省略・`null` で無効（既定）。
+
+```json
+"shadow": { "offset": [0.02, 0.03], "blur": 0.02, "color": "#000000", "alpha": 0.6 }
+```
+
+- `offset`：影のズレ量 `[x, y]`。出力幅に対する比率（プラスで右・下へずれる）
+- `blur`：影のぼかし量。出力幅に対する比率
+- `color`：影の色（`"#RRGGBB"`）
+- `alpha`：影の濃さ（不透明度、0〜1）
+- 現在の人物アルファ（マスク）を `offset` だけ平行移動し、`blur` でぼかし、`color` を
+  `alpha` の濃さで敷く。既存の `film_offset`（フィルム縁取り）と併用可能で、
+  レイヤー順は **背景 → 影 → フィルム縁取り → 人物 → テロップ → ロゴ**（影は必ず
+  フィルム縁取り・人物の下、背景の上に敷かれる）。
+- 影の出現タイミングは人物と同じ（`reveal` に追従する。`mask: "brush"` ならストロークが
+  伸びるのと同時に、影も少しずつ伸びていく）。
 
 ### ラストロゴ（`logo`）演出「インパクト着地＋光彩スイープ」
 
@@ -409,7 +544,15 @@ node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携�
 
 python tests/render_quality.test.py   # render.pyの品質回帰テスト（音声連続性・VFR正規化・
                                        # テロップ描画・ブラシの白フェード・フォント読み込み
-                                       # 失敗時のエラー終了。要ffmpeg/numpy、初回はダミーVFR動画を生成）
+                                       # 失敗時のエラー終了・shadow・mask=auto/auto+brush。
+                                       # 要ffmpeg/numpy、初回はダミーVFR動画を生成。
+                                       # mask=auto系はrembgが無ければ自動でスキップされる）
+
+# 任意：extract.py単体の検証（要 pip install -r requirements-extract.txt）
+python extract.py examples/extract_test_silhouette.png --out /tmp/extract_out/
+python -c "import numpy as np; from PIL import Image; \
+  a = np.array(Image.open('/tmp/extract_out/alpha.png')); \
+  print('distinct alpha values:', len(np.unique(a)))"   # 0/255の二値ではなく連続値になっていることを確認
 
 # 任意：UI回帰テスト（playwright-coreとChromiumが必要）
 npm install --no-save playwright-core
@@ -421,6 +564,7 @@ node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動�
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/film_logo_bounce.playwright.test.mjs # フィルム縁取り・テロップバウンス・ラストロゴ設定のE2E
 node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
+node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影/revealのE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
 
 # 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）
