@@ -214,13 +214,27 @@ python extract.py input.png --out outdir/ \
     [--refine vitmatte] [--decontaminate]
 ```
 
-- `--model`：切り抜きモデル。既定は **`birefnet-general-lite`**。
-  仕様上の既定は `birefnet-portrait` ですが、GitHub Actions（CPU/onnxruntime）想定で
-  1080x1920 1枚を実測したところモデル読み込み＋推論で **約64秒**（30秒を大きく超える）
-  かかったため、`birefnet-general-lite`（同条件で約20〜26秒）にフォールバックしています
-  （`birefnet-portrait` は人物にチューニングされたモデルで、実際の人物写真に対する精度は
-  より高い可能性があるため、処理時間に余裕がある用途では明示的に指定してください）。
-  `isnet-general-use` は最も高速（同条件で約7秒）ですが、古い汎用モデルです。
+- `--model`：切り抜きモデル。既定は **`isnet-general-use`**。
+  仕様上の既定は `birefnet-portrait` ですが、**実際のGitHub Actionsランナー**（CPU/
+  onnxruntime、2vCPU共有）で1080x1920 1枚を実測したところ、モデル読み込み＋推論で
+  **約64秒**（30秒を大きく超える）かかりました。要件どおりのフォールバック先である
+  `birefnet-general-lite` も試しましたが、こちらは**モデルキャッシュの有無に関わらず
+  約81.6秒**かかり（`actions/cache` でモデルファイルのダウンロードを省いても
+  ほぼ同じ時間＝ダウンロードではなく推論自体がActionsランナーのCPU上で遅いことを
+  2回の実行で確認済み）、依然として30秒を大きく超えてしまいます。そのため、
+  候補3モデルのうち実機Actionsランナーで唯一30秒を大きく下回った `isnet-general-use`
+  （実測 **約8.7秒**）を既定にしています。
+  - `birefnet-portrait` / `birefnet-general-lite` は人物にチューニングされた新しめの
+    モデルで、実際の人物写真に対する精度はより高い可能性があります。処理時間に余裕が
+    ある用途（ローカル実行、GPU環境、より高性能なCIランナーなど）では明示的に指定
+    してください。
+  - `isnet-general-use` は最速ですが、古めの汎用モデル（人物専用にチューニングされて
+    いない）です。
+  - （参考：手元のサンドボックス環境での実測は `birefnet-portrait` 約64秒 /
+    `birefnet-general-lite` 約20〜26秒 / `isnet-general-use` 約7秒で、
+    実際のGitHub Actionsランナーとは異なる結果になりました。CPU性能はランナーごとに
+    大きく異なるため、既定モデルの選定は必ず実際に動かす環境で計測することを
+    お勧めします。）
 - `--refine vitmatte`：rembg組み込みのViTMatteによる境界精密化（髪の毛など細い構造の
   アルファを推定し直す。初回実行時に専用のONNXモデルを追加でダウンロードする）
 - `--decontaminate`：半透明の境界画素に残る背景色のにじみを、前景色を推定し直すことで

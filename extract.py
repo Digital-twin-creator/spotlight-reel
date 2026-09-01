@@ -38,10 +38,16 @@ import time
 import numpy as np
 from PIL import Image
 
-# 既定は本来 birefnet-portrait だが、GitHub Actions(CPU)想定で1080x1920 1枚を
-# 計測したところモデル読み込み＋推論で30秒を大きく超えたため（README参照）、
-# 要件どおり birefnet-general-lite を既定にしている。
-DEFAULT_MODEL = "birefnet-general-lite"
+# 既定は本来 birefnet-portrait だが、実際のGitHub Actionsランナー(CPU)で1080x1920 1枚を
+# 計測したところ、モデル読み込み＋推論で約64秒（要件の30秒を大きく超過）だった。
+# 要件どおりのフォールバック先である birefnet-general-lite も試したが、こちらは
+# 実機Actionsランナー上でモデルキャッシュ有無に関わらず約81.6秒かかり
+# （sandboxでの実測より実機のCPUが大幅に遅く、ダウンロード時間ではなく推論自体が
+# 遅いことをキャッシュ有無での比較で確認済み）、依然として30秒を大きく超えてしまう。
+# そのため、候補3モデルのうち実機Actionsランナーで唯一30秒を大きく下回った
+# isnet-general-use（実測約8.7秒、精度は他の2モデルより劣る古めの汎用モデル）を
+# 既定にしている（README参照。実測値の詳細もそちらに記載）。
+DEFAULT_MODEL = "isnet-general-use"
 VALID_MODELS = ("birefnet-portrait", "birefnet-general-lite", "isnet-general-use")
 VALID_REFINES = ("vitmatte",)
 
