@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>切り抜き結果の確認</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141822; --panel2:#1c2130; --panel3:#232939;
+    --text:#eef1f7; --muted:#8b93a7; --accent:#5b8cff; --accent-d:#3f6bdb;
+    --danger:#ff5468; --ok:#33cc88; --line:#2a3145;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+    -webkit-tap-highlight-color:transparent;
+    display:flex; flex-direction:column; min-height:100vh;
+  }
+  [hidden]{display:none!important;}
+  button{
+    min-height:48px; border:none; border-radius:10px; background:var(--panel3);
+    color:var(--text); font-size:15px; font-weight:700; padding:10px 14px;
+  }
+  button.primary{background:var(--accent); color:#fff;}
+  button.danger{background:var(--danger); color:#fff;}
+  button.ghost{background:transparent; border:1px solid var(--line); color:var(--text);}
+
+  header{
+    flex-shrink:0; position:sticky; top:0; z-index:5;
+    display:flex; align-items:center; gap:8px;
+    padding:calc(8px + env(safe-area-inset-top)) 12px 8px;
+    background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  header button{min-height:40px; font-size:14px; padding:8px 12px;}
+  header h1{font-size:14px; margin:0; color:var(--muted); font-weight:600; flex:1; text-align:center;}
+
+  main{flex:1; display:flex; align-items:center; justify-content:center; padding:12px; min-height:0;}
+  #statusText{font-size:14px; color:var(--muted); text-align:center; padding:24px 20px; line-height:1.6;}
+  #statusText.err{color:var(--danger);}
+  #previewImg{width:100%; height:auto; display:block; border-radius:10px; background:#111;}
+
+  footer{
+    flex-shrink:0; padding:12px 14px calc(14px + env(safe-area-inset-bottom));
+    background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; gap:8px;
+  }
+  footer .row{display:flex; gap:8px;}
+  footer .row button{flex:1;}
+  #okHint{font-size:12px; color:var(--muted); line-height:1.5; text-align:center;}
+  a.link-btn{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-height:44px; border-radius:10px; background:var(--panel2); border:1px solid var(--line);
+    color:var(--text); font-size:13px; font-weight:700; text-decoration:none; padding:8px 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <button type="button" class="ghost" id="backTopBtn">← エディタに戻る</button>
+  <h1>切り抜き結果の確認</h1>
+  <div style="width:88px;"></div>
+</header>
+
+<main>
+  <div id="statusText">読み込み中…</div>
+  <img id="previewImg" alt="切り抜き結果プレビュー" hidden>
+</main>
+
+<footer id="footerActions" hidden>
+  <div id="okHint" hidden></div>
+  <div class="row">
+    <button type="button" class="ghost" id="retryBtn">やり直す</button>
+    <button type="button" class="primary" id="okBtn">この切り抜きでOK</button>
+  </div>
+  <a class="link-btn" id="actionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
+</footer>
+
+<script>
+"use strict";
+
+/*
+ * サーバー確認（extract.yml）の結果（preview.png）を表示するだけの、単純な別ページ。
+ * 以前はエディタ（index.html）の全画面モーダルに結果を直接描画していたが、実機
+ * （iOS Safari）でレイアウト起因の表示不具合（結果が画面下部に隠れる・閉じるボタンが
+ * 押せない等）が2度の修正でも解消しなかったため、レイアウト依存の無い「別ページへの
+ * 通常のページ遷移」に置き換えた（index.htmlのopenConfirmPreviewPage参照）。
+ *
+ * URLクエリ:
+ *   tag   … 確認ジョブのタグ（=job-confirm-<tag>ブランチ名。必須）
+ *   time  … フリーズ時刻（秒）。「OK」時にconfirmedResultへ記録する
+ *   model … 自動切り抜きモデル名。同上
+ *   video … 元動画のファイル名。同上（confirmedResultをどの動画向けか区別するため）
+ *
+ * GitHub連携設定（ユーザー名・リポジトリ・トークン）はindex.htmlと同じlocalStorageキー
+ * （GH_SETTINGS_KEY）からそのまま読む。
+ */
+
+var GH_SETTINGS_KEY = "spotlightReel.ghSettings.v1";
+
+var params = new URLSearchParams(location.search);
+var tag = params.get("tag") || "";
+var freezeTime = params.get("time") || "";
+var model = params.get("model") || "";
+var videoFileName = params.get("video") || "";
+
+var statusEl = document.getElementById("statusText");
+var imgEl = document.getElementById("previewImg");
+var footerEl = document.getElementById("footerActions");
+var okBtn = document.getElementById("okBtn");
+var retryBtn = document.getElementById("retryBtn");
+var backTopBtn = document.getElementById("backTopBtn");
+var okHintEl = document.getElementById("okHint");
+var actionsLinkEl = document.getElementById("actionsLink");
+
+/** エディタへ戻る。history.back()がbfcacheでの瞬時復帰を狙えるので優先し、
+ * 直接開かれた等でこのページより前の履歴が無ければindex.htmlへ通常遷移する。 */
+function goBackToEditor() {
+  if (history.length > 1) {
+    history.back();
+  } else {
+    location.href = "index.html";
+  }
+}
+
+function showError(message) {
+  statusEl.hidden = false;
+  statusEl.classList.add("err");
+  statusEl.textContent = message;
+  imgEl.hidden = true;
+}
+
+function ghApiBase(user, repo) {
+  return "https://api.github.com/repos/" + encodeURIComponent(user) + "/" + encodeURIComponent(repo);
+}
+
+function ghHeaders(token) {
+  return {
+    "Authorization": "Bearer " + token,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
+function ghFetchJson(url, token) {
+  return fetch(url, { method: "GET", headers: ghHeaders(token) }).then(function (res) {
+    return res.text().then(function (text) {
+      var body = null;
+      try { body = text ? JSON.parse(text) : null; } catch (e) { /* JSON以外の応答 */ }
+      if (!res.ok) {
+        var detail = (body && body.message) ? body.message : (text || ("HTTP " + res.status));
+        throw new Error("GitHub API エラー (" + res.status + "): " + detail);
+      }
+      return body;
+    });
+  });
+}
+
+function base64ToArrayBuffer(base64) {
+  var binary = atob(base64 || "");
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/** job-confirm-<tag>ブランチにコミットされたファイルの中身をbase64で取得する（index.htmlのghGetFileContentBase64と同じ考え方） */
+function ghGetFileContentBase64(user, repo, token, branch, path) {
+  var url = ghApiBase(user, repo) + "/contents/" + encodeURIComponent(path) + "?ref=" + encodeURIComponent(branch);
+  return ghFetchJson(url, token).then(function (meta) {
+    if (meta && typeof meta.content === "string" && meta.encoding === "base64") return meta.content;
+    if (!meta || !meta.sha) throw new Error("ファイルの内容を取得できませんでした: " + path);
+    return ghFetchJson(ghApiBase(user, repo) + "/git/blobs/" + meta.sha, token).then(function (blob) {
+      if (!blob || typeof blob.content !== "string") throw new Error("blobの内容を取得できませんでした: " + path);
+      return blob.content;
+    });
+  });
+}
+
+function findReleaseAsset(assets, name) {
+  return (assets || []).filter(function (a) { return a.name === name; })[0] || null;
+}
+
+function confirmedAlphaAssetName(time) {
+  return "video_" + Number(time).toFixed(3) + ".npz";
+}
+
+function loadGhSettings() {
+  try {
+    var raw = localStorage.getItem(GH_SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function confirmedResultStorageKey(videoName) { return "spotlightReel:confirmedResult:" + videoName; }
+
+function saveConfirmedResult() {
+  var record = { tag: tag, time: Number(freezeTime), model: model, videoFileName: videoFileName, confirmedAt: Date.now() };
+  try { localStorage.setItem(confirmedResultStorageKey(videoFileName), JSON.stringify(record)); }
+  catch (e) { /* 保存できなくても致命的ではない（記録が残らないだけ） */ }
+}
+
+backTopBtn.addEventListener("click", goBackToEditor);
+retryBtn.addEventListener("click", goBackToEditor);
+okBtn.addEventListener("click", function () {
+  saveConfirmedResult();
+  goBackToEditor();
+});
+
+if (!tag) {
+  showError("確認タグ（tag）が指定されていません。エディタから「結果を見る」で開き直してください。");
+} else {
+  var settings = loadGhSettings();
+  var user = settings && settings.user;
+  var repo = (settings && settings.repo) || "spotlight-jobs";
+  var token = settings && settings.token;
+  if (!user || !token) {
+    showError("GitHub連携の設定が見つかりません。エディタの設定画面で入力してから、もう一度お試しください。");
+  } else {
+    actionsLinkEl.href = "https://github.com/" + user + "/" + repo + "/releases/tag/" + encodeURIComponent(tag);
+
+    Promise.all([
+      ghGetFileContentBase64(user, repo, token, tag, "preview.png"),
+      ghFetchJson(ghApiBase(user, repo) + "/releases/tags/" + encodeURIComponent(tag), token).catch(function () { return null; })
+    ]).then(function (results) {
+      var base64 = results[0];
+      var release = results[1];
+      var blob = new Blob([base64ToArrayBuffer(base64)], { type: "image/png" });
+      var url = URL.createObjectURL(blob);
+      imgEl.onload = function () { URL.revokeObjectURL(url); };
+      imgEl.src = url;
+      imgEl.hidden = false;
+      statusEl.hidden = true;
+      footerEl.hidden = false;
+
+      var hasCache = freezeTime !== "" &&
+        !!(release && findReleaseAsset(release.assets, confirmedAlphaAssetName(freezeTime)));
+      if (!freezeTime || !model || !videoFileName) {
+        // このページを直接開いた等でOKに必要な情報が揃っていない場合は、OKを無効化する
+        // （プレビューの閲覧自体はできる）。
+        okBtn.disabled = true;
+        okHintEl.hidden = false;
+        okHintEl.textContent = "このページを開き直した情報が不足しているため、「OK」は使えません。エディタから開き直してください。";
+      } else if (!hasCache) {
+        okBtn.disabled = true;
+        okHintEl.hidden = false;
+        okHintEl.textContent = "本番用のキャッシュがまだ見つからないため、「OK」は使えません。少し待ってからエディタで開き直してください。";
+      }
+    }).catch(function (err) {
+      showError("結果の取得に失敗しました: " + (err && err.message ? err.message : err));
+      footerEl.hidden = false;
+      actionsLinkEl.hidden = false;
+      okBtn.disabled = true;
+    });
+  }
+}
+</script>
+</body>
+</html>

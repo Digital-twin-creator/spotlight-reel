@@ -275,26 +275,6 @@
     font-size:20px; line-height:1; background:var(--panel2); border:1px solid var(--line); color:var(--text);
     padding:0;
   }
-  .mask-preview-modal{
-    position:fixed; inset:0; z-index:60; background:#000;
-    display:flex; flex-direction:column;
-  }
-  .mask-preview-chrome{
-    flex-shrink:0; max-height:45vh; overflow-y:auto;
-    background:var(--panel); border-top:1px solid var(--line);
-    padding:12px 14px calc(12px + env(safe-area-inset-bottom));
-  }
-  .mask-preview-badge{
-    display:inline-block; margin:8px 0; padding:6px 10px; border-radius:999px;
-    background:rgba(255,179,0,.15); border:1px solid rgba(255,179,0,.45); color:#ffb300;
-    font-size:12px; font-weight:700; line-height:1.4;
-  }
-  #maskPreviewCanvas{
-    width:auto; height:auto; max-width:100%; max-height:100%;
-    border-radius:10px; background:#111; display:block;
-  }
-  .mask-preview-note{font-size:12px; line-height:1.5;}
-
   /* --- 「動画を作る」前の内容チェック確認モーダル --- */
   .confirm-modal{
     position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.72);
@@ -449,6 +429,11 @@
         <button type="button" class="small ghost grow" id="maskPreviewBtn" style="margin-top:8px;" hidden>
           🔍 切り抜き結果を確認
         </button>
+        <div class="job-status-line" id="maskPreviewStatusLine" style="margin-top:6px;" hidden></div>
+        <button type="button" class="small primary grow" id="maskPreviewViewResultBtn" style="margin-top:8px;" hidden>
+          🖼 結果を見る
+        </button>
+        <a class="link-btn ghost small" id="maskPreviewActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
       </div>
 
       <div class="field">
@@ -589,7 +574,9 @@
           <option value="rvm-mobilenetv3">動画（安定・推奨）</option>
           <option value="isnet-general-use">標準（速い）</option>
           <option value="birefnet-portrait">高精度（遅い・約+1分）</option>
+          <option value="apple-vision">Apple Vision（macOS・高速）</option>
         </select>
+        <div class="muted" id="appleVisionHint" hidden style="margin-top:4px;">Apple Visionは非公開リポジトリではmacOS分の無料枠を10倍消費します。</div>
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="shadowEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
@@ -802,36 +789,12 @@
 
 </main>
 
-<!-- 切り抜き結果のサーバー確認（全画面モーダル）。「▶ プレビュー」の全画面表示（#videoWrap.previewing）
-     と同様、bodyの直下に置く。以前は#editorSectionの子だったが、#editorSectionは
-     -webkit-overflow-scrolling:touchを持つスクロール領域であり、実機のiOS Safariでは
-     その内側にネストされたposition:fixed要素が「ビューポート基準」ではなく祖先の
-     スクロールコンテナ基準の擬似固定として扱われてしまう既知の不具合がある
-     （Chromiumベースのテストでは再現しないため、Playwrightのみでは検出できなかった）。
-     実機で「結果が画面下部にインライン表示され、映像エリアの裏に隠れる／閉じるボタンが
-     押せない」という形で発生した。bodyの直下に置くことで、この不具合を構造的に回避する。 -->
-<div class="mask-preview-modal" id="maskPreviewModal" hidden>
-  <button type="button" class="fullscreen-close-btn" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
-  <div class="fullscreen-media">
-    <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
-  </div>
-  <div class="mask-preview-chrome">
-    <strong>切り抜き結果プレビュー（サーバー確認）</strong>
-    <div class="mask-preview-badge">本番と同じモデルで実際に切り抜いた結果です（所要1〜2分）</div>
-    <div class="muted" id="maskPreviewStatus">準備中…</div>
-    <div id="maskPreviewProgressWrap" hidden>
-      <div class="progress-track"><div class="progress-fill" id="maskPreviewProgressFill"></div></div>
-    </div>
-    <button type="button" class="ghost small" id="maskPreviewSkipBtn" hidden>確認せずに進む</button>
-    <a class="link-btn ghost small" id="maskPreviewActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
-    <p class="muted mask-preview-note">
-      静止フレーム（長辺1280px程度のJPEG）をサーバーへ送り、本番と同じモデルで
-      自動切り抜きを行った結果をチェッカー柄に重ねて表示します。この確認で使った
-      アルファは保存され、「動画を作る」実行時に同じものをそのまま使います
-      （モデルの再実行によるブレを防ぎます）。
-    </p>
-  </div>
-</div>
+<!-- 切り抜き結果のサーバー確認は、以前は全画面モーダル（body直下に配置）で結果画像を
+     表示していたが、実機（iOS Safari）で2度レイアウト起因の不具合を修正しても解消しない
+     事例が続いたため、モーダル方式そのものをやめ、結果表示は別ページ（preview.html）への
+     通常のページ遷移に置き換えた（レイアウト依存を構造的に無くすため）。エディタ側は
+     ジョブの起動・ポーリングだけを担い、進捗はテキストのみで表示する
+     （#maskPreviewStatusLine・#maskPreviewViewResultBtn、showMaskPreview参照）。-->
 
 <!-- ============================================================
      コアロジック（DOM非依存・純粋関数のみ）
@@ -872,8 +835,10 @@ var MASK_MODES = ["brush", "auto", "auto+brush"];
 var COLOR_SOURCES = ["brush", "auto"];
 var SHADOW_SOURCES = ["same", "brush", "auto"];
 var REVEALS = ["wipe", "fade", "brush", "none"];
-/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる3種類のみ） */
-var MASK_MODELS = ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait"];
+/** extract.pyのAPPLE_VISION_MODEL_NAMEと同じ値。Apple Vision（macOS専用）モードの判定に使う */
+var APPLE_VISION_MODEL_NAME = "apple-vision";
+/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる4種類） */
+var MASK_MODELS = ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait", APPLE_VISION_MODEL_NAME];
 /**
  * mask_options.model省略時に読み替える既定値（＝render.py/extract.pyのDEFAULT_MODELと
  * 同じ"isnet-general-use"のまま。旧JSONとの後方互換のため変更しない）。
@@ -1195,6 +1160,12 @@ function buildProjectJSON(state) {
   var maskModel = resolveMaskModel(state.maskModel);
   if (maskModel !== DEFAULT_MASK_MODEL) {
     project.style.mask_options = { model: maskModel };
+    // include_held_objects（手に持った物の補完）はRVM専用の補正で、Apple Visionでは
+    // 意味を持たない（render.py側もmodel===RVM_MODEL_NAMEの時しか参照しない）ため、
+    // 既定でオフにしておく（無効な組み合わせに見えないようにするための明示）。
+    if (maskModel === APPLE_VISION_MODEL_NAME) {
+      project.style.mask_options.include_held_objects = false;
+    }
   }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
   // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
@@ -2456,6 +2427,7 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_MASK_MODEL: DEFAULT_MASK_MODEL,
     DEFAULT_MASK_MODEL_SELECTION: DEFAULT_MASK_MODEL_SELECTION,
     RVM_MODEL_NAME: RVM_MODEL_NAME,
+    APPLE_VISION_MODEL_NAME: APPLE_VISION_MODEL_NAME,
     MASK_PREVIEW_CLIP_PRE_SEC: MASK_PREVIEW_CLIP_PRE_SEC,
     MASK_PREVIEW_CLIP_FPS: MASK_PREVIEW_CLIP_FPS,
     resolveMaskModel: resolveMaskModel,
@@ -2741,6 +2713,15 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 });
 
+// preview.html（サーバー確認結果ページ）から「エディタに戻る」で戻ってきた際、ブラウザが
+// このページをbfcache（history.back()で瞬時に復帰できるキャッシュ）から復元した場合は
+// DOMContentLoadedが発火しないため、pageshowでも確認結果の反映を試みる
+// （applyConfirmedResultIfAny参照。bfcache復帰でなければappState.videoFileNameが
+// まだ空なので何もしない＝通常のDOMContentLoaded起動時と重複しても無害）。
+window.addEventListener("pageshow", function (e) {
+  if (e.persisted) applyConfirmedResultIfAny();
+});
+
 /**
  * 起動処理（init）自体が例外で失敗した場合の最後の砦。
  * 壊れた/巨大な自動保存データを読み込むたびに毎回落ちる「クラッシュループ」を
@@ -2809,8 +2790,7 @@ function init() {
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "maskModeSelect", "autoMaskHint", "brushEditModeRow", "brushModeAddBtn", "brushModeEraseBtn",
-    "maskPreviewBtn", "maskPreviewModal", "maskPreviewCanvas", "maskPreviewStatus", "maskPreviewCloseBtn",
-    "maskPreviewProgressWrap", "maskPreviewProgressFill", "maskPreviewSkipBtn", "maskPreviewActionsLink",
+    "maskPreviewBtn", "maskPreviewStatusLine", "maskPreviewViewResultBtn", "maskPreviewActionsLink",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
     "titleLinesList", "addTitleLineBtn", "freezeTitleFontSelect",
     "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
@@ -2821,7 +2801,7 @@ function init() {
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
-    "audioDuringFreezeSelect", "revealSelect", "maskModelSelect",
+    "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
     "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
@@ -2908,12 +2888,7 @@ function init() {
   els.previewBtn.addEventListener("click", togglePreviewPlayback);
   els.previewStopBtn.addEventListener("click", stopPreviewPlayback);
   els.maskPreviewBtn.addEventListener("click", showMaskPreview);
-  els.maskPreviewCloseBtn.addEventListener("click", closeMaskPreview);
-  els.maskPreviewSkipBtn.addEventListener("click", closeMaskPreview);
-  // Escキーでも閉じられるようにする（モーダルが開いている時だけ反応する）
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !els.maskPreviewModal.hidden) closeMaskPreview();
-  });
+  els.maskPreviewViewResultBtn.addEventListener("click", openConfirmPreviewPage);
   els.cancelFreezeBtn.addEventListener("click", cancelFreezeEdit);
   els.commitFreezeBtn.addEventListener("click", commitFreezeEdit);
   els.brushShapeSelect.addEventListener("change", function () {
@@ -3006,6 +2981,7 @@ function init() {
   });
   els.maskModelSelect.addEventListener("change", function () {
     appState.maskModel = resolveMaskModel(els.maskModelSelect.value);
+    els.appleVisionHint.hidden = appState.maskModel !== APPLE_VISION_MODEL_NAME;
     saveToLocalStorage();
   });
   els.shadowEnabledCheckbox.addEventListener("change", function () {
@@ -3293,6 +3269,7 @@ function loadVideoFile(file) {
       renderFreezeList();
       updateJsonPreview();
     }
+    applyConfirmedResultIfAny();
   }, 0);
 }
 
@@ -3411,9 +3388,9 @@ function editFreeze(id) {
  * ライブ描画ループを止めて描画モードに入る。
  */
 function attemptEnterDrawMode(draftCandidate, isNew) {
-  // 別フリーズの静止フレームに切り替わるため、開いたままの簡易プレビューがあれば
-  // （通常はexitDrawMode側で既に閉じているはずだが、念のため）ここでも確実に閉じる
-  if (!els.maskPreviewModal.hidden) closeMaskPreview();
+  // 別フリーズの静止フレームに切り替わるため、進行中のサーバー確認表示があれば
+  // （通常はexitDrawMode側で既にリセットしているはずだが、念のため）ここでも確実にリセットする
+  resetMaskPreviewUI();
   captureFrozenFrame().then(function (frame) {
     if (!frame) {
       showError("静止フレームを取得できませんでした。少し待ってからもう一度お試しください。");
@@ -3584,10 +3561,10 @@ function exitDrawMode() {
     els.videoWrap.style.height = "";
     stopPreviewPlayback();
     hideDrawHint();
-    // 開いたままの簡易プレビューがあれば、フリーズ編集を抜けるタイミングで必ず閉じる
-    // （閉じずに残ると、次に別のフリーズを編集した時に古い静止フレームの結果が
+    // 進行中のサーバー確認表示があれば、フリーズ編集を抜けるタイミングで必ずリセットする
+    // （リセットせずに残ると、次に別のフリーズを編集した時に古い静止フレームの結果が
     // 表示され続けてしまう）
-    if (!els.maskPreviewModal.hidden) closeMaskPreview();
+    resetMaskPreviewUI();
   } catch (err) {
     showError("後始末中にエラーが発生しました: " + (err && err.message ? err.message : err));
   } finally {
@@ -4404,20 +4381,23 @@ function escapeHtml(s) {
 }
 
 /* ---------------- 切り抜き結果のサーバー確認 ---------------- */
-/* 自動切り抜き（rembg）はサーバー側でしか実行できず、編集中は結果が全く見えないという
+/* 自動切り抜き（rembg/RVM）はサーバー側でしか実行できず、編集中は結果が全く見えないという
  * 問題への対策。静止フレームをJPEG（長辺1280px程度）にしてjobブランチへコミットし、
- * 本番と同じモデルだけを動かす軽量ワークフロー（extract.yml）をdispatch、結果の
- * preview.png（チェッカー合成）を取得して画面に重ねて表示する。確認で得たアルファは
- * Releaseに保持され、「動画を作る」実行時に同じものを再利用する（モデルの再実行を防ぐ）。 */
+ * 本番と同じモデルだけを動かす軽量ワークフロー（extract.yml）をdispatch、完了したら
+ * 「結果を見る」ボタンを表示する。結果画像（preview.png）そのものは、この場では表示せず
+ * preview.html（別ページ）への通常のページ遷移で表示する（openConfirmPreviewPage参照）。
+ * 以前は全画面モーダルに結果を直接描画していたが、実機（iOS Safari）でレイアウト起因の
+ * 表示不具合が2度の修正でも解消しなかったため、モーダル方式自体をやめ、レイアウト依存の
+ * 無い「別ページへの通常遷移」に置き換えた。確認で得たアルファは、preview.htmlで
+ * 「この切り抜きでOK」を押した時点でRelease/job-confirm-<tag>ブランチに保持されたまま、
+ * 「動画を作る」実行時に同じものを再利用する（モデルの再実行を防ぐ）。 */
 
-// このモーダルを開いた時点のdraft（フリーズ）を覚えておき、閉じずに別フリーズの
-// 編集へ移ってしまった場合でも古い結果を反映し続けないようにする（下のcloseMaskPreview参照）。
-var maskPreviewOpenedForDraft = null;
-// 表示中のpreview.png用blob URL（closeMaskPreview/releaseMaskPreviewCanvasで確実に解放する）。
-var maskPreviewObjectURL = null;
 // モーダルを開く・閉じるたびに変わるトークン。非同期処理の各ステップはこれを見て、
-// 既に閉じられた／別フリーズに切り替わった確認結果を古いまま反映しないようにする。
+// 既にリセットされた／別フリーズに切り替わった確認結果を古いまま反映しないようにする。
 var maskPreviewAbortToken = 0;
+// 確認完了後、「結果を見る」ボタンがどのジョブを指すか（tag/time/model）。
+// openConfirmPreviewPageがこれを見てpreview.htmlへ渡すクエリパラメータを組み立てる。
+var pendingReviewResult = null;
 
 function showMaskPreview() {
   if (!frozenFrameCanvas) {
@@ -4433,17 +4413,13 @@ function showMaskPreview() {
     return;
   }
 
-  maskPreviewOpenedForDraft = draft;
+  resetMaskPreviewUI();
   maskPreviewAbortToken += 1;
   var myToken = maskPreviewAbortToken;
 
-  els.maskPreviewModal.hidden = false;
-  releaseMaskPreviewCanvas();
-  els.maskPreviewActionsLink.hidden = true;
-  els.maskPreviewStatus.textContent = "準備中…";
-  els.maskPreviewProgressWrap.hidden = false;
-  setMaskPreviewProgress(1);
-  els.maskPreviewSkipBtn.hidden = false;
+  els.maskPreviewStatusLine.hidden = false;
+  els.maskPreviewStatusLine.classList.remove("err", "ok");
+  els.maskPreviewStatusLine.textContent = "準備中…";
 
   var model = resolveMaskModel(appState.maskModel);
   var pending = loadPendingConfirm(appState.videoFileName);
@@ -4458,9 +4434,8 @@ function showMaskPreview() {
   starter.catch(function (err) {
     if (myToken !== maskPreviewAbortToken) return;
     if (err && err.message === "__aborted__") return;
-    els.maskPreviewProgressWrap.hidden = true;
-    els.maskPreviewStatus.textContent = "確認に失敗しました: " + (err && err.message ? err.message : err) +
-      "（「確認せずに進む」でこのまま編集を続けられます）";
+    els.maskPreviewStatusLine.classList.add("err");
+    els.maskPreviewStatusLine.textContent = "確認に失敗しました: " + (err && err.message ? err.message : err);
     if (err && err.actionsUrl) {
       els.maskPreviewActionsLink.href = err.actionsUrl;
       els.maskPreviewActionsLink.hidden = false;
@@ -4468,31 +4443,45 @@ function showMaskPreview() {
   });
 }
 
-function setMaskPreviewProgress(pct) {
-  els.maskPreviewProgressFill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+/** 確認完了後、「結果を見る」ボタンを押した時に呼ばれる（別ページpreview.htmlへ遷移する） */
+function openConfirmPreviewPage() {
+  if (!pendingReviewResult) return;
+  saveToLocalStorage();
+  var qs = new URLSearchParams({
+    tag: pendingReviewResult.tag,
+    time: String(pendingReviewResult.time),
+    model: pendingReviewResult.model,
+    video: pendingReviewResult.videoFileName || ""
+  });
+  location.href = "preview.html?" + qs.toString();
 }
 
 /**
- * プレビューcanvasのバッキングストアとpreview.png用blob URLを解放する。
- * iOS Safariはcanvasの裏画像メモリをGCまかせにすると解放が遅れがちで、繰り返し開閉すると
- * メモリ不足でページごと落ちることがあるため、参照を外すだけでなくwidth/heightを0にして
- * 即座に解放する。
+ * サーバー確認ジョブが完了した（preview.pngが用意できた）ことを画面に伝え、
+ * 「結果を見る」ボタンを表示する。ここでは結果画像そのものは取得しない
+ * （openConfirmPreviewPage経由でpreview.htmlへ遷移した先で取得・表示する）。
  */
-function releaseMaskPreviewCanvas() {
-  els.maskPreviewCanvas.width = 0;
-  els.maskPreviewCanvas.height = 0;
-  if (maskPreviewObjectURL) { URL.revokeObjectURL(maskPreviewObjectURL); maskPreviewObjectURL = null; }
+function markConfirmReady(tag, freezeTime, model) {
+  pendingReviewResult = { tag: tag, time: freezeTime, model: model, videoFileName: appState.videoFileName };
+  els.maskPreviewStatusLine.classList.remove("err");
+  els.maskPreviewStatusLine.classList.add("ok");
+  els.maskPreviewStatusLine.textContent = "確認完了。「結果を見る」で切り抜き結果を確認できます。";
+  els.maskPreviewViewResultBtn.hidden = false;
+  clearPendingConfirm(appState.videoFileName);
 }
 
-/** モーダルを閉じ、進行中の確認処理を無効化する（✕ボタン・Esc・モーダル外タップ・フリーズの切り替え、すべてここを通る） */
-function closeMaskPreview() {
-  els.maskPreviewModal.hidden = true;
-  releaseMaskPreviewCanvas();
-  els.maskPreviewProgressWrap.hidden = true;
-  els.maskPreviewSkipBtn.hidden = true;
-  els.maskPreviewActionsLink.hidden = true;
-  maskPreviewOpenedForDraft = null;
+/** 進行中の確認処理を無効化し、確認UI（ステータス文言・「結果を見る」ボタン等）を隠す。
+ * フリーズの切り替え・編集終了、すべてここを通る。 */
+function resetMaskPreviewUI() {
   maskPreviewAbortToken += 1; // 進行中のポーリング等を打ち切る（GitHub Actions側の実行・pendingConfirmの記録は消さない）
+  pendingReviewResult = null;
+  if (els.maskPreviewStatusLine) {
+    els.maskPreviewStatusLine.hidden = true;
+    els.maskPreviewStatusLine.textContent = "";
+    els.maskPreviewStatusLine.classList.remove("err", "ok");
+  }
+  if (els.maskPreviewViewResultBtn) els.maskPreviewViewResultBtn.hidden = true;
+  if (els.maskPreviewActionsLink) els.maskPreviewActionsLink.hidden = true;
 }
 
 /** frozenFrameCanvasを、長辺maxLongEdge px程度に縮小したJPEG Blobにする */
@@ -4595,38 +4584,20 @@ function clipFrameFileName(index) {
   return "clip_" + String(index).padStart(4, "0") + ".jpg";
 }
 
-/** 画像URLを読み込み、幅最大720pxに収めてmaskPreviewCanvasへ描画する */
-function drawMaskPreviewImage(url) {
-  return new Promise(function (resolve, reject) {
-    var img = new Image();
-    img.onload = function () {
-      var dispW = Math.min(720, img.naturalWidth || 720);
-      var scale = img.naturalWidth ? dispW / img.naturalWidth : 1;
-      var dispH = Math.round((img.naturalHeight || dispW) * scale);
-      els.maskPreviewCanvas.width = dispW;
-      els.maskPreviewCanvas.height = dispH;
-      els.maskPreviewCanvas.getContext("2d").drawImage(img, 0, 0, dispW, dispH);
-      resolve();
-    };
-    img.onerror = function () { reject(new Error("プレビュー画像の表示に失敗しました。")); };
-    img.src = url;
-  });
-}
-
 /**
  * すでにdispatch済み（pendingConfirmに記録済み）の確認結果を取りに行く。GitHub
  * Actions側では既に完了していたにも関わらず、タブのバックグラウンド化・再読み込み等で
  * 元のPromiseチェーンが失われ、画面には何も表示されないまま終わっていた事例への対策
- * （runServerMaskPreview参照）。Releaseにpreview.pngが見つかればそれをそのまま表示し、
- * dispatchし直さない。見つからなければ（まだ処理中／失敗／期限切れ）、通常どおり新しい
- * 確認を開始する。
+ * （runServerMaskPreview参照）。Releaseにpreview.pngが見つかれば、そのままdispatchし直さず
+ * 「結果を見る」を表示する。見つからなければ（まだ処理中／失敗／期限切れ）、通常どおり
+ * 新しい確認を開始する。preview.png自体のダウンロードはここでは行わない（openConfirmPreviewPage
+ * 経由でpreview.htmlへ遷移した先で行う）。
  */
 function tryRecoverPendingConfirm(myToken, user, repo, token, pending, targetDraft) {
   function checkAbort() {
     if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
   }
-  els.maskPreviewStatus.textContent = "前回の確認結果を確認しています…";
-  setMaskPreviewProgress(10);
+  els.maskPreviewStatusLine.textContent = "前回の確認結果を確認しています…";
   return ghGetReleaseByTag(user, repo, token, pending.tag)
     .catch(function () { return null; })
     .then(function (rel) {
@@ -4636,48 +4607,8 @@ function tryRecoverPendingConfirm(myToken, user, repo, token, pending, targetDra
         clearPendingConfirm(pending.videoFileName);
         return runServerMaskPreview(myToken, user, repo, token, targetDraft);
       }
-      return applyMaskPreviewResult(myToken, rel, pending.tag, pending.time, pending.model, targetDraft, user, repo, token);
+      markConfirmReady(pending.tag, pending.time, pending.model);
     });
-}
-
-/**
- * 完了したRelease（preview.png・アルファキャッシュを含む）を取得し、画面に表示する。
- * 通常の確認完了時と、tryRecoverPendingConfirmでの復旧時の両方から呼ばれる共通処理。
- */
-function applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraft, user, repo, token) {
-  function checkAbort() {
-    if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
-  }
-  var previewAsset = findReleaseAsset(rel.assets, "preview.png");
-  if (!previewAsset) {
-    var err = new Error("preview.pngが見つかりませんでした。Releaseページで確認してください: " + rel.html_url);
-    err.actionsUrl = rel.html_url;
-    throw err;
-  }
-  var cacheAsset = findReleaseAsset(rel.assets, confirmedAlphaAssetName(freezeTime));
-  setMaskPreviewProgress(96);
-  return ghDownloadBranchFile(user, repo, token, tag, "preview.png").then(function (arrayBuffer) {
-    checkAbort();
-    var blob = new Blob([arrayBuffer], { type: "image/png" });
-    maskPreviewObjectURL = URL.createObjectURL(blob);
-    return drawMaskPreviewImage(maskPreviewObjectURL).then(function () {
-      setMaskPreviewProgress(100);
-      els.maskPreviewProgressWrap.hidden = true;
-      els.maskPreviewSkipBtn.hidden = true;
-      els.maskPreviewActionsLink.hidden = true;
-      els.maskPreviewStatus.textContent = "確認完了（本番と同じモデルでの切り抜き結果です。チェッカー柄の部分が透明＝背景です）";
-      if (targetDraft && cacheAsset) {
-        targetDraft.confirmedAlpha = {
-          videoFileName: appState.videoFileName,
-          time: freezeTime,
-          model: model,
-          tag: tag
-        };
-        saveToLocalStorage();
-      }
-      clearPendingConfirm(appState.videoFileName);
-    });
-  });
 }
 
 /**
@@ -4714,8 +4645,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
   var chain = frozenFrameToJpegBlob(MASK_PREVIEW_LONG_EDGE_PX)
     .then(function (jpegBlob) {
       checkAbort();
-      els.maskPreviewStatus.textContent = "リリースを作成中…";
-      setMaskPreviewProgress(4);
+      els.maskPreviewStatusLine.textContent = "リリースを作成中…";
       return ghCreateRelease(user, repo, token, tag).then(function () { return jpegBlob; });
     })
     .then(function (jpegBlob) {
@@ -4726,8 +4656,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
       savePendingConfirm(videoFileName, {
         tag: tag, time: freezeTime, model: model, videoFileName: videoFileName, dispatchedAt: Date.now()
       });
-      els.maskPreviewStatus.textContent = "コミット先ブランチの情報を取得中…";
-      setMaskPreviewProgress(8);
+      els.maskPreviewStatusLine.textContent = "コミット先ブランチの情報を取得中…";
       return ghGetRef(user, repo, token, "heads/main").then(function (refInfo) {
         baseCommitSha = refInfo.object.sha;
         return jpegBlob;
@@ -4735,8 +4664,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function (jpegBlob) {
       checkAbort();
-      els.maskPreviewStatus.textContent = "静止フレームをアップロード中…";
-      setMaskPreviewProgress(12);
+      els.maskPreviewStatusLine.textContent = "静止フレームをアップロード中…";
       return blobToBase64(jpegBlob);
     })
     .then(function (base64) {
@@ -4750,12 +4678,10 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
       // 動画モード：静止フレーム1枚だけでなく、フリーズ時刻からさかのぼったクリップ
       // （前MASK_PREVIEW_CLIP_PRE_SEC秒〜フリーズ時刻。RVMは過去のフレームだけを見るため、
       // それより後のフレームは取得しない）を低解像度JPEGの連番として取得・アップロードする。
-      els.maskPreviewStatus.textContent = "クリップを取得中…";
-      setMaskPreviewProgress(14);
+      els.maskPreviewStatusLine.textContent = "クリップを取得中…";
       return captureConfirmClipJpegBlobs(freezeTime, function (n, maxN) {
         if (myToken !== maskPreviewAbortToken) return;
-        setMaskPreviewProgress(14 + (n / maxN) * 4);
-        els.maskPreviewStatus.textContent = "クリップを取得中…（" + n + "/" + maxN + "）";
+        els.maskPreviewStatusLine.textContent = "クリップを取得中…（" + n + "/" + maxN + "）";
       });
     })
     .then(function (clip) {
@@ -4768,8 +4694,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
         uploadChain = uploadChain
           .then(function () {
             checkAbort();
-            els.maskPreviewStatus.textContent = "クリップをアップロード中…（" + idx + "/" + clip.blobs.length + "）";
-            setMaskPreviewProgress(18 + (idx / clip.blobs.length) * 8);
+            els.maskPreviewStatusLine.textContent = "クリップをアップロード中…（" + idx + "/" + clip.blobs.length + "）";
             return blobToBase64(blob);
           })
           .then(function (base64) { return ghCreateBlob(user, repo, token, base64); })
@@ -4781,8 +4706,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function () {
       checkAbort();
-      els.maskPreviewStatus.textContent = "パラメータをアップロード中…";
-      setMaskPreviewProgress(26);
+      els.maskPreviewStatusLine.textContent = "パラメータをアップロード中…";
       var params = buildConfirmParams(model, null, false, freezeTime, dims.width, dims.height, clipInfo);
       var paramsBlob = new Blob([JSON.stringify(params)], { type: "application/json" });
       return blobToBase64(paramsBlob);
@@ -4794,7 +4718,6 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     .then(function (blob) {
       checkAbort();
       paramsBlobSha = blob.sha;
-      setMaskPreviewProgress(28);
       return ghGetCommit(user, repo, token, baseCommitSha);
     })
     .then(function (baseCommit) {
@@ -4816,17 +4739,15 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function () {
       checkAbort();
-      els.maskPreviewStatus.textContent = "確認を開始しています…";
-      setMaskPreviewProgress(32);
+      els.maskPreviewStatusLine.textContent = "確認を開始しています…";
       return ghDispatchWorkflow(user, repo, token, tag, "extract.yml");
     })
     .then(function () {
       checkAbort();
-      els.maskPreviewStatus.textContent = "起動を待っています…";
+      els.maskPreviewStatusLine.textContent = "起動を待っています…";
       return pollForRun(user, repo, token, tag, function (n, max) {
         if (myToken !== maskPreviewAbortToken) return;
-        setMaskPreviewProgress(32 + (n / max) * 8);
-        els.maskPreviewStatus.textContent = "起動を待っています…（" + n + "/" + max + "）";
+        els.maskPreviewStatusLine.textContent = "起動を待っています…（" + n + "/" + max + "）";
       }, "extract.yml", "extract");
     })
     .then(function (run) {
@@ -4837,11 +4758,10 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
         throw notFoundErr;
       }
       actionsUrl = run.html_url || actionsUrl;
-      els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（1〜2分程度）";
+      els.maskPreviewStatusLine.textContent = "サーバーで切り抜き中…（1〜2分程度）";
       return pollRunUntilDone(user, repo, token, run.id, function (n, max) {
         if (myToken !== maskPreviewAbortToken) return;
-        setMaskPreviewProgress(40 + (n / max) * 49);
-        els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（経過約" + (n * 5) + "秒）";
+        els.maskPreviewStatusLine.textContent = "サーバーで切り抜き中…（経過約" + (n * 5) + "秒）";
       });
     })
     .then(function (finalRun) {
@@ -4853,13 +4773,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
         failErr.actionsUrl = actionsUrl;
         throw failErr;
       }
-      setMaskPreviewProgress(92);
-      els.maskPreviewStatus.textContent = "結果を取得しています…";
-      return ghGetReleaseByTag(user, repo, token, tag);
-    })
-    .then(function (rel) {
-      checkAbort();
-      return applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraft, user, repo, token);
+      markConfirmReady(tag, freezeTime, model);
     });
 
   return chain.catch(function (err) {
@@ -5602,6 +5516,7 @@ function applySettingsToInputs() {
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.revealSelect.value = resolveReveal(appState.reveal);
   els.maskModelSelect.value = resolveMaskModel(appState.maskModel);
+  els.appleVisionHint.hidden = resolveMaskModel(appState.maskModel) !== APPLE_VISION_MODEL_NAME;
   els.shadowEnabledCheckbox.checked = !!appState.shadowEnabled;
   els.shadowOptionsBody.hidden = !appState.shadowEnabled;
   els.shadowAlphaSlider.value = appState.shadowAlpha;
@@ -5651,6 +5566,65 @@ function loadPendingConfirm(videoFileName) {
 function clearPendingConfirm(videoFileName) {
   try { localStorage.removeItem(pendingConfirmStorageKey(videoFileName)); }
   catch (e) { /* 無視 */ }
+}
+
+/*
+ * preview.html（別ページ）で「この切り抜きでOK」を押した結果を、エディタへ持ち帰るための
+ * 小さな記録。preview.htmlはエディタのdraft/appState.freezesを直接書き換えられない
+ * （別ページ・別JSヒープのため）ので、ここに{tag,time,model,videoFileName,confirmedAt}を
+ * 書いておき、エディタ側（applyConfirmedResultIfAny）が次に読み込まれた／表示された時点で
+ * 該当するdraftまたはfreezeへconfirmedAlphaとして反映する。
+ */
+function confirmedResultStorageKey(videoFileName) { return "spotlightReel:confirmedResult:" + videoFileName; }
+
+function loadConfirmedResult(videoFileName) {
+  try {
+    var raw = localStorage.getItem(confirmedResultStorageKey(videoFileName));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function clearConfirmedResult(videoFileName) {
+  try { localStorage.removeItem(confirmedResultStorageKey(videoFileName)); }
+  catch (e) { /* 無視 */ }
+}
+
+/**
+ * preview.htmlから持ち帰ったconfirmedResult（あれば）を、現在の状況に反映する。
+ * - 該当フリーズがまだ編集中（draft、bfcacheでページ復帰した場合など）ならdraftへ直接。
+ * - 既に「完了」済みでappState.freezesに入っていればそちらへ（時刻で対応するフリーズを探す）。
+ * - どちらにも見つからなければ（そのフリーズがまだ作られていない等）、記録はそのまま残し、
+ *   次にこの関数が呼ばれた時に改めて拾えるようにする。
+ * 動画選択直後の復元完了時（loadVideoFile）と、bfcacheからのページ復帰時（pageshow）の
+ * 両方で呼ぶことで、「戻る」でページが再利用された場合・作り直された場合の両方をカバーする。
+ */
+function applyConfirmedResultIfAny() {
+  var videoFileName = appState.videoFileName;
+  if (!videoFileName) return;
+  var rec = loadConfirmedResult(videoFileName);
+  if (!rec || rec.videoFileName !== videoFileName) return;
+  var confirmedAlpha = { videoFileName: rec.videoFileName, time: rec.time, model: rec.model, tag: rec.tag };
+
+  if (draft && Math.abs(numOr(draft.time, NaN) - numOr(rec.time, NaN)) < 1e-6) {
+    draft.confirmedAlpha = confirmedAlpha;
+    clearConfirmedResult(videoFileName);
+    if (els.maskPreviewStatusLine) {
+      els.maskPreviewStatusLine.hidden = false;
+      els.maskPreviewStatusLine.classList.add("ok");
+      els.maskPreviewStatusLine.textContent = "確認済み（この切り抜き結果を使います）";
+    }
+    return;
+  }
+
+  var idx = (appState.freezes || []).findIndex(function (f) {
+    return Math.abs(numOr(f.time, NaN) - numOr(rec.time, NaN)) < 1e-6;
+  });
+  if (idx >= 0) {
+    appState.freezes[idx].confirmedAlpha = confirmedAlpha;
+    saveToLocalStorage();
+    clearConfirmedResult(videoFileName);
+    els.restoreStatus.textContent = "前回確認した切り抜き結果を反映しました";
+  }
 }
 
 // 自動保存1件あたりのサイズ上限の目安。サムネイル（フリーズごとのJPEG dataURL）が

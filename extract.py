@@ -76,7 +76,15 @@ from PIL import Image
 # 変更しない）と「エディタで新規に選ぶ際の初期値」（＝RVM）は別の関心事のため。
 DEFAULT_MODEL = "isnet-general-use"
 RVM_MODEL_NAME = "rvm-mobilenetv3"
-VALID_MODELS = ("birefnet-portrait", "birefnet-general-lite", "isnet-general-use", RVM_MODEL_NAME)
+# Apple Vision（VNGenerateForegroundInstanceMaskRequest、macOS専用）。extract.py自体は
+# Vision frameworkを呼べない（Pythonから直接バインドできない）ため、このモデルの実際の
+# 抽出は tools/apple-vision/subject_lift.swift をmacOSランナー上で別途実行し、その結果を
+# render.py側のアルファキャッシュ（cache/*.npz）に置くことで賄う。VALID_MODELSに含めるのは
+# params.json/mask_options.modelの値としての妥当性検証を他モデルと共通化するためであり、
+# extract.py自身（CLI・extract_alpha系関数）はこのモデルを実行できない（main()参照）。
+APPLE_VISION_MODEL_NAME = "apple-vision"
+VALID_MODELS = ("birefnet-portrait", "birefnet-general-lite", "isnet-general-use", RVM_MODEL_NAME,
+                 APPLE_VISION_MODEL_NAME)
 VALID_REFINES = ("vitmatte",)
 
 # --- 動画モード（RVM: Robust Video Matting）のパラメータ ---
@@ -435,6 +443,11 @@ def main(argv=None):
     if not os.path.exists(args.input):
         parser.error(f"入力ファイルが見つかりません: {args.input}")
 
+    if args.model == APPLE_VISION_MODEL_NAME:
+        parser.error(
+            f"--model {APPLE_VISION_MODEL_NAME} はextract.py（Python）からは実行できません。"
+            "macOSランナー上で tools/apple-vision/subject_lift.swift を実行してください"
+        )
     if args.model == RVM_MODEL_NAME:
         if args.video_time is None:
             parser.error(f"--model {RVM_MODEL_NAME}（動画モード）には --video-time が必要です")

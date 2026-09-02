@@ -1218,6 +1218,144 @@ try:
     check(abs(render.validate_auto_alpha(normal_mask, "t=3.00s") - 0.25) < 1e-9,
           "validate_auto_alpha：5%〜85%の範囲内であればエラーにならず面積比を返す")
 
+    print("")
+    print("=== merge_touching_component：RVMで欠落しがちな「手に持った物」の合成（接触物のみ取り込む） ===")
+    # baseは「人物」（中央の大きな矩形）を模したRVMのアルファ。
+    person_alpha = np.zeros((100, 100), np.uint8)
+    person_alpha[20:80, 30:60] = 255
+
+    # extraは「手に持った物」（人物のすぐ右に接する小さな矩形）と、
+    # 「無関係な背景の物体」（人物から離れた左上の矩形、接していない）の2つの連結成分を持つ
+    # isnet側の前景を模したもの。
+    isnet_alpha = np.zeros((100, 100), np.uint8)
+    isnet_alpha[40:50, 60:65] = 200   # 人物の右端(x=59)にすぐ接する「持ち物」（半透明寄りの値）
+    isnet_alpha[0:10, 0:10] = 255     # 人物から離れた無関係の物体（非接触）
+
+    merged = render.merge_touching_component(person_alpha, isnet_alpha)
+    check(bool((merged[40:50, 60:65] > 0).all()),
+          "merge_touching_component：人物に接する「持ち物」の連結成分は合成される")
+    check(int(merged[45, 62]) == 200,
+          f"merge_touching_component：合成された持ち物の領域はisnet側の連続値をそのまま使う: {int(merged[45, 62])}")
+    check(bool((merged[0:10, 0:10] == 0).all()),
+          "merge_touching_component：人物に接していない無関係の物体は取り込まれない")
+    check(bool((merged[20:80, 30:60] == 255).all()),
+          "merge_touching_component：base（人物）自身の領域はそのまま保たれる")
+
+    # 合成後にpostprocess_auto_alphaを適用すると、持ち物は人物と同じ連結成分として
+    # 一緒に残る（=握った物が身体から千切れて消えたりしない）ことも確認しておく
+    merged_post = render.postprocess_auto_alpha(merged)
+    check(int(merged_post[45, 62]) > 0,
+          f"merge_touching_component後にpostprocess_auto_alphaを通しても持ち物は人物と一緒に残る: {int(merged_post[45, 62])}")
+    check(bool((merged_post[0:10, 0:10] == 0).all()),
+          "postprocess_auto_alpha後も無関係の物体は含まれないまま")
+
+    # 接触物・無関係物体のどちらも無い場合は、base（RVM単体の結果）をそのまま返す
+    no_extra = np.zeros((100, 100), np.uint8)
+    check(np.array_equal(render.merge_touching_component(person_alpha, no_extra), person_alpha),
+          "merge_touching_component：extra側に前景が無ければbaseをそのまま返す")
+    no_base = np.zeros((100, 100), np.uint8)
+    check(np.array_equal(render.merge_touching_component(no_base, isnet_alpha), no_base),
+          "merge_touching_component：base側に前景が無ければ（人物を検出できていない）そのままbaseを返す")
+
+    print("")
+    print("=== get_or_extract_alpha：model=apple-visionはrender.py（ubuntu）からは抽出できずRuntimeErrorになる ===")
+    # Apple Visionの実抽出はmacOSランナー上のtools/apple-vision/subject_lift.swiftが担い、
+    # render.py（ubuntu）はcache/*.npzに事前配置された結果を読むだけ。キャッシュが無い状態で
+    # get_or_extract_alphaに到達したら、原因（ワークフロー構成の不具合）がわかる形で
+    # 明確に失敗するべきで、rembg/onnxruntime側の抽出を試みてはいけない。
+    apple_cache_dir = os.path.join(tmpdir, "apple_vision_cache")
+    dummy_frame = np.zeros((100, 100, 3), np.uint8)
+    try:
+        render.get_or_extract_alpha(dummy_frame, "/no/such/video.mp4", 1.0, 100, 100,
+                                     apple_cache_dir, {"model": "apple-vision"})
+        check(False, "get_or_extract_alpha：model=apple-visionでキャッシュが無ければRuntimeErrorになる")
+    except RuntimeError as e:
+        check("apple-vision" in str(e),
+              f"get_or_extract_alpha：model=apple-visionでキャッシュが無いとRuntimeErrorになる: {e}")
+
+    print("")
+    print("=== freeze_needs_model_extraction：build_mask_context/build_shadow_maskと同じ条件で対象フリーズを判定する ===")
+    import extract as extract_module
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "auto"},
+        extract_module, "apple-vision") is True,
+        "freeze_needs_model_extraction：model一致＋color_source=autoならTrue")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "brush"},
+        extract_module, "apple-vision") is False,
+        "freeze_needs_model_extraction：color_source=brushかつshadow指定が無ければFalse（既定shadowはsource='same'）")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "brush",
+         "shadow": {"source": "auto"}},
+        extract_module, "apple-vision") is True,
+        "freeze_needs_model_extraction：color_source=brushでもshadow.source=autoならTrue")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "isnet-general-use"}, "color_source": "auto"},
+        extract_module, "apple-vision") is False,
+        "freeze_needs_model_extraction：modelが違えばFalse")
+    check(render.freeze_needs_model_extraction(
+        {"color_source": "auto"}, extract_module, "isnet-general-use") is True,
+        "freeze_needs_model_extraction：mask_options省略時はDEFAULT_MODEL(isnet-general-use)扱い")
+
+    print("")
+    print("=== extract_frames_for_model：対象フリーズが無ければ動画を一切デコードしない ===")
+    import json as json_mod2
+    no_target_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"freeze_sec": 1.0, "audio_during_freeze": "mute"},
+        "freezes": [{"time": 2.5, "name": "", "color_source": "brush"}],
+    }
+    no_target_json_path = os.path.join(tmpdir, "no_target_project.json")
+    with open(no_target_json_path, "w", encoding="utf-8") as f:
+        json_mod2.dump(no_target_project, f, ensure_ascii=False)
+    loaded_no_target = render.load_project(no_target_json_path)
+    no_target_out_dir = os.path.join(tmpdir, "apple_frames_no_target")
+    manifest_path_empty = render.render(loaded_no_target, no_target_json_path, video_path, "unused.mp4",
+                                         extract_frames_for="apple-vision",
+                                         extract_frames_out=no_target_out_dir)
+    with open(manifest_path_empty, encoding="utf-8") as f:
+        manifest_empty = json_mod2.load(f)
+    check(manifest_empty["frames"] == [], f"対象フリーズが無ければmanifest.jsonのframesは空になる: {manifest_empty}")
+
+    print("")
+    print("=== extract_frames_for_model：apple-vision指定のフリーズだけ本番と同じ解像度のフレームPNGを書き出す ===")
+    mixed_model_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"freeze_sec": 1.0, "audio_during_freeze": "mute"},
+        "freezes": [
+            {"time": 1.5, "name": "", "color_source": "auto",
+             "mask_options": {"model": "apple-vision"}},
+            {"time": 3.0, "name": "", "color_source": "auto",
+             "mask_options": {"model": "isnet-general-use"}},
+        ],
+    }
+    mixed_model_json_path = os.path.join(tmpdir, "mixed_model_project.json")
+    with open(mixed_model_json_path, "w", encoding="utf-8") as f:
+        json_mod2.dump(mixed_model_project, f, ensure_ascii=False)
+    loaded_mixed_model = render.load_project(mixed_model_json_path)
+    mixed_model_out_dir = os.path.join(tmpdir, "apple_frames_mixed")
+    manifest_path_mixed = render.render(loaded_mixed_model, mixed_model_json_path, video_path, "unused.mp4",
+                                         extract_frames_for="apple-vision",
+                                         extract_frames_out=mixed_model_out_dir)
+    with open(manifest_path_mixed, encoding="utf-8") as f:
+        manifest_mixed = json_mod2.load(f)
+    check(len(manifest_mixed["frames"]) == 1,
+          f"apple-visionを指定した1件だけが対象になる（isnet-general-use指定の方は含まれない）: {manifest_mixed['frames']}")
+    check(abs(manifest_mixed["frames"][0]["time"] - 1.5) < 1e-6,
+          f"対象フレームの時刻はapple-visionを指定したフリーズの time と一致する: {manifest_mixed['frames'][0]}")
+    check(manifest_mixed["output_width"] == W and manifest_mixed["output_height"] == H,
+          f"manifest.jsonのoutput_width/heightは本番の出力解像度と一致する: {manifest_mixed}")
+    frame_png_path = os.path.join(mixed_model_out_dir, manifest_mixed["frames"][0]["path"])
+    frame_img = cv2.imread(frame_png_path)
+    check(frame_img is not None and frame_img.shape[:2] == (H, W),
+          f"書き出されたPNGは本番と同じ出力解像度(HxW)になっている: {None if frame_img is None else frame_img.shape}")
+    reference_frame = render.grab_frame_at(video_path, 1.5, W, H, fps)
+    diff_ref = float(np.abs(frame_img.astype(np.int16) - reference_frame.astype(np.int16)).mean())
+    check(diff_ref < 5.0,
+          f"書き出されたPNGは同時刻のフレーム内容とほぼ一致する（シーケンシャルデコード起源であることの目視代わり、平均差分={diff_ref:.2f}）")
+
     has_rembg = False
     try:
         import rembg  # noqa: F401

@@ -329,6 +329,44 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
 - エディタの自動切り抜きモデル選択では**動画（安定・推奨）**として選べ、
   新規プロジェクトの既定になっています（詳細は次項「`mask_options`」）。
 
+### Apple Vision モード（macOS）
+
+`extract.py`（Python）はrembg/onnxruntimeベースの静止画・RVMモデルのみを実行できますが、
+`model: "apple-vision"` を選ぶと、代わりにmacOS標準のVision framework
+（[`VNGenerateForegroundInstanceMaskRequest`](https://developer.apple.com/documentation/vision/vngenerateforegroundinstancemaskrequest)、
+macOS 14.0以降）による切り抜きが使われます。**macOSでしか実行できません**（Vision
+frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上の`extract.py`・`render.py`
+からは直接呼び出せません）。
+
+- 実体は `tools/apple-vision/subject_lift.swift`（Foundation・Vision・CoreImageのみに依存する
+  単体のSwiftファイル。`swiftc -O tools/apple-vision/subject_lift.swift -o subject_lift`
+  でビルドでき、Xcodeプロジェクトは不要）です。使い方：
+  ```bash
+  ./subject_lift <入力画像> <出力ディレクトリ>
+  ```
+  `VNGenerateForegroundInstanceMaskRequest` で検出した**全インスタンスを1つに合成**した
+  ソフトマスク（`generateScaledMaskForImage`、元画像と同じ解像度）を取得し、
+  `extract.py` の他モデルと同じ固定形式のファイル一式
+  （`subject-rgba.png` / `alpha.png` / `mask.png` / `preview.png` / `metadata.json`。
+  `metadata.extractor` は `"apple-vision"`）をこのツール単体で出力します
+  （RGB自体はモデルの予測ではなく元画像の画素をそのまま使う、他モデルと同じ方針）。
+  被写体を検出できなかった場合は**終了コード2**で終了します（それ以外の異常は
+  1=引数不正・3=macOSバージョン不足・4=画像読み込み失敗・5=Visionリクエスト失敗）。
+- `spotlight-jobs` 側では、render.py自身がこのモデルを実行することはありません
+  （`render.py --model apple-vision` 相当の抽出を試みると常に `RuntimeError` になります）。
+  代わりに、macOSランナー（`macos-15`。`macos-14`はVNGenerateForegroundInstanceMaskRequestの
+  推論コンテキストを作成できず動かないことを実機検証で確認したため使いません）上で
+  `subject_lift`を実行した結果を、
+  本番レンダリング前に `cache/` へ配置しておく3段構成のワークフローになっています
+  （`prepare` → `extract_apple`（`model=apple-vision`の時だけ実行）→ `render`。
+  詳細は[`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
+- エディタの自動切り抜きモデル選択では**Apple Vision（macOS・高速）**として選べます。
+  **非公開リポジトリではmacOS分の無料枠を通常の10倍消費する**ため、選択時にその旨の
+  注記が表示されます。
+- `mask_options.include_held_objects` はRVM専用の補正（前項参照）のため、Apple Visionを
+  選んだ場合は既定で `false` がJSONに出力されます（Apple Vision自体が全インスタンスを
+  1つのマスクに合成するため、この補正を別途必要としません）。
+
 ## プロジェクトJSON契約
 
 ```json
@@ -500,10 +538,23 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
   **動画（安定・推奨）**＝`rvm-mobilenetv3`（新規プロジェクトの既定。前後クリップから
   時間方向の情報を使って切り抜く。詳細は[「動画モード（RVM）」](#動画モードrvm-robust-video-matting)）、
   **標準（速い）**＝`isnet-general-use`（JSON契約上の既定・約3〜9秒/枚）、
-  **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）
-  の3種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
-  （完全後方互換）。動画（RVM）・高精度を選んだ場合は `mask_options.model` が明示的に
-  出力されます。
+  **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）、
+  **Apple Vision（macOS・高速）**＝`apple-vision`（macOS専用。詳細は
+  [「Apple Vision モード（macOS）」](#apple-vision-モードmacos)）
+  の4種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
+  （完全後方互換）。動画（RVM）・高精度・Apple Visionを選んだ場合は `mask_options.model` が
+  明示的に出力されます。
+  - `mask_options.include_held_objects`（`true`|`false`、**省略時は`true`**。ただし
+    エディタでApple Visionを選んだ場合のみ既定`false`でJSONに出力されます）：
+    `model: "rvm-mobilenetv3"` の時だけ意味を持ちます。RVM（人物専用モデル）は
+    手に持った物（スマホ・マイク・カバン等）を人物から切り離して除外してしまうことが
+    あるため、既定では同じフレームに `isnet-general-use`（汎用の顕著物体検出）を
+    追加で実行し、その前景のうち**人物マスクに接している連結成分だけ**を合成します
+    （人物と無関係な背景の物体は、接していない限り取り込まれません）。合成後は
+    既存のマスク後処理（最大連結成分・穴埋め・フェザー・面積チェック）がそのまま
+    適用されます。サーバー確認プレビュー（`extract.yml`）でも同じ処理を通すため、
+    本番レンダリングと確認結果の見た目は一致します。無効にしたい場合は明示的に
+    `"include_held_objects": false` を指定してください。
 - `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
   表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
   `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /
@@ -630,13 +681,14 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
 - **エディタ内での確認（サーバー確認プレビュー）**：`color_source`/切り抜き方法が
   `auto` または `auto+brush` のフリーズでは、編集画面に「🔍 切り抜き結果を確認」
   ボタンが表示されます。以前はスマホ上での粗いヒューリスティック推定（簡易プレビュー）
-  でしたが、現在は**本番と同じモデル（`extract.py`／rembg）でサーバー側（GitHub Actions）
-  に実際に切り抜かせて**結果を表示します：
-  1. 押すと即座にモーダルが開き、静止フレームを長辺約1280pxのJPEGに縮小して
-     `spotlight-jobs` の一時ブランチ（`job-confirm-YYYYMMDD-HHMMSS-<乱数>`）へ
-     Git Data API経由でコミットし、動画のフルレンダリングは行わない軽量ワークフロー
-     `extract.yml` を起動します。進捗バーと「起動を待っています…」「サーバーで
-     切り抜き中…（経過約N秒）」といった状況表示が進み、**所要は概ね1〜2分程度**です。
+  でしたが、現在は**本番と同じモデル（`extract.py`／rembg・RVM）でサーバー側
+  （GitHub Actions）に実際に切り抜かせて**結果を表示します：
+  1. 押すと静止フレームを長辺約1280pxのJPEGに縮小して `spotlight-jobs` の一時ブランチ
+     （`job-confirm-YYYYMMDD-HHMMSS-<乱数>`）へ Git Data API経由でコミットし、
+     動画のフルレンダリングは行わない軽量ワークフロー `extract.yml` を起動します。
+     結果を待つ間は**進捗をテキストのみ**で表示します（「起動を待っています…」
+     「サーバーで切り抜き中…（経過約N秒）」等）。この間も編集画面はそのまま操作でき、
+     何かを覆い隠すことはありません。**所要は概ね1〜2分程度**です。
      **動画（RVM）モードを選んでいる場合**は、静止フレームに加えて、フリーズ時刻から
      `MASK_PREVIEW_CLIP_PRE_SEC`（1.5秒）さかのぼった時点〜フリーズ時刻までを、
      `<video>` 要素を実際にシークしながら`MASK_PREVIEW_CLIP_FPS`（12fps）間隔で
@@ -648,76 +700,69 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
      `.github/scripts/extract_and_cache.py` がこのクリップ連番を
      `extract.rvm_infer_alpha()` へ渡します（`spotlight-jobs` 側の詳細は
      [そちらのREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
-  2. 完了すると、サーバー側が生成したチェッカー背景合成のプレビュー画像
-     （`preview.png`）を取得してモーダルに表示します。透明（背景）部分がチェッカー柄で
-     見えるため、本番と同じ精度で切り抜き結果を確認できます。
-     **実機検証の結果、非公開リポジトリのRelease アセットは
-     `GET /releases/assets/{id}`（`Accept: application/octet-stream`）で取得しても、
-     実体が `release-assets.githubusercontent.com` への302リダイレクトで返され、
-     そのリダイレクト先がCORS非対応（`Access-Control-Allow-Origin`を返さない）ため、
-     ブラウザの`fetch`ではプリフライトの時点で必ず失敗する（headless Chromiumで
-     再現・確認済み）ことが判明しました。**そのため `preview.png` とサーバー確認済み
-     アルファ（`.npz`）は、`extract.yml` がRelease（存在確認・手動閲覧用）だけでなく
-     `job-confirm-<tag>` ブランチにもコミットするようにし、エディタ側は
-     Contents API（`GET /repos/{owner}/{repo}/contents/{path}?ref={branch}`。
-     リダイレクトを伴わずAPI上で完結するため CORS 対応）でその中身を取得します
-     （動画・project.json のアップロードに Git Data API を使っているのと同じ理由）。
-  3. 結果を待たずに編集を続けたい場合は「確認せずに進む」でいつでも中断できます
-     （進捗バー横に常時表示）。GitHub Actions側の実行自体は止まりませんが、
-     エディタ側はその結果を待たずにモーダルを閉じます。
-  4. **確認で得たアルファは自動的に再利用されます**：確認が完了すると、そのフリーズの
-     動画ファイル名・時刻・自動切り抜きモデルとともに確認結果（タグ名）を記録しておき、
-     続けて「🎬 動画を作る」を実行した際、動画ファイル名・フリーズ時刻・モデルの
-     いずれも変わっていなければ、確認時に生成されたアルファキャッシュ
-     （`video_<フリーズ時刻>.npz`）をそのまま本番ジョブブランチの `cache/` 配下へ
-     同梱します。`render.py` 側の変更は一切不要です（`get_or_extract_alpha` の
-     既存のキャッシュヒット判定が、本番の出力解像度に一致する `.npz` をそのまま
-     採用する仕組みをそのまま利用しています）。動画ファイル名・時刻・モデルのいずれか
-     一つでもズレていれば再利用は行わず、通常どおり本番レンダリング時にモデルが
-     再実行されます（安全側フォールバック）。
+  2. 完了すると「結果を見る」ボタンが表示されます。押すと**同じタブで別ページ
+     （`preview.html?tag=<確認タグ>&time=<フリーズ時刻>&model=<モデル>&video=<動画ファイル名>`）
+     へ通常のページ遷移**します。`preview.html` は、Contents API
+     （`GET /repos/{owner}/{repo}/contents/{path}?ref={branch}`。後述のCORS事情により
+     リダイレクトを伴わずAPI上で完結する経路を使う）で `job-confirm-<tag>` ブランチから
+     `preview.png`（サーバー側が生成したチェッカー背景合成のプレビュー画像）を取得し、
+     画面幅いっぱいに表示するだけの単純なページです。ピンチズームで拡大して細部まで
+     確認できます。上部に「エディタに戻る」、下部に「この切り抜きでOK」「やり直す」の
+     ボタンがあります。
+     - 以前はこの結果をエディタ内の全画面モーダルに直接描画していましたが、実機
+       （iOS Safari）で「結果が画面下部に隠れる」「閉じるボタンが押せない」といった
+       レイアウト起因の表示不具合が2度の修正でも解消しなかったため、モーダル方式を
+       やめ、レイアウト依存の無い「別ページへの通常のページ遷移」に置き換えました。
+     - **実機検証の結果、非公開リポジトリのRelease アセットは
+       `GET /releases/assets/{id}`（`Accept: application/octet-stream`）で取得しても、
+       実体が `release-assets.githubusercontent.com` への302リダイレクトで返され、
+       そのリダイレクト先がCORS非対応（`Access-Control-Allow-Origin`を返さない）ため、
+       ブラウザの`fetch`ではプリフライトの時点で必ず失敗する（headless Chromiumで
+       再現・確認済み）ことが判明しました。**そのため `preview.png` とサーバー確認済み
+       アルファ（`.npz`）は、`extract.yml` がRelease（存在確認・手動閲覧用）だけでなく
+       `job-confirm-<tag>` ブランチにもコミットするようにしています
+       （動画・project.json のアップロードに Git Data API を使っているのと同じ理由）。
+  3. **「この切り抜きでOK」を押すと、その結果が本番レンダリング時に再利用されます**：
+     エディタに戻った時点で、動画ファイル名・時刻・自動切り抜きモデルとともに確認結果
+     （タグ名）を記録し、続けて「🎬 動画を作る」を実行した際、動画ファイル名・
+     フリーズ時刻・モデルのいずれも変わっていなければ、確認時に生成された
+     アルファキャッシュ（`video_<フリーズ時刻>.npz`）をそのまま本番ジョブブランチの
+     `cache/` 配下へ同梱します。`render.py` 側の変更は一切不要です
+     （`get_or_extract_alpha` の既存のキャッシュヒット判定が、本番の出力解像度に
+     一致する `.npz` をそのまま採用する仕組みをそのまま利用しています）。動画
+     ファイル名・時刻・モデルのいずれか一つでもズレていれば再利用は行わず、通常どおり
+     本番レンダリング時にモデルが再実行されます（安全側フォールバック）。「やり直す」
+     を押した場合、または結果を見ずにそのままエディタへ戻った場合は確認結果を記録せず、
+     改めて「🔍 切り抜き結果を確認」から確認をやり直せます。
      確認結果は本番タグと同じ `job-*` 命名規則を使っているため、`spotlight-jobs` 側の
      7日後クリーンアップ（後述。Release だけでなく `job-confirm-*` ブランチも一緒に
      削除します）でも自動的に削除対象になります（確認してからあまり
      日を置かずに動画を作ることを想定しています）。
-  - 表示中のフリーズに常に追従します：プレビューを開いたまま「完了」してフリーズ編集を
-    抜けた場合でも、モーダルは自動的に閉じます（進行中のサーバー確認は打ち切られ、
-    アルファは記録されません）。別のフリーズを新たに編集して改めてボタンを押すと、
+  - **`preview.html`からエディタに戻った時の状態復元**：ブラウザが `history.back()` を
+    bfcache（ページを作り直さずに瞬時に復元する仕組み）で処理できた場合は、編集中の
+    状態（フリーズ編集の途中経過を含む）がそのまま残ります。bfcacheが効かず
+    ページが作り直された場合（実機のブラウザや状況によって挙動が異なります）は、
+    動画ファイルの選択画面に戻ります。動画ファイル自体は仕組み上保存できないため、
+    同じ動画ファイルを選び直すと、これまでどおり `localStorage` から編集内容
+    （フリーズ一覧・各種設定）が復元され、「この切り抜きでOK」で確認した結果も
+    （対応するフリーズが復元されていれば）そのタイミングで反映されます。
+  - 表示中のフリーズに常に追従します：「結果を見る」が出た状態のまま「完了」して
+    フリーズ編集を抜けた場合でも、確認UI（ステータス文言・「結果を見る」ボタン）は
+    自動的にリセットされます。別のフリーズを新たに編集して改めてボタンを押すと、
     その時点の静止フレームで必ず新しい確認が走るため、古いフリーズの結果を誤って
     見せ続けることはありません。
-  - **表示は画面幅いっぱいの全画面オーバーレイ**（黒背景・映像は幅100%で縦は収まる
-    範囲まで拡大表示）です。「▶ プレビュー」の再生も同様に全画面表示になります
-    （実機での「プレビューが小さすぎる」という指摘への対応。小さなcanvasのままの
-    表示は残していません）。閉じ方は右上の大きな「✕」ボタン（44px角以上）・Escキーの
-    いずれでも可能です（全画面化に伴い、背景タップでの close は廃止しました。
-    背景に露出したピクセルが無くなり判定が成立しなくなったため）。閉じると編集画面の
-    スクロール・タッチ操作がすぐに復帰します。このモーダルのDOM上の位置は
-    `body` 直下（`<main>` の外）です。以前はフリーズ編集中に表示する都合上
-    `#editorSection`（`-webkit-overflow-scrolling: touch` を持つスクロール領域）の
-    子として置いていましたが、実機のiOS Safariでは、そのスクロール領域の内側に
-    ネストした `position: fixed` 要素が「ビューポート基準の全画面」ではなく
-    祖先のスクロールコンテナ内の擬似固定として描画されてしまう既知の不具合があり、
-    結果として画面下部にインライン表示されたまま映像エリアの裏に隠れ、閉じるボタンも
-    押せない、という実機限定の不具合が発生していました（Chromiumベースの
-    Playwrightテストでは再現しないため見逃されていました）。`body` 直下に
-    置くことでこの不具合を構造的に回避しています。
   - **タブのバックグラウンド化・再読み込みへの耐性**：確認用Releaseを作成した直後、
     その情報（タグ・時刻・モデル・動画ファイル名）を `localStorage` に記録しておき、
     同じフリーズを再び開いた時、まずそのReleaseを直接確認します。iOSでタブが
     バックグラウンドに回ってJavaScriptの処理が中断され、サーバー側の確認自体は
     成功していてもエディタ側が結果を取得できないまま待ち続ける、という状況が
     発生しても、次に開いた時点で `preview.png` が既にあれば再dispatchせずそのまま
-    表示します（無ければ通常どおり新しく確認をやり直します）。
+    「結果を見る」を表示します（無ければ通常どおり新しく確認をやり直します）。
   - **失敗時は無言にならない**：取得に失敗した場合は、エラーメッセージとともに
     該当のGitHub Actions実行ページへのリンク（「🔍 Actionsページで確認」）を表示します。
     `extract.yml`／`render.yml` 側にも「確認用Releaseが無ければ自動作成する」保険の
     ステップを追加しており、エディタ側のRelease作成とdispatchの間にタブが閉じられる
     等の想定外の順序になった場合でも、アップロード自体は失敗しません。
-  - **メモリ対策**：iPhone実機でページがクラッシュする不具合の対策として、プレビュー
-    表示用のcanvasのバッキングストア解像度は端末の実DPRを最大2倍相当に留め
-    （全画面表示は解像度が大きく上がるため、フル DPR のままだと描画負荷が
-    増えすぎる）、使い終わり次第 `width`/`height` を0にして即座にバッキングストアを
-    解放します（参照を外すだけだとiOS SafariのGCが遅れ、繰り返し開閉するとメモリを
-    使い切ってページごと落ちることがあるため）。
 - **`color_source` と `shadow.source` の混在**：例えば「カラー化はブラシ、影は自動切り抜き」
   （`color_source: "brush"`、`shadow: {"source": "auto"}`）のような組み合わせも可能です。
   この場合、自動切り抜きはそのフリーズだけ実行されます（他のフリーズが
