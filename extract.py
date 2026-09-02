@@ -285,11 +285,17 @@ def load_rvm_model():
     ~/.cache/torch/hub にキャッシュする。CI側はwarm-model-cache.ymlでこの
     ディレクトリごとキャッシュする）。torchのimportはこの関数内でのみ行うため、
     RVMを使わないプロジェクト・ジョブではtorch未インストールでも問題ない。
+
+    trust_repo=Trueを指定しないと、torch.hub側の仕様で「このリポジトリを信頼するか」を
+    標準入力から尋ねようとし、GitHub Actions等の非対話環境では標準入力が無いため
+    `EOFError: EOF when reading a line` で落ちる（実Actionsジョブでの検証で発見）。
+    RVM_TORCH_HUB_REPOは固定のMITライセンスリポジトリであることが分かっているため、
+    常に信頼して問題ない。
     """
     import torch
 
     if "model" not in _rvm_model_singleton:
-        model = torch.hub.load(RVM_TORCH_HUB_REPO, RVM_TORCH_HUB_MODEL)
+        model = torch.hub.load(RVM_TORCH_HUB_REPO, RVM_TORCH_HUB_MODEL, trust_repo=True)
         model.eval()
         _rvm_model_singleton["model"] = model
     return _rvm_model_singleton["model"]
