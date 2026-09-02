@@ -97,7 +97,21 @@ RVM_ONNX_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "rvm")
 RVM_ONNX_PATH = os.path.join(RVM_ONNX_CACHE_DIR, "rvm_mobilenetv3_fp32.onnx")
 RVM_PRE_SEC_DEFAULT = 1.5   # フリーズ時刻より前、再帰状態を温めるために遡る秒数
 RVM_POST_SEC_DEFAULT = 0.5  # クリップの末尾に残す余白（シーク誤差対策。推論には使わない。後述）
-RVM_DOWNSAMPLE_MAX_SIDE = 512  # downsample_ratio自動計算の基準（RVM公式サンプルと同じ考え方）
+
+# RVM公式README（速度ベンチマーク表）の推奨値：HD(1920x1080)相当で0.25、4K(3840x2160)で0.125。
+# 本番レンダリング時のクリップは出力解像度（概ねHD相当。例: 1080x1920）で切り出すため0.25が妥当。
+#
+# 当初はRVM公式サンプル（inference_utils.pyのauto_downsample_ratio、
+# min(512/max(h,w), 1.0)）と同じ式を「渡されたクリップフレームの実寸」に対して適用していたが、
+# これは誤りだった：サーバー確認プレビュー用のクリップは、アップロードサイズを抑えるため
+# あらかじめ長辺480pxへ縮小してあり（MASK_PREVIEW_CLIP_LONG_EDGE_PX、index.html参照）、
+# この式にそのまま渡すと480<512のためdownsample_ratio=1.0（ダウンサンプルなし）になる。
+# 実機検証で、同一フレームを再帰状態を温めながら複数回推論させるとdownsample_ratio=1.0では
+# アルファが反復ごとに単調減少し最終的に完全0になる不具合を確認した一方、公式推奨の0.25では
+# 反復を重ねても面積が安定することを確認済み（downsample_ratio=0.5は逆に0.25より早く0へ
+# 収束し、単純に「小さいほど良い」わけでもなかった＝0.25はRVM公式の推奨値をそのまま使うのが
+# 安全という結論）。
+RVM_DOWNSAMPLE_RATIO_DEFAULT = 0.25
 
 _rvm_session_singleton = {}
 
@@ -284,16 +298,6 @@ def extract_clip_frames_bgr(video_path, start_sec, end_sec, W, H, fps):
             for i in range(n)]
 
 
-def rvm_auto_downsample_ratio(h, w):
-    """
-    RVM公式サンプル（inference_utils.pyのauto_downsample_ratio）と同じ計算。
-    長辺がRVM_DOWNSAMPLE_MAX_SIDE(512)pxに収まる比率まで内部でダウンサンプルしてから
-    推論し、アルファだけ元解像度へ戻す（精度を保ちつつ実行時間を抑えるための
-    公式推奨設定）。既に512px以下ならダウンサンプルしない（比率1.0）。
-    """
-    return min(RVM_DOWNSAMPLE_MAX_SIDE / max(h, w), 1.0)
-
-
 def load_rvm_session():
     """
     RVM(mobilenetv3, ONNX)モデルファイルを取得し、onnxruntimeのInferenceSessionを
@@ -332,9 +336,8 @@ def rvm_infer_alpha(frames_rgb, target_index, downsample_ratio=None):
     if not frames_rgb:
         raise ValueError("frames_rgbが空です（クリップを取得できなかった可能性があります）")
     target_index = max(0, min(int(target_index), len(frames_rgb) - 1))
-    h, w = frames_rgb[0].shape[:2]
     session = load_rvm_session()
-    dr = downsample_ratio if downsample_ratio is not None else rvm_auto_downsample_ratio(h, w)
+    dr = downsample_ratio if downsample_ratio is not None else RVM_DOWNSAMPLE_RATIO_DEFAULT
     dr_arr = np.array([dr], dtype=np.float32)
 
     rec = [np.zeros((1, 1, 1, 1), dtype=np.float32)] * 4
