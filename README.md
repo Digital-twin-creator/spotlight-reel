@@ -504,6 +504,16 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
   の3種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
   （完全後方互換）。動画（RVM）・高精度を選んだ場合は `mask_options.model` が明示的に
   出力されます。
+  - `mask_options.include_held_objects`（`true`|`false`、**省略時は`true`**）：
+    `model: "rvm-mobilenetv3"` の時だけ意味を持ちます。RVM（人物専用モデル）は
+    手に持った物（スマホ・マイク・カバン等）を人物から切り離して除外してしまうことが
+    あるため、既定では同じフレームに `isnet-general-use`（汎用の顕著物体検出）を
+    追加で実行し、その前景のうち**人物マスクに接している連結成分だけ**を合成します
+    （人物と無関係な背景の物体は、接していない限り取り込まれません）。合成後は
+    既存のマスク後処理（最大連結成分・穴埋め・フェザー・面積チェック）がそのまま
+    適用されます。サーバー確認プレビュー（`extract.yml`）でも同じ処理を通すため、
+    本番レンダリングと確認結果の見た目は一致します。無効にしたい場合は明示的に
+    `"include_held_objects": false` を指定してください。
 - `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
   表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
   `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /

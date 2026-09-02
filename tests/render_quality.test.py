@@ -1218,6 +1218,45 @@ try:
     check(abs(render.validate_auto_alpha(normal_mask, "t=3.00s") - 0.25) < 1e-9,
           "validate_auto_alpha：5%〜85%の範囲内であればエラーにならず面積比を返す")
 
+    print("")
+    print("=== merge_touching_component：RVMで欠落しがちな「手に持った物」の合成（接触物のみ取り込む） ===")
+    # baseは「人物」（中央の大きな矩形）を模したRVMのアルファ。
+    person_alpha = np.zeros((100, 100), np.uint8)
+    person_alpha[20:80, 30:60] = 255
+
+    # extraは「手に持った物」（人物のすぐ右に接する小さな矩形）と、
+    # 「無関係な背景の物体」（人物から離れた左上の矩形、接していない）の2つの連結成分を持つ
+    # isnet側の前景を模したもの。
+    isnet_alpha = np.zeros((100, 100), np.uint8)
+    isnet_alpha[40:50, 60:65] = 200   # 人物の右端(x=59)にすぐ接する「持ち物」（半透明寄りの値）
+    isnet_alpha[0:10, 0:10] = 255     # 人物から離れた無関係の物体（非接触）
+
+    merged = render.merge_touching_component(person_alpha, isnet_alpha)
+    check(bool((merged[40:50, 60:65] > 0).all()),
+          "merge_touching_component：人物に接する「持ち物」の連結成分は合成される")
+    check(int(merged[45, 62]) == 200,
+          f"merge_touching_component：合成された持ち物の領域はisnet側の連続値をそのまま使う: {int(merged[45, 62])}")
+    check(bool((merged[0:10, 0:10] == 0).all()),
+          "merge_touching_component：人物に接していない無関係の物体は取り込まれない")
+    check(bool((merged[20:80, 30:60] == 255).all()),
+          "merge_touching_component：base（人物）自身の領域はそのまま保たれる")
+
+    # 合成後にpostprocess_auto_alphaを適用すると、持ち物は人物と同じ連結成分として
+    # 一緒に残る（=握った物が身体から千切れて消えたりしない）ことも確認しておく
+    merged_post = render.postprocess_auto_alpha(merged)
+    check(int(merged_post[45, 62]) > 0,
+          f"merge_touching_component後にpostprocess_auto_alphaを通しても持ち物は人物と一緒に残る: {int(merged_post[45, 62])}")
+    check(bool((merged_post[0:10, 0:10] == 0).all()),
+          "postprocess_auto_alpha後も無関係の物体は含まれないまま")
+
+    # 接触物・無関係物体のどちらも無い場合は、base（RVM単体の結果）をそのまま返す
+    no_extra = np.zeros((100, 100), np.uint8)
+    check(np.array_equal(render.merge_touching_component(person_alpha, no_extra), person_alpha),
+          "merge_touching_component：extra側に前景が無ければbaseをそのまま返す")
+    no_base = np.zeros((100, 100), np.uint8)
+    check(np.array_equal(render.merge_touching_component(no_base, isnet_alpha), no_base),
+          "merge_touching_component：base側に前景が無ければ（人物を検出できていない）そのままbaseを返す")
+
     has_rembg = False
     try:
         import rembg  # noqa: F401

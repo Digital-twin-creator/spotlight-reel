@@ -68,7 +68,11 @@ DEFAULT_STYLE = {
     # mask は廃止（color_source/shadow.sourceに分離）。旧JSONとの後方互換のためだけに
     # ここに残しており、resolve_color_source()がcolor_source未指定時にこれを読み替える。
     "mask": "brush",              # brush | auto | auto+brush（後方互換専用。新JSONはcolor_sourceを使う）
-    "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool}（自動切り抜きを使う場合のみ使用）
+    "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool,
+                                   #  "include_held_objects": bool}（自動切り抜きを使う場合のみ使用。
+                                   #  include_held_objectsはmodel="rvm-mobilenetv3"の時だけ意味を持ち、
+                                   #  省略時はTrue＝isnet-general-useの前景のうち人物マスクに接する
+                                   #  部分を合成して手に持った物の欠落を補う。merge_held_objects_with_isnet参照）
     "reveal": "wipe",             # wipe | fade | brush | none（人物の出現アニメ）
     # color_source（カラー化に使うマスク）もここには持たせない。省略時は上のmaskキーを
     # 読み替える（resolve_color_source参照）ことで、新旧どちらのJSONも同じロジックで扱える。
@@ -181,6 +185,13 @@ _TIMING_LOG = []
 AUTO_MASK_MIN_AREA_RATIO = 0.05   # マスク面積がこれ未満（画面の5%未満）なら失敗とみなす
 AUTO_MASK_MAX_AREA_RATIO = 0.85   # マスク面積がこれを超える（画面の85%超）なら失敗とみなす
 AUTO_MASK_FEATHER_SIGMA_PX = 1.5  # 後処理で最後にかける軽いフェザー（ガウスぼかし）の強さ
+
+# RVM（人物専用モデル）は手に持った物（スマホ・マイク・カバン等）を人物から
+# 切り離して除外してしまうことがある。isnet-general-use（汎用の顕著物体検出）の前景を
+# 補助的に使い、RVMの人物マスクにこの距離（px）以内で接している連結成分だけを合成する
+# （merge_touching_component参照）。無関係な背景の物体まで拾わないよう、あまり大きく
+# しすぎない。
+HELD_OBJECT_TOUCH_DILATE_PX = 6
 
 # 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定の秒数。
 # reveal_sec/slide_sec/hold_sec がJSON側で省略された場合に使う（resolve_reveal_sec/
@@ -966,6 +977,61 @@ def fill_holes(mask_u8):
     return filled[1:-1, 1:-1]
 
 
+def merge_touching_component(alpha_base_u8, alpha_extra_u8, dilate_px=HELD_OBJECT_TOUCH_DILATE_PX):
+    """
+    alpha_base_u8（例：RVMの人物アルファ）に、alpha_extra_u8（例：isnet-general-useの
+    前景アルファ）のうち、alpha_baseの前景（>=128）にdilate_pxピクセル以内で接している
+    連結成分だけを合成する。人物と接していない孤立した物体（無関係な背景など）は
+    取り込まれない。合成領域では、base側に元々値がある画素はbase優先、base側が背景
+    だった画素（新たに取り込んだ部分）はextraの値を使う。
+    """
+    base_bin = np.where(alpha_base_u8 >= 128, 255, 0).astype(np.uint8)
+    extra_bin = np.where(alpha_extra_u8 >= 128, 255, 0).astype(np.uint8)
+    if not base_bin.any() or not extra_bin.any():
+        return alpha_base_u8
+
+    kernel = np.ones((3, 3), np.uint8)
+    base_dilated = cv2.dilate(base_bin, kernel, iterations=max(1, int(dilate_px)))
+
+    num_labels, labels, _, _ = cv2.connectedComponentsWithStats(extra_bin, connectivity=8)
+    touching = np.zeros_like(extra_bin)
+    for label in range(1, num_labels):
+        component_mask = (labels == label)
+        if np.any(base_dilated[component_mask] > 0):
+            touching[component_mask] = 255
+
+    if not touching.any():
+        return alpha_base_u8
+
+    return np.where(base_bin > 0, alpha_base_u8,
+                     np.where(touching > 0, alpha_extra_u8, 0)).astype(np.uint8)
+
+
+def merge_held_objects_with_isnet(alpha_rvm_u8, frame_bgr, extract_module):
+    """
+    RVM（人物専用モデル）は手に持った物（スマホ・マイク・カバン等）を人物から切り離して
+    除外してしまうことがある。同じフレームをisnet-general-use（汎用の顕著物体検出）にも
+    かけ、その前景のうちRVMの人物マスクに接している連結成分だけをmerge_touching_componentで
+    合成する。isnet側の実行が何らかの理由で失敗しても、RVM単体の結果へ安全にフォールバック
+    する（この補完はあくまで品質向上のための補助であり、必須の処理ではないため）。
+    """
+    try:
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+        isnet_rgba_img, isnet_elapsed, _session = extract_module.extract_alpha(img, "isnet-general-use", None, False)
+        h, w = alpha_rvm_u8.shape[:2]
+        if isnet_rgba_img.size != (w, h):
+            isnet_rgba_img = isnet_rgba_img.resize((w, h), Image.LANCZOS)
+        alpha_isnet_u8 = np.array(isnet_rgba_img)[:, :, 3]
+    except Exception as exc:  # noqa: BLE001 - 補助的な処理なので失敗してもRVM単体の結果にフォールバックする
+        warn(f"手に持った物の補完に失敗しました（RVM単体の結果を使います）: {exc}")
+        return alpha_rvm_u8
+
+    merged = merge_touching_component(alpha_rvm_u8, alpha_isnet_u8)
+    log(f"  手に持った物の補完: isnet-general-use（{isnet_elapsed:.2f}秒）の前景のうち人物に接する部分を合成")
+    return merged
+
+
 def postprocess_auto_alpha(alpha_u8):
     """
     自動切り抜き（rembg）のアルファに、破綻を防ぐための後処理を既定で適用する。
@@ -1051,10 +1117,14 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
 
     if model == extract.RVM_MODEL_NAME:
         # 動画モード（RVM）：静止フレーム1枚ではなく、video_path・tから前後クリップを
-        # 自前で切り出して時系列で推論するため、引数のframe_bgrは使わない。
+        # 自前で切り出して時系列で推論する。ここでの引数のframe_bgrは、RVM自体の推論には
+        # 使わないが、include_held_objects（既定true）が有効な場合の手に持った物の補完
+        # （isnet-general-useをこのフレームに対して追加で実行する）にそのまま使う。
         rgba, elapsed = extract.extract_alpha_rvm(video_path, t, W, H)
         alpha = rgba[:, :, 3]
         log(f"  自動切り抜き完了（動画モード）: {elapsed:.2f}秒（モデル={model}）")
+        if opts.get("include_held_objects", True):
+            alpha = merge_held_objects_with_isnet(alpha, frame_bgr, extract)
     else:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
