@@ -3,26 +3,18 @@ onnxruntime>=1.16
 numpy
 pillow
 
-# 動画モード（RVM: Robust Video Matting、extract.pyのrvm-mobilenetv3）用。
-# GPU版torchはサイズが大きく（数GB）、GitHub ActionsランナーにGPUも無いため、
-# --extra-index-urlでCPU専用ビルド（数百MB）を優先的に解決させる。
-# torchvisionはRVMのモデルコード（mobilenetv3.py）がエンコーダの実装に使っている
-# （実Actionsジョブでの検証で発覚：torch.hub.load()時にModuleNotFoundErrorで判明）。
+# 動画モード（RVM: Robust Video Matting、extract.pyのrvm-mobilenetv3）は、
+# RVM公式のONNXエクスポート済みモデルをダウンロードしonnxruntimeで実行するため、
+# 追加の依存は不要（onnxruntimeは上のrembgの依存として既に入っている）。
 #
-# torch/torchvisionはバージョンを固定する（最新版を素朴にインストールしない）。
-# RVM本体（PeterL1n/RobustVideoMatting）はtorchvision.models.mobilenetv3の非公開の
-# 内部クラス（InvertedResidualConfig等）に直接依存しており、リポジトリ自体は
-# torch==1.9.0 / torchvision==0.10.0（2021年当時）でのみ動作確認されている。
-# 実Actionsジョブでの検証で、最新のtorch/torchvisionを組み合わせるとRVMの推論結果
-# （アルファ）が常に0になる（＝内部で使われるtorchvision APIの変化により
-# エンコーダの特徴量が壊れている）不具合を確認した。1.9.0/0.10.0はPython 3.12の
-# ホイールが無いため、Python 3.12に対応する範囲でできるだけ近い組み合わせとして
-# 2.2.2 / 0.17.2（2024年初頭のペア）に固定する。
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.2
-torchvision==0.17.2
-# torch==2.2.2はNumPy 2.0より前にビルドされており、NumPy 2.0系（ABIが変わった）が
-# 入っていると "RuntimeError: Numpy is not available" で落ちる（実Actionsジョブでの
-# 検証で発覚）。冒頭のnumpy行（バージョン指定無し）より後にこの行が評価されるよう、
-# ここで明示的に1系に固定する。
-numpy<2
+# 当初はRVM本体（PeterL1n/RobustVideoMatting、MIT license）のモデルコードを
+# torch.hub経由で取得しtorch/torchvisionで実行する方式にしていたが、実Actionsジョブ
+# での検証で以下の問題を確認したため、ONNXエクスポート済みモデルを直接使う方式に
+# 変更した（詳細はextract.pyのRVM_ONNX_URL周辺のコメント参照）：
+#   - RVM本体はtorchvision.models.mobilenetv3の非公開の内部クラスに直接依存しており、
+#     torch==1.9.0/torchvision==0.10.0（2021年）でのみ動作確認されている。最新の
+#     torch/torchvisionと組み合わせるとアルファが常に0になる不具合があった
+#   - Python 3.12に対応する範囲で近いバージョン（torch==2.2.2/torchvision==0.17.2）に
+#     固定しても、今度はtorch==2.2.2とNumPy 2.x系のABI不整合で動かなかった
+# ONNXエクスポート済みモデルは固定済みの計算グラフのため、これらのモデルコード側の
+# バージョン依存問題が構造的に発生しない。

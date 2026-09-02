@@ -8,8 +8,8 @@ extract.py — 画像/動画から被写体を自動で切り抜き、アルフ�
 他プロジェクトからもそのまま使えるよう、依存は requirements-extract.txt に
 分離し、出力はファイル名・形式を固定した「契約」として扱う。
 render.py はこのファイルの extract_alpha() / extract_alpha_rvm() を直接importして
-使う（rembg・torchのimportは実際に呼ばれるまで遅延するため、mask:"brush"のみの
-プロジェクトではrembg/onnxruntime/torchが未インストールでもrender.pyは問題なく動く）。
+使う（rembg・onnxruntimeのimportは実際に呼ばれるまで遅延するため、mask:"brush"のみの
+プロジェクトではrembg/onnxruntimeが未インストールでもrender.pyは問題なく動く）。
 
 静止画モデル（rembg・isnet-general-use/birefnet-portrait等）は、フレーム単体だけを
 見て切り抜くため、背景と紛らわしい色の巻き込みや、体の一部（手・腕など）が
@@ -40,8 +40,10 @@ render.py はこのファイルの extract_alpha() / extract_alpha_rvm() を直�
 
 依存:
   静止画モード: rembg（MIT）, onnxruntime, numpy, pillow
-  動画モード:   torch（CPU版）, RobustVideoMatting（MIT、PeterL1n/RobustVideoMatting。
-                torch.hub経由でモデルコード・重みを取得）, numpy, pillow, ffmpeg
+  動画モード:   onnxruntime（静止画モードと共通）, numpy, pillow, ffmpeg
+                （RobustVideoMatting公式のONNXエクスポート済みモデルを直接ダウンロードして
+                使う。torch/torchvisionには依存しない。理由はextract_alpha_rvm()の
+                コメント参照）
   （requirements-extract.txt参照）
 """
 
@@ -53,6 +55,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 
 import numpy as np
 from PIL import Image
@@ -77,13 +80,26 @@ VALID_MODELS = ("birefnet-portrait", "birefnet-general-lite", "isnet-general-use
 VALID_REFINES = ("vitmatte",)
 
 # --- 動画モード（RVM: Robust Video Matting）のパラメータ ---
-RVM_TORCH_HUB_REPO = "PeterL1n/RobustVideoMatting"   # MIT license
-RVM_TORCH_HUB_MODEL = "mobilenetv3"                  # 軽量版（resnet50版より高速）
+# RVM公式（PeterL1n/RobustVideoMatting、MIT license）が配布しているONNXエクスポート
+# 済みモデル（mobilenetv3・fp32）を直接ダウンロードして onnxruntime で実行する。
+# torch.hub経由でモデルコード（model/mobilenetv3.py）ごと取得する方式も試したが、
+# 実Actionsジョブでの検証で、torchvisionの新しいバージョンではRVMのモデルコードが
+# 依存しているtorchvision.models.mobilenetv3の非公開の内部クラス（安定APIではない）
+# との組み合わせが壊れ、アルファが常に0になる不具合を確認した（RVM本体は
+# torch==1.9.0/torchvision==0.10.0（2021年）でのみ動作確認されており、それ以降の
+# 変更に追従していない）。ONNXエクスポート済みモデルはモデルコードを含まない
+# 固定済みの計算グラフなので、この問題を構造的に回避できる。加えて、rembgが
+# 既に依存しているonnxruntimeをそのまま使えるため、torch/torchvision（数百MB、
+# 上記の互換性問題込み）が丸ごと不要になる。
+RVM_ONNX_URL = ("https://github.com/PeterL1n/RobustVideoMatting/releases/"
+                 "download/v1.0.0/rvm_mobilenetv3_fp32.onnx")
+RVM_ONNX_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "rvm")
+RVM_ONNX_PATH = os.path.join(RVM_ONNX_CACHE_DIR, "rvm_mobilenetv3_fp32.onnx")
 RVM_PRE_SEC_DEFAULT = 1.5   # フリーズ時刻より前、再帰状態を温めるために遡る秒数
 RVM_POST_SEC_DEFAULT = 0.5  # クリップの末尾に残す余白（シーク誤差対策。推論には使わない。後述）
 RVM_DOWNSAMPLE_MAX_SIDE = 512  # downsample_ratio自動計算の基準（RVM公式サンプルと同じ考え方）
 
-_rvm_model_singleton = {}
+_rvm_session_singleton = {}
 
 
 def log(msg):
@@ -278,62 +294,65 @@ def rvm_auto_downsample_ratio(h, w):
     return min(RVM_DOWNSAMPLE_MAX_SIDE / max(h, w), 1.0)
 
 
-def load_rvm_model():
+def load_rvm_session():
     """
-    RVM(mobilenetv3)モデルをtorch.hubから読み込み、プロセス内で使い回す
-    （torch.hubは初回のみモデルコード＋学習済み重みをダウンロードし、以後は
-    ~/.cache/torch/hub にキャッシュする。CI側はwarm-model-cache.ymlでこの
-    ディレクトリごとキャッシュする）。torchのimportはこの関数内でのみ行うため、
-    RVMを使わないプロジェクト・ジョブではtorch未インストールでも問題ない。
-
-    trust_repo=Trueを指定しないと、torch.hub側の仕様で「このリポジトリを信頼するか」を
-    標準入力から尋ねようとし、GitHub Actions等の非対話環境では標準入力が無いため
-    `EOFError: EOF when reading a line` で落ちる（実Actionsジョブでの検証で発見）。
-    RVM_TORCH_HUB_REPOは固定のMITライセンスリポジトリであることが分かっているため、
-    常に信頼して問題ない。
+    RVM(mobilenetv3, ONNX)モデルファイルを取得し、onnxruntimeのInferenceSessionを
+    プロセス内で使い回す。初回のみRVM_ONNX_URLからダウンロードして
+    RVM_ONNX_PATH（~/.cache/rvm/）にキャッシュする（CI側はwarm-model-cache.ymlで
+    このディレクトリごとキャッシュする）。onnxruntimeは静止画モードのrembgが
+    既に依存しているため、追加の重い依存（torch/torchvision）は不要。
     """
-    import torch
+    import onnxruntime as ort
 
-    if "model" not in _rvm_model_singleton:
-        model = torch.hub.load(RVM_TORCH_HUB_REPO, RVM_TORCH_HUB_MODEL, trust_repo=True)
-        model.eval()
-        _rvm_model_singleton["model"] = model
-    return _rvm_model_singleton["model"]
+    if "session" not in _rvm_session_singleton:
+        if not os.path.exists(RVM_ONNX_PATH):
+            os.makedirs(RVM_ONNX_CACHE_DIR, exist_ok=True)
+            log(f"  RVM(ONNX)モデルをダウンロード中: {RVM_ONNX_URL}")
+            tmp_path = RVM_ONNX_PATH + ".tmp"
+            urllib.request.urlretrieve(RVM_ONNX_URL, tmp_path)
+            os.replace(tmp_path, RVM_ONNX_PATH)
+        session = ort.InferenceSession(RVM_ONNX_PATH, providers=["CPUExecutionProvider"])
+        _rvm_session_singleton["session"] = session
+    return _rvm_session_singleton["session"]
 
 
 def rvm_infer_alpha(frames_rgb, target_index, downsample_ratio=None):
     """
     frames_rgb（時系列順、同一解像度のRGB uint8配列(H,W,3)のリスト）をRVMへ先頭から
-    順に流し、再帰状態を温めながら target_index フレームまで進めて、その時点の
-    (fgr: 前景RGB, pha: アルファ) を合成した RGBA(H,W,4) uint8 を返す。
+    順に流し、再帰状態（r1〜r4）を温めながら target_index フレームまで進めて、
+    その時点の (fgr: 前景RGB, pha: アルファ) を合成した RGBA(H,W,4) uint8 を返す。
     target_indexより後のフレームは（因果モデルのため）結果に影響しないので処理しない。
     戻り値: (rgba: np.ndarray HxWx4 uint8, elapsed_sec)
-    """
-    import torch
 
+    ONNXモデルの入出力契約（RVM公式ドキュメントdocumentation/inference.md#onnx）:
+      入力: src(1,3,H,W float32 0〜1) / r1i,r2i,r3i,r4i(再帰状態。初回は(1,1,1,1)の0)/
+            downsample_ratio((1,) float32)
+      出力: fgr, pha, r1o, r2o, r3o, r4o（r1o〜r4oを次フレームのr1i〜r4iとして渡す）
+    """
     if not frames_rgb:
         raise ValueError("frames_rgbが空です（クリップを取得できなかった可能性があります）")
     target_index = max(0, min(int(target_index), len(frames_rgb) - 1))
     h, w = frames_rgb[0].shape[:2]
-    model = load_rvm_model()
+    session = load_rvm_session()
     dr = downsample_ratio if downsample_ratio is not None else rvm_auto_downsample_ratio(h, w)
+    dr_arr = np.array([dr], dtype=np.float32)
 
-    rec = [None, None, None, None]
+    rec = [np.zeros((1, 1, 1, 1), dtype=np.float32)] * 4
     result_fgr = result_pha = None
     t0 = time.time()
-    with torch.no_grad():
-        for i in range(target_index + 1):
-            frame = np.ascontiguousarray(frames_rgb[i])
-            src = torch.from_numpy(frame).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
-            fgr, pha, *rec = model(src, *rec, downsample_ratio=dr)
-            if i == target_index:
-                result_fgr, result_pha = fgr, pha
+    for i in range(target_index + 1):
+        frame = np.ascontiguousarray(frames_rgb[i])
+        src = (frame.astype(np.float32) / 255.0).transpose(2, 0, 1)[np.newaxis, ...]
+        fgr, pha, *rec = session.run(None, {
+            "src": src, "r1i": rec[0], "r2i": rec[1], "r3i": rec[2], "r4i": rec[3],
+            "downsample_ratio": dr_arr,
+        })
+        if i == target_index:
+            result_fgr, result_pha = fgr, pha
     elapsed = time.time() - t0
 
-    log(f"  [rvm debug] pha raw min={result_pha.min().item():.4f} max={result_pha.max().item():.4f} "
-        f"mean={result_pha.mean().item():.4f} shape={tuple(result_pha.shape)} dr={dr}")
-    fgr_np = (result_fgr[0].clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
-    pha_np = (result_pha[0, 0].clamp(0.0, 1.0).numpy() * 255.0).round().astype(np.uint8)
+    fgr_np = (np.clip(result_fgr[0], 0.0, 1.0).transpose(1, 2, 0) * 255.0).round().astype(np.uint8)
+    pha_np = (np.clip(result_pha[0, 0], 0.0, 1.0) * 255.0).round().astype(np.uint8)
     rgba = np.dstack([fgr_np, pha_np])
     return rgba, elapsed
 

@@ -296,7 +296,8 @@ python extract.py input.png --out outdir/ \
 
 これを時間方向の情報で防ぐのが動画モード（`--model rvm-mobilenetv3`）です。
 [RVM (Robust Video Matting)](https://github.com/PeterL1n/RobustVideoMatting)（MITライセンス、
-`torch.hub` 経由で読み込み）を使い、フリーズ時刻の前後クリップを切り出して先頭（＝一番過去）
+公式が配布しているONNXエクスポート済みモデルをダウンロードし、rembgと共通の依存である
+onnxruntimeで実行）を使い、フリーズ時刻の前後クリップを切り出して先頭（＝一番過去）
 から時系列順に1フレームずつモデルへ通し、再帰状態（ConvGRUの隠れ状態）を温めながら
 フリーズ時刻のフレームまで進めることで、静止画単体では得られない文脈を使った推定になります。
 
@@ -316,10 +317,15 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
   切り出すだけで、推論そのものには使われません。
 - 出力ファイル・`metadata.json` の形式は静止画モードと同じ契約です
   （`extractor` には `"rvm-mobilenetv3"` が記録されます）。
-- モデルコード・学習済み重みは初回のみ `torch.hub` がダウンロードし、
-  `~/.cache/torch/hub` にキャッシュされます（GitHub Actionsでのキャッシュ方法は
+- ONNXモデルファイル（`rvm_mobilenetv3_fp32.onnx`）は初回のみダウンロードし、
+  `~/.cache/rvm` にキャッシュされます（GitHub Actionsでのキャッシュ方法は
   [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
-  依存（CPU版torch、数百MB）は `requirements-extract.txt` に含まれます。
+  追加の依存は不要です（rembgが既に依存しているonnxruntimeをそのまま使うため）。
+  当初はRVM本体のモデルコードをtorch.hub経由で取得しtorch/torchvisionで実行する
+  方式にしていましたが、RVM本体（2021年公開・以降更新なし）がtorchvisionの
+  非公開の内部APIに依存しており、最新のtorch/torchvisionと組み合わせるとアルファが
+  常に0になる不具合があったため、公式のONNXエクスポート済みモデル（固定済みの
+  計算グラフで、モデルコード側のバージョン依存が構造的に発生しない）に切り替えました。
 - エディタの自動切り抜きモデル選択では**動画（安定・推奨）**として選べ、
   新規プロジェクトの既定になっています（詳細は次項「`mask_options`」）。
 
