@@ -2,3 +2,9 @@ rembg>=2.0.65
 onnxruntime>=1.16
 numpy
 pillow
+
+# 動画モード（RVM: Robust Video Matting、extract.pyのrvm-mobilenetv3）用。
+# GPU版torchはサイズが大きく（数GB）、GitHub ActionsランナーにGPUも無いため、
+# --extra-index-urlでCPU専用ビルド（数百MB）を優先的に解決させる。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

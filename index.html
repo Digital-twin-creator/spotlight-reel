@@ -586,6 +586,7 @@
       <div class="field">
         <label>自動切り抜きのモデル（切り抜き方法が「自動」「自動＋ブラシ修正」のフリーズに適用）</label>
         <select id="maskModelSelect">
+          <option value="rvm-mobilenetv3">動画（安定・推奨）</option>
           <option value="isnet-general-use">標準（速い）</option>
           <option value="birefnet-portrait">高精度（遅い・約+1分）</option>
         </select>
@@ -871,9 +872,26 @@ var MASK_MODES = ["brush", "auto", "auto+brush"];
 var COLOR_SOURCES = ["brush", "auto"];
 var SHADOW_SOURCES = ["same", "brush", "auto"];
 var REVEALS = ["wipe", "fade", "brush", "none"];
-/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる2種類のみ） */
-var MASK_MODELS = ["isnet-general-use", "birefnet-portrait"];
+/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる3種類のみ） */
+var MASK_MODELS = ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait"];
+/**
+ * mask_options.model省略時に読み替える既定値（＝render.py/extract.pyのDEFAULT_MODELと
+ * 同じ"isnet-general-use"のまま。旧JSONとの後方互換のため変更しない）。
+ * JSON書き出し時、選んだモデルがこれと一致する場合だけmask_options.modelキーを省略する。
+ */
 var DEFAULT_MASK_MODEL = "isnet-general-use";
+/**
+ * 新規プロジェクト・新規セッションでのモデル選択欄の初期値（RVM＝動画モード、"安定・推奨"）。
+ * DEFAULT_MASK_MODELとは別の概念：これを選んだ場合、DEFAULT_MASK_MODELと一致しないため
+ * mask_options.modelキーはJSONに明示的に出力される（省略されない）。
+ */
+var DEFAULT_MASK_MODEL_SELECTION = "rvm-mobilenetv3";
+/** extract.pyのRVM_MODEL_NAMEと同じ値。動画モード（クリップアップロード）かどうかの判定に使う */
+var RVM_MODEL_NAME = "rvm-mobilenetv3";
+/** RVM動画モードのサーバー確認で送るクリップの既定値（extract.pyのRVM_PRE_SEC_DEFAULTと合わせる） */
+var MASK_PREVIEW_CLIP_PRE_SEC = 1.5;
+var MASK_PREVIEW_CLIP_FPS = 12;
+var MASK_PREVIEW_CLIP_LONG_EDGE_PX = 480;
 /** ライブラリの効果音（自分のmp3/wav）を使うときの位置合わせ（render.pyのSFX_ALIGNS_FREEZE/LOGOと同じ） */
 var SFX_ALIGNS_FREEZE = ["start_at_landing", "end_at_landing"];
 var SFX_ALIGNS_LOGO = ["start_at_landing", "peak_at_landing"];
@@ -2175,9 +2193,14 @@ function logoAssetName(originalFileName) {
 /** サーバー確認で送る静止フレームJPEGの長辺（px）。所要時間短縮のため本番出力より小さくする */
 var MASK_PREVIEW_LONG_EDGE_PX = 1280;
 
-/** extract.yml（.github/scripts/extract_and_cache.py）が読むparams.jsonの中身を作る */
-function buildConfirmParams(model, refine, decontaminate, time, outputWidth, outputHeight) {
-  return {
+/**
+ * extract.yml（.github/scripts/extract_and_cache.py）が読むparams.jsonの中身を作る。
+ * clipInfoはRVM（動画モード）の時だけ渡す（{fps, frameCount, targetIndex}）。
+ * clip_target_indexは、アップロードするclip_%04d.jpgのうちフリーズ時刻そのものに
+ * 対応するフレームの添字（末尾＝frameCount-1になる。captureConfirmClipJpegBlobs参照）。
+ */
+function buildConfirmParams(model, refine, decontaminate, time, outputWidth, outputHeight, clipInfo) {
+  var params = {
     model: model,
     refine: refine || null,
     decontaminate: !!decontaminate,
@@ -2185,6 +2208,12 @@ function buildConfirmParams(model, refine, decontaminate, time, outputWidth, out
     output_width: Math.max(2, Math.round(outputWidth)),
     output_height: Math.max(2, Math.round(outputHeight))
   };
+  if (clipInfo) {
+    params.clip_fps = clipInfo.fps;
+    params.clip_frame_count = clipInfo.frameCount;
+    params.clip_target_index = clipInfo.targetIndex;
+  }
+  return params;
 }
 
 /**
@@ -2425,6 +2454,10 @@ if (typeof module !== "undefined" && module.exports) {
     resolveReveal: resolveReveal,
     MASK_MODELS: MASK_MODELS,
     DEFAULT_MASK_MODEL: DEFAULT_MASK_MODEL,
+    DEFAULT_MASK_MODEL_SELECTION: DEFAULT_MASK_MODEL_SELECTION,
+    RVM_MODEL_NAME: RVM_MODEL_NAME,
+    MASK_PREVIEW_CLIP_PRE_SEC: MASK_PREVIEW_CLIP_PRE_SEC,
+    MASK_PREVIEW_CLIP_FPS: MASK_PREVIEW_CLIP_FPS,
     resolveMaskModel: resolveMaskModel,
     SFX_ALIGNS_FREEZE: SFX_ALIGNS_FREEZE,
     SFX_ALIGNS_LOGO: SFX_ALIGNS_LOGO,
@@ -2649,7 +2682,7 @@ var appState = {
   titleFontKey: DEFAULT_TITLE_FONT_KEY,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   reveal: DEFAULT_STYLE.reveal,
-  maskModel: DEFAULT_MASK_MODEL,
+  maskModel: DEFAULT_MASK_MODEL_SELECTION,
   shadowEnabled: true,  // render.pyの既定（"shadow"キー省略時は有効）に合わせ、エディタも初期状態でON
   shadowColor: DEFAULT_SHADOW.color,
   shadowAlpha: DEFAULT_SHADOW.alpha,
@@ -4480,6 +4513,88 @@ function frozenFrameToJpegBlob(maxLongEdge) {
   });
 }
 
+/**
+ * els.video の「現在のフレーム」を、長辺maxLongEdge px程度に縮小したJPEG Blobにする。
+ * drawPlayerFrameOnceと同じくdrawImage(els.video, ...)をそのまま使う（ブラウザ側で
+ * 回転メタデータ込みで正しい向きに描画されるため、別途回転補正の変換は不要。
+ * getEffectiveVideoDimsは表示上の幅・高さだけを得るために使う）。
+ */
+function videoFrameToJpegBlob(maxLongEdge) {
+  var dims = getEffectiveVideoDims();
+  var srcW = dims.width, srcH = dims.height;
+  if (!srcW || !srcH) return Promise.reject(new Error("動画フレームの画像サイズが取得できませんでした。"));
+  var scale = Math.min(1, maxLongEdge / Math.max(srcW, srcH));
+  var w = Math.max(1, Math.round(srcW * scale));
+  var h = Math.max(1, Math.round(srcH * scale));
+  var tmp = document.createElement("canvas");
+  tmp.width = w; tmp.height = h;
+  try {
+    tmp.getContext("2d").drawImage(els.video, 0, 0, w, h);
+  } catch (err) {
+    tmp.width = 0; tmp.height = 0;
+    return Promise.reject(new Error("動画フレームの取得に失敗しました。"));
+  }
+  return new Promise(function (resolve, reject) {
+    tmp.toBlob(function (blob) {
+      tmp.width = 0; tmp.height = 0;
+      if (blob) resolve(blob); else reject(new Error("動画フレームのJPEG変換に失敗しました。"));
+    }, "image/jpeg", 0.75);
+  });
+}
+
+/**
+ * RVM（動画モード）のサーバー確認用に、フリーズ時刻からMASK_PREVIEW_CLIP_PRE_SEC秒
+ * さかのぼった時点〜フリーズ時刻そのものまでを、MASK_PREVIEW_CLIP_FPS間隔でシークしながら
+ * 低解像度JPEGとして連続キャプチャする。
+ *
+ * RVMは過去のフレームだけを見る再帰モデルで、未来のフレームを与えても対象フレームの
+ * 結果は変わらない（extract.pyのrvm_infer_alphaがtarget_indexで推論を打ち切っているのと
+ * 同じ理由）。そのためフリーズ時刻より後のフレームはそもそも意味を持たず、キャプチャしない。
+ * 配列の最後の要素（targetIndex = blobs.length - 1）が必ずフリーズ時刻そのものになる。
+ *
+ * 描画モード中（draft編集中）はdrawPlayerFrameOnceがvideoから描かなくなる（frozenFrameCanvas
+ * 側だけを表示する）ため、ここでvideo.currentTimeを一時的に動かしても画面表示には影響しない。
+ * ただし完了後は必ず呼び出し前のcurrentTimeへ戻す（成功・失敗どちらの場合も）。
+ */
+function captureConfirmClipJpegBlobs(freezeTime, onProgress) {
+  var preSec = MASK_PREVIEW_CLIP_PRE_SEC;
+  var fps = MASK_PREVIEW_CLIP_FPS;
+  var duration = els.video.duration || freezeTime;
+  var clipStart = Math.max(0, freezeTime - preSec);
+  var frameCount = Math.max(1, Math.round((freezeTime - clipStart) * fps) + 1);
+  var originalTime = els.video.currentTime;
+  var timestamps = [];
+  for (var i = 0; i < frameCount; i++) {
+    var t = (i === frameCount - 1) ? freezeTime : clipStart + i / fps;
+    timestamps.push(Math.max(0, Math.min(duration, t)));
+  }
+  var blobs = [];
+  var chain = Promise.resolve();
+  timestamps.forEach(function (t, idx) {
+    chain = chain
+      .then(function () { return seekAndWait(t); })
+      .then(function () { return videoFrameToJpegBlob(MASK_PREVIEW_CLIP_LONG_EDGE_PX); })
+      .then(function (blob) {
+        blobs[idx] = blob;
+        if (onProgress) onProgress(idx + 1, timestamps.length);
+      });
+  });
+  return chain
+    .then(function () {
+      return seekAndWait(originalTime).then(function () {
+        return { blobs: blobs, fps: fps, frameCount: blobs.length, targetIndex: blobs.length - 1 };
+      });
+    })
+    .catch(function (err) {
+      return seekAndWait(originalTime).then(function () { throw err; });
+    });
+}
+
+/** captureConfirmClipJpegBlobsの結果から、コミットするtreeエントリ用の{path名 → blob}の並びを作る */
+function clipFrameFileName(index) {
+  return "clip_" + String(index).padStart(4, "0") + ".jpg";
+}
+
 /** 画像URLを読み込み、幅最大720pxに収めてmaskPreviewCanvasへ描画する */
 function drawMaskPreviewImage(url) {
   return new Promise(function (resolve, reject) {
@@ -4576,6 +4691,7 @@ function applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraf
  */
 function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
   var model = resolveMaskModel(appState.maskModel);
+  var isVideoMode = model === RVM_MODEL_NAME;
   var videoDims = getEffectiveVideoDims();
   var dims = resolveTargetOutputDims(appState.outputMode, videoDims.width, videoDims.height);
   var tag = makeConfirmTag(new Date());
@@ -4586,6 +4702,10 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
   var baseCommitSha = null;
   var frameBlobSha = null;
   var paramsBlobSha = null;
+  // 動画モード（RVM）の時だけ使う：アップロード済みクリップフレームのtreeエントリと、
+  // params.jsonへ書き込むクリップのメタ情報（fps・枚数・フリーズ時刻に対応する添字）。
+  var clipTreeEntries = null;
+  var clipInfo = null;
 
   function checkAbort() {
     if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
@@ -4626,9 +4746,44 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     .then(function (blob) {
       checkAbort();
       frameBlobSha = blob.sha;
+      if (!isVideoMode) return null;
+      // 動画モード：静止フレーム1枚だけでなく、フリーズ時刻からさかのぼったクリップ
+      // （前MASK_PREVIEW_CLIP_PRE_SEC秒〜フリーズ時刻。RVMは過去のフレームだけを見るため、
+      // それより後のフレームは取得しない）を低解像度JPEGの連番として取得・アップロードする。
+      els.maskPreviewStatus.textContent = "クリップを取得中…";
+      setMaskPreviewProgress(14);
+      return captureConfirmClipJpegBlobs(freezeTime, function (n, maxN) {
+        if (myToken !== maskPreviewAbortToken) return;
+        setMaskPreviewProgress(14 + (n / maxN) * 4);
+        els.maskPreviewStatus.textContent = "クリップを取得中…（" + n + "/" + maxN + "）";
+      });
+    })
+    .then(function (clip) {
+      checkAbort();
+      if (!clip) return null;
+      clipInfo = { fps: clip.fps, frameCount: clip.frameCount, targetIndex: clip.targetIndex };
+      var entries = [];
+      var uploadChain = Promise.resolve();
+      clip.blobs.forEach(function (blob, idx) {
+        uploadChain = uploadChain
+          .then(function () {
+            checkAbort();
+            els.maskPreviewStatus.textContent = "クリップをアップロード中…（" + idx + "/" + clip.blobs.length + "）";
+            setMaskPreviewProgress(18 + (idx / clip.blobs.length) * 8);
+            return blobToBase64(blob);
+          })
+          .then(function (base64) { return ghCreateBlob(user, repo, token, base64); })
+          .then(function (createdBlob) {
+            entries.push({ path: clipFrameFileName(idx), sha: createdBlob.sha });
+          });
+      });
+      return uploadChain.then(function () { clipTreeEntries = entries; });
+    })
+    .then(function () {
+      checkAbort();
       els.maskPreviewStatus.textContent = "パラメータをアップロード中…";
-      setMaskPreviewProgress(16);
-      var params = buildConfirmParams(model, null, false, freezeTime, dims.width, dims.height);
+      setMaskPreviewProgress(26);
+      var params = buildConfirmParams(model, null, false, freezeTime, dims.width, dims.height, clipInfo);
       var paramsBlob = new Blob([JSON.stringify(params)], { type: "application/json" });
       return blobToBase64(paramsBlob);
     })
@@ -4639,7 +4794,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     .then(function (blob) {
       checkAbort();
       paramsBlobSha = blob.sha;
-      setMaskPreviewProgress(20);
+      setMaskPreviewProgress(28);
       return ghGetCommit(user, repo, token, baseCommitSha);
     })
     .then(function (baseCommit) {
@@ -4648,6 +4803,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
         { path: "frame.jpg", sha: frameBlobSha },
         { path: "params.json", sha: paramsBlobSha }
       ];
+      if (clipTreeEntries) entries = entries.concat(clipTreeEntries);
       return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
     })
     .then(function (tree) {
@@ -4661,7 +4817,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     .then(function () {
       checkAbort();
       els.maskPreviewStatus.textContent = "確認を開始しています…";
-      setMaskPreviewProgress(24);
+      setMaskPreviewProgress(32);
       return ghDispatchWorkflow(user, repo, token, tag, "extract.yml");
     })
     .then(function () {
@@ -4669,7 +4825,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
       els.maskPreviewStatus.textContent = "起動を待っています…";
       return pollForRun(user, repo, token, tag, function (n, max) {
         if (myToken !== maskPreviewAbortToken) return;
-        setMaskPreviewProgress(24 + (n / max) * 10);
+        setMaskPreviewProgress(32 + (n / max) * 8);
         els.maskPreviewStatus.textContent = "起動を待っています…（" + n + "/" + max + "）";
       }, "extract.yml", "extract");
     })
@@ -4684,7 +4840,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
       els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（1〜2分程度）";
       return pollRunUntilDone(user, repo, token, run.id, function (n, max) {
         if (myToken !== maskPreviewAbortToken) return;
-        setMaskPreviewProgress(34 + (n / max) * 55);
+        setMaskPreviewProgress(40 + (n / max) * 49);
         els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（経過約" + (n * 5) + "秒）";
       });
     })

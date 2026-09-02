@@ -1049,13 +1049,20 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
     refine = opts.get("refine")
     decontaminate = bool(opts.get("decontaminate"))
 
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    img = Image.fromarray(rgb)
-    rgba_img, elapsed, _session = extract.extract_alpha(img, model, refine, decontaminate)
-    if rgba_img.size != (W, H):
-        rgba_img = rgba_img.resize((W, H), Image.LANCZOS)
-    alpha = np.array(rgba_img)[:, :, 3]
-    log(f"  自動切り抜き完了: {elapsed:.2f}秒（モデル={model}, refine={refine}, decontaminate={decontaminate}）")
+    if model == extract.RVM_MODEL_NAME:
+        # 動画モード（RVM）：静止フレーム1枚ではなく、video_path・tから前後クリップを
+        # 自前で切り出して時系列で推論するため、引数のframe_bgrは使わない。
+        rgba, elapsed = extract.extract_alpha_rvm(video_path, t, W, H)
+        alpha = rgba[:, :, 3]
+        log(f"  自動切り抜き完了（動画モード）: {elapsed:.2f}秒（モデル={model}）")
+    else:
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+        rgba_img, elapsed, _session = extract.extract_alpha(img, model, refine, decontaminate)
+        if rgba_img.size != (W, H):
+            rgba_img = rgba_img.resize((W, H), Image.LANCZOS)
+        alpha = np.array(rgba_img)[:, :, 3]
+        log(f"  自動切り抜き完了: {elapsed:.2f}秒（モデル={model}, refine={refine}, decontaminate={decontaminate}）")
     _TIMING_LOG.append({"time": round(t, 3), "cache_used": False, "extract_seconds": round(elapsed, 2)})
 
     alpha = postprocess_auto_alpha(alpha)

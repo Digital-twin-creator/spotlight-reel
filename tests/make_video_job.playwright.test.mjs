@@ -794,7 +794,7 @@ async function main() {
     await page.fill(".title-line-text", "モデル違いフリーズ");
     await page.evaluate(() => {
       draft.time = 1.5;
-      // モデルが現在の設定(isnet-general-use)と異なる確認結果 → isConfirmedAlphaValidがfalseになるはず
+      // モデルが現在の設定(既定のrvm-mobilenetv3)と異なる確認結果 → isConfirmedAlphaValidがfalseになるはず
       draft.confirmedAlpha = {
         videoFileName: appState.videoFileName, time: 1.5, model: "birefnet-portrait", tag: "job-confirm-mismatch",
       };

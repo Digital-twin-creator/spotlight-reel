@@ -358,10 +358,15 @@ test("resolveMaskModel: 未知の値・未指定は既定モデル(isnet-general
   assert.strictEqual(core.DEFAULT_MASK_MODEL, "isnet-general-use");
 });
 
-test("resolveMaskModel: 選択可能な2種類（isnet-general-use/birefnet-portrait）はそのまま返る", () => {
+test("resolveMaskModel: 選択可能な3種類（rvm-mobilenetv3/isnet-general-use/birefnet-portrait）はそのまま返る", () => {
+  assert.strictEqual(core.resolveMaskModel("rvm-mobilenetv3"), "rvm-mobilenetv3");
   assert.strictEqual(core.resolveMaskModel("isnet-general-use"), "isnet-general-use");
   assert.strictEqual(core.resolveMaskModel("birefnet-portrait"), "birefnet-portrait");
-  assert.deepStrictEqual(core.MASK_MODELS, ["isnet-general-use", "birefnet-portrait"]);
+  assert.deepStrictEqual(core.MASK_MODELS, ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait"]);
+});
+
+test("DEFAULT_MASK_MODEL_SELECTION: 新規プロジェクトの初期選択は動画（RVM）", () => {
+  assert.strictEqual(core.DEFAULT_MASK_MODEL_SELECTION, "rvm-mobilenetv3");
 });
 
 test("buildProjectJSON: maskModelが既定(isnet-general-use)ならstyle.mask_optionsキー自体を省略する（後方互換）", () => {
@@ -1555,6 +1560,26 @@ test("buildConfirmParams: extract_and_cache.pyが読むparams.jsonの形にす�
     output_width: 540,
     output_height: 961
   });
+});
+test("buildConfirmParams: clipInfoを渡すと動画モード（RVM）用のclip_*フィールドを追加する", () => {
+  const p = core.buildConfirmParams("rvm-mobilenetv3", null, false, 3.4, 540.4, 960.6, { fps: 12, frameCount: 19, targetIndex: 18 });
+  assert.deepStrictEqual(p, {
+    model: "rvm-mobilenetv3",
+    refine: null,
+    decontaminate: false,
+    time: 3.4,
+    output_width: 540,
+    output_height: 961,
+    clip_fps: 12,
+    clip_frame_count: 19,
+    clip_target_index: 18
+  });
+});
+test("buildConfirmParams: clipInfoを渡さなければclip_*フィールドは含まれない（静止画モード）", () => {
+  const p = core.buildConfirmParams("isnet-general-use", null, false, 3.4, 540, 960);
+  assert.strictEqual("clip_fps" in p, false);
+  assert.strictEqual("clip_frame_count" in p, false);
+  assert.strictEqual("clip_target_index" in p, false);
 });
 test("confirmedAlphaAssetName: render.pyのcache_path_for_alphaと同じ命名規則（video_<time:.3f>.npz）", () => {
   assert.strictEqual(core.confirmedAlphaAssetName(3.4), "video_3.400.npz");

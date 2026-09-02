@@ -194,19 +194,21 @@ function makeConfirmMockRouter(mock) {
       return json(200, { sha: "base-commit-sha", tree: { sha: "base-tree-sha" } });
     }
 
-    // POST .../git/blobs … frame.jpg（1回目）・params.json（2回目）
+    // POST .../git/blobs … 静止画モードはframe.jpg（1回目）・params.json（2回目）の2回、
+    // RVM（動画モード）はframe.jpg・クリップ連番clip_%04d.jpg・params.json（最後）と
+    // 呼ばれる回数が変わるため、位置ではなく中身がJSONとしてパースできる（＝params.json）かで
+    // 判定する（JPEGのbase64はJSONとして解釈できないため誤検出しない）。
     if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/blobs`) {
       mock.blobCalls++;
-      if (mock.blobCalls === 2) {
-        // params.json のblob。中身からtime（フリーズのtime）を読み取り、
-        // アルファキャッシュのアセット名（video_<time>.npz）を決めるのに使う。
-        let body = {};
-        try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
-        try {
-          const params = JSON.parse(Buffer.from(body.content || "", "base64").toString("utf-8"));
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      try {
+        const params = JSON.parse(Buffer.from(body.content || "", "base64").toString("utf-8"));
+        if (params && typeof params.time === "number") {
           mock.lastParamsTime = params.time;
-        } catch (e) { /* 無視 */ }
-      }
+          mock.lastParams = params;
+        }
+      } catch (e) { /* JPEGブロブなので無視 */ }
       return json(201, { sha: "blob-sha-" + mock.blobCalls });
     }
 
@@ -389,6 +391,17 @@ async function main() {
   await page.selectOption("#maskModeSelect", "auto");
   check(await page.isVisible("#autoMaskHint"), "auto選択時はautoMaskHint（なぞらなくてOK）が表示される");
   check(await page.isHidden("#brushEditModeRow"), "auto選択時はbrushEditModeRowが隠れたまま");
+
+  // モデル選択の既定はRVM（動画モード。DEFAULT_MASK_MODEL_SELECTION参照）だが、
+  // このブロック以降の「切り抜き結果を確認」テスト群は、静止フレーム1枚だけの
+  // モック（frame.jpg・params.jsonの2ファイル）を前提にした汎用フロー（Release作成・
+  // dispatch・ポーリング・復旧・失敗等）の検証が目的でRVM固有ではないため、
+  // 既存の静止画モデルのまま動かす。RVM固有のクリップアップロードの検証は、
+  // モデル選択セレクタのJSON契約テストの直後で別途行う。
+  // #maskModelSelect自体は「全体設定」パネル（フリーズ編集中は隠れている）にあるため、
+  // ここではDOM操作ではなくappState.maskModelを直接書き換える
+  // （runServerMaskPreviewはappState.maskModelを直接参照するため、これで挙動が変わる）。
+  await page.evaluate(() => { appState.maskModel = "isnet-general-use"; });
 
   console.log("");
   console.log("=== 「切り抜き結果を確認」ボタン：自動系モードでのみ表示され、押すとサーバー確認（extract.yml）が走る ===");
@@ -796,15 +809,82 @@ async function main() {
 
   console.log("");
   console.log("=== 全体設定：自動切り抜きのモデル（mask_options.model） ===");
-  check((await page.inputValue("#maskModelSelect")) === "isnet-general-use", "maskModelSelectの既定はisnet-general-use（標準）");
+  // このセクションの直前で"isnet-general-use"に切り替えているため、いったんページを
+  // 読み込み直した時の本来の初期値（新規プロジェクトの既定＝RVM/動画モード）を
+  // 別途確認する。
+  check((await page.evaluate(() => DEFAULT_MASK_MODEL_SELECTION)) === "rvm-mobilenetv3",
+    "新規プロジェクトのモデル既定はrvm-mobilenetv3（動画・安定・推奨）");
+  await page.selectOption("#maskModelSelect", "rvm-mobilenetv3");
+  const styleRvmModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleRvmModel.mask_options && styleRvmModel.mask_options.model === "rvm-mobilenetv3",
+    "maskModelSelectを'動画（安定・推奨）'にするとstyle.mask_options.modelが'rvm-mobilenetv3'になる（DEFAULT_MASK_MODELのisnetとは別物のため省略されない）: " + JSON.stringify(styleRvmModel.mask_options));
+
+  await page.selectOption("#maskModelSelect", "isnet-general-use");
   const styleDefaultModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
-  check(!("mask_options" in styleDefaultModel), "既定モデルのままなら style.mask_options キー自体を出力しない（後方互換）: " + JSON.stringify(styleDefaultModel.mask_options));
+  check(!("mask_options" in styleDefaultModel), "後方互換上の既定モデル(isnet-general-use)を選ぶと style.mask_options キー自体を出力しない: " + JSON.stringify(styleDefaultModel.mask_options));
 
   await page.selectOption("#maskModelSelect", "birefnet-portrait");
   const styleHqModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(styleHqModel.mask_options && styleHqModel.mask_options.model === "birefnet-portrait",
     "maskModelSelectを'高精度'にするとstyle.mask_options.modelが'birefnet-portrait'になる: " + JSON.stringify(styleHqModel.mask_options));
   await page.selectOption("#maskModelSelect", "isnet-general-use");
+
+  console.log("");
+  console.log("=== RVM（動画モード）：サーバー確認でクリップ連番（clip_%04d.jpg）もアップロードする ===");
+  {
+    // #maskPreviewBtn等はフリーズ編集中（draft）のUIなので、そのために新しくフリーズを
+    // 追加する。前後クリップに複数フレームの意味を持たせるため、動画の先頭付近ではなく
+    // 3.0秒地点（pre_sec=1.5秒を余裕を持って確保できる位置）でフリーズを作る。
+    await page.evaluate(() => { appState.maskModel = "rvm-mobilenetv3"; });
+    await page.evaluate(() => { document.getElementById("video").currentTime = 3.0; });
+    await page.waitForFunction(() => Math.abs(document.getElementById("video").currentTime - 3.0) < 0.2,
+      null, { timeout: 5000 });
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModeSelect", "auto");
+
+    // このdraftのfreezeTimeから、captureConfirmClipJpegBlobsと同じ計算式で期待される
+    // クリップ枚数を先に求めておく（テスト対象の値をハードコードせず、実際のdraft.timeに
+    // 対して常に正しく検証できるようにする）。
+    const expected = await page.evaluate(() => {
+      var freezeTime = draft.time;
+      var clipStart = Math.max(0, freezeTime - MASK_PREVIEW_CLIP_PRE_SEC);
+      var frameCount = Math.max(1, Math.round((freezeTime - clipStart) * MASK_PREVIEW_CLIP_FPS) + 1);
+      return { freezeTime: freezeTime, frameCount: frameCount };
+    });
+
+    const rvmMock = makeConfirmMock({ runId: 777030 });
+    await routeConfirmApiGithub(page, rvmMock);
+    await page.click("#maskPreviewBtn");
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+      null, { timeout: 15000 });
+
+    const treeEntryPaths = (rvmMock.treePayload && rvmMock.treePayload.tree || []).map((e) => e.path);
+    check(treeEntryPaths.includes("frame.jpg"), "RVMでも静止フレーム(frame.jpg)は引き続きアップロードする: " + JSON.stringify(treeEntryPaths));
+    check(treeEntryPaths.includes("params.json"), "params.jsonもアップロードする: " + JSON.stringify(treeEntryPaths));
+    const clipPaths = treeEntryPaths.filter((p) => /^clip_\d{4}\.jpg$/.test(p));
+    check(clipPaths.length === expected.frameCount,
+      "クリップ連番(clip_%04d.jpg)の枚数がfreezeTime(" + expected.freezeTime.toFixed(3) + "s)から期待される枚数と一致: "
+      + clipPaths.length + " / " + expected.frameCount + " " + JSON.stringify(clipPaths));
+    check(clipPaths.length >= 10, "3.0秒地点なのでクリップは複数フレーム（fps=12・1.5秒分）取得できている: " + clipPaths.length);
+    check(clipPaths.indexOf("clip_0000.jpg") >= 0, "先頭フレームはclip_0000.jpg: " + JSON.stringify(clipPaths));
+    const lastClipName = "clip_" + String(clipPaths.length - 1).padStart(4, "0") + ".jpg";
+    check(clipPaths.indexOf(lastClipName) >= 0, "末尾フレーム(" + lastClipName + ")はフリーズ時刻そのもの: " + JSON.stringify(clipPaths));
+
+    check(!!rvmMock.lastParams, "params.jsonの中身をパースできる: " + JSON.stringify(rvmMock.lastParams));
+    check(rvmMock.lastParams.model === "rvm-mobilenetv3", "params.json.modelが'rvm-mobilenetv3': " + rvmMock.lastParams.model);
+    check(rvmMock.lastParams.clip_frame_count === clipPaths.length,
+      "params.json.clip_frame_countがアップロードしたクリップ枚数と一致: " + rvmMock.lastParams.clip_frame_count + " / " + clipPaths.length);
+    check(rvmMock.lastParams.clip_target_index === clipPaths.length - 1,
+      "params.json.clip_target_indexは末尾（フリーズ時刻そのもの）の添字: " + rvmMock.lastParams.clip_target_index);
+    check(typeof rvmMock.lastParams.clip_fps === "number" && rvmMock.lastParams.clip_fps > 0,
+      "params.json.clip_fpsが正の数値: " + rvmMock.lastParams.clip_fps);
+
+    await page.click("#maskPreviewCloseBtn");
+    await page.click("#cancelFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModelSelect", "isnet-general-use");
+  }
 
   console.log("");
   console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec） ===");
