@@ -138,7 +138,7 @@ async function main() {
   await page.waitForTimeout(300);
   const pixelSecondFreeze = await readCenterPixel(page, "playerCanvas");
   check(!isBlack(pixelSecondFreeze), "2回目のフリーズ追加でもplayerCanvasが黒くならない");
-  await page.fill("#nameInput", "黒画面回帰テスト");
+  await page.fill(".title-line-text", "黒画面回帰テスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   const freezeCount = await page.evaluate(() => appState.freezes.length);

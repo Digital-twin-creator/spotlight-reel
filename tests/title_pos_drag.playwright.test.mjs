@@ -100,7 +100,7 @@ async function main() {
   const beforeName = await page.evaluate(() => !!computeEditorTelopBox());
   check(beforeName === false, "名前未入力の間はテロップ仮表示が無い（computeEditorTelopBoxがnull）");
 
-  await page.fill("#nameInput", "山田太郎");
+  await page.fill(".title-line-text", "山田太郎");
   await page.waitForTimeout(100);
   const afterName = await page.evaluate(() => !!computeEditorTelopBox());
   check(afterName === true, "名前を入力すると仮表示のテロップが現れる（computeEditorTelopBoxが矩形を返す）");
@@ -191,7 +191,7 @@ async function main() {
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.waitForTimeout(200);
-  await page.fill("#nameInput", "位置指定なし");
+  await page.fill(".title-line-text", "位置指定なし");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   const project2 = await page.evaluate(() => buildProjectJSON(appState));

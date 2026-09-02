@@ -93,7 +93,7 @@ async function main() {
   console.log("=== フリーズを追加してもfilm_color系のキーは出力されない（旧・per-freeze上書きの完全撤去） ===");
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
-  await page.fill("#nameInput", "継承テスト");
+  await page.fill(".title-line-text", "継承テスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   project = await page.evaluate(() => buildProjectJSON(appState));

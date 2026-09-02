@@ -11,6 +11,38 @@
     font-weight: 700;
     font-display: swap;
   }
+  /* テロップの行ごとに選べる追加フォント（TITLE_FONT_CHOICES参照）。エディタの簡易プレビュー
+     （telopCanvas・「▶ プレビュー」再生）でも実際に選んだフォントの雰囲気を確認できるようにする。 */
+  @font-face {
+    font-family: "SpotlightTitleNotoSerifJP";
+    src: url("assets/fonts/NotoSerifJP-Bold.ttf") format("truetype");
+    font-weight: 700;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "SpotlightTitleZenKakuGothicNew";
+    src: url("assets/fonts/ZenKakuGothicNew-Bold.ttf") format("truetype");
+    font-weight: 700;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "SpotlightTitleDelaGothicOne";
+    src: url("assets/fonts/DelaGothicOne-Regular.ttf") format("truetype");
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "SpotlightTitleShipporiMincho";
+    src: url("assets/fonts/ShipporiMincho-Bold.ttf") format("truetype");
+    font-weight: 700;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "SpotlightTitleMPLUSRounded1c";
+    src: url("assets/fonts/MPLUSRounded1c-Bold.ttf") format("truetype");
+    font-weight: 700;
+    font-display: swap;
+  }
   :root{
     --bg:#0b0d12; --panel:#141822; --panel2:#1c2130; --panel3:#232939;
     --text:#eef1f7; --muted:#8b93a7; --accent:#5b8cff; --accent-d:#3f6bdb;
@@ -125,6 +157,19 @@
   .video-wrap:not(.editing) #telopCanvas{ display:none; }
   .video-wrap:not(.previewing) #previewCanvas{ display:none; }
 
+  /* 「▶ プレビュー」再生中は、画面幅いっぱいの全画面オーバーレイに切り替える。
+     canvas自体のCSSサイズ（left/top/width/height）はlayoutOverlayCanvases()が
+     computeContentRectで動画のアスペクト比を保ったまま計算し直すため、ここでは
+     videoWrapの土台（ビューポート全体に広げる）だけを用意すればよい。 */
+  .video-wrap.previewing{
+    position:fixed; inset:0; z-index:65; max-width:100%; width:100%;
+    margin:0; border-radius:0; aspect-ratio:auto; background:#000;
+  }
+  body.freeze-editing #videoWrap.previewing{
+    position:fixed; inset:0; z-index:65; max-width:100%; width:100%;
+    margin:0; border-radius:0;
+  }
+
   .draw-hint{
     position:absolute; inset:0; z-index:3; display:flex; align-items:center; justify-content:center;
     text-align:center; padding:24px; background:rgba(0,0,0,.45); color:#fff; font-size:16px;
@@ -215,29 +260,39 @@
   .mode-toggle-btn{border:2px solid transparent;}
   .mode-toggle-btn.selected{border-color:var(--accent); color:var(--accent);}
 
-  /* --- 切り抜き結果の簡易プレビュー（モーダル） --- */
-  .mask-preview-modal{
-    position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.72);
-    display:flex; align-items:center; justify-content:center; padding:16px;
+  /* --- 切り抜き結果のサーバー確認・「▶ プレビュー」再生：どちらも全画面オーバーレイ表示 ---
+     映像（canvas）を画面幅いっぱいに大きく見せることを優先し、ステータス文言・
+     ボタン等の「UI chrome」は下部の帯にまとめる。閉じるボタンだけは常に右上に固定表示。 */
+  .fullscreen-media{
+    flex:1; min-height:0; display:flex; align-items:center; justify-content:center;
+    padding:12px; overflow:hidden;
   }
-  .mask-preview-card{
-    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
-    padding:14px; width:100%; max-width:420px; max-height:90vh; overflow:auto;
-  }
-  /* 閉じるボタンはカードの子ではなくモーダル（ビューポート全体）基準のposition:fixedにし、
-     カード内をスクロールしても常に右上に留まるようにする */
-  .mask-preview-close-fixed{
+  /* 閉じるボタンは常にビューポート全体基準のposition:fixedにし、
+     下部帯をスクロールしても常に右上に留まるようにする */
+  .fullscreen-close-btn{
     position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); right:12px; z-index:70;
-    width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center;
-    font-size:18px; line-height:1; background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:20px; line-height:1; background:var(--panel2); border:1px solid var(--line); color:var(--text);
     padding:0;
+  }
+  .mask-preview-modal{
+    position:fixed; inset:0; z-index:60; background:#000;
+    display:flex; flex-direction:column;
+  }
+  .mask-preview-chrome{
+    flex-shrink:0; max-height:45vh; overflow-y:auto;
+    background:var(--panel); border-top:1px solid var(--line);
+    padding:12px 14px calc(12px + env(safe-area-inset-bottom));
   }
   .mask-preview-badge{
     display:inline-block; margin:8px 0; padding:6px 10px; border-radius:999px;
     background:rgba(255,179,0,.15); border:1px solid rgba(255,179,0,.45); color:#ffb300;
     font-size:12px; font-weight:700; line-height:1.4;
   }
-  #maskPreviewCanvas{width:100%; height:auto; border-radius:10px; background:#000; display:block;}
+  #maskPreviewCanvas{
+    width:auto; height:auto; max-width:100%; max-height:100%;
+    border-radius:10px; background:#111; display:block;
+  }
   .mask-preview-note{font-size:12px; line-height:1.5;}
 
   /* --- 「動画を作る」前の内容チェック確認モーダル --- */
@@ -339,6 +394,10 @@
         <canvas id="previewCanvas"></canvas>
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
       </div>
+      <!-- 「▶ プレビュー」再生中だけ表示する、全画面表示から抜けるための閉じるボタン。
+           再生中はvideoWrap自体が画面全体を覆うため、下の操作バー（previewBtn等）には
+           指が届かない。かわりにこのボタンで確実に止められるようにする。 -->
+      <button type="button" class="fullscreen-close-btn" id="previewStopBtn" aria-label="プレビューを停止" title="停止" hidden>✕</button>
 
       <div id="playerControls">
         <div class="seek-row">
@@ -388,7 +447,7 @@
           <button type="button" class="small mode-toggle-btn" id="brushModeEraseBtn" data-mode="erase">🧹 消す</button>
         </div>
         <button type="button" class="small ghost grow" id="maskPreviewBtn" style="margin-top:8px;" hidden>
-          🔍 切り抜き結果を確認（簡易プレビュー）
+          🔍 切り抜き結果を確認
         </button>
       </div>
 
@@ -404,14 +463,15 @@
       </div>
 
       <div class="field">
-        <label><span class="step-badge">⑤</span>名前テロップ</label>
-        <input type="text" id="nameInput" placeholder="例：山田 太郎">
-        <div class="muted" id="titleDragHint" style="margin-top:4px;">映像に表示されたテロップを指でドラッグすると位置を変えられます</div>
+        <label><span class="step-badge">⑤</span>名前テロップ（複数行可）</label>
+        <div id="titleLinesList"></div>
+        <button type="button" class="small ghost" id="addTitleLineBtn" style="margin-top:6px;">＋ 行を追加</button>
+        <div class="muted" id="titleDragHint" style="margin-top:4px;">映像に表示されたテロップを指でドラッグすると位置を変えられます（複数行はまとめて動きます）</div>
       </div>
 
       <div class="row wrap">
         <div class="field grow">
-          <label>テロップの大きさ <span class="brush-slider-value" id="titleSizeValue">0.06</span></label>
+          <label>テロップの大きさ（基準） <span class="brush-slider-value" id="titleSizeValue">0.06</span></label>
           <input type="range" id="titleSizeSlider" min="0.03" max="0.14" step="0.005" value="0.06">
         </div>
         <div class="field grow">
@@ -422,6 +482,11 @@
             <option value="right">右寄せ</option>
           </select>
         </div>
+      </div>
+
+      <div class="field">
+        <label>テロップのフォント（このフリーズだけ変更）</label>
+        <select id="freezeTitleFontSelect"></select>
       </div>
 
       <div class="row wrap">
@@ -456,20 +521,23 @@
       </div>
     </div>
 
-    <!-- 切り抜き結果の簡易プレビュー（モーダル）。body.freeze-editing中は
+    <!-- 切り抜き結果のサーバー確認（全画面モーダル）。body.freeze-editing中は
          #editorSection以外のmain直下要素がdisplay:noneになる仕組みのため、
          #fixedEditorBarと同様にeditorSectionの子として置く必要がある。 -->
     <div class="mask-preview-modal" id="maskPreviewModal" hidden>
-      <button type="button" class="mask-preview-close-fixed" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
-      <div class="mask-preview-card">
+      <button type="button" class="fullscreen-close-btn" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
+      <div class="fullscreen-media">
+        <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
+      </div>
+      <div class="mask-preview-chrome">
         <strong>切り抜き結果プレビュー（サーバー確認）</strong>
         <div class="mask-preview-badge">本番と同じモデルで実際に切り抜いた結果です（所要1〜2分）</div>
         <div class="muted" id="maskPreviewStatus">準備中…</div>
         <div id="maskPreviewProgressWrap" hidden>
           <div class="progress-track"><div class="progress-fill" id="maskPreviewProgressFill"></div></div>
         </div>
-        <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
         <button type="button" class="ghost small" id="maskPreviewSkipBtn" hidden>確認せずに進む</button>
+        <a class="link-btn ghost small" id="maskPreviewActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
         <p class="muted mask-preview-note">
           静止フレーム（長辺1280px程度のJPEG）をサーバーへ送り、本番と同じモデルで
           自動切り抜きを行った結果をチェッカー柄に重ねて表示します。この確認で使った
@@ -522,6 +590,10 @@
           <option value="center">中央</option>
           <option value="right">右寄せ</option>
         </select>
+      </div>
+      <div class="field">
+        <label>テロップのフォント（全体既定。フリーズごとに上書き可）</label>
+        <select id="titleFontDefaultSelect"></select>
       </div>
       <div class="field">
         <label>audio_during_freeze（フリーズ中の音声）</label>
@@ -1001,9 +1073,10 @@ function strokeToJSON(st) {
 
 function freezeToJSON(fz, sfxLibrary) {
   var maskMode = resolveMaskMode(fz.maskMode);
+  var titleLines = (fz.titleLines && fz.titleLines.length) ? fz.titleLines : normalizeTitleLines(fz.name);
   var out = {
     time: round(numOr(fz.time, 0), 2),
-    name: fz.name || "",
+    name: titleLinesForJSON(titleLines),
     background: fz.background === "dark" ? "dark" : "mono",
     brush_shape: resolveBrushShape(fz.brushShape),
     strokes: (fz.strokes || []).map(strokeToJSON)
@@ -1029,6 +1102,14 @@ function freezeToJSON(fz, sfxLibrary) {
   if (fz.titlePos) out.title_pos = [round(fz.titlePos[0], 4), round(fz.titlePos[1], 4)];
   if (fz.titleSize !== null && fz.titleSize !== undefined) out.title_size = round(fz.titleSize, 4);
   if (fz.titleAlign) out.title_align = resolveTitleAlign(fz.titleAlign);
+  // テロップのフォント（未指定/既定なら省略し、全体設定 style.title_font* を使わせる）
+  if (fz.titleFontKey && fz.titleFontKey !== DEFAULT_TITLE_FONT_KEY) {
+    var fontChoice = resolveTitleFontChoice(fz.titleFontKey);
+    if (fontChoice.path) {
+      out.title_font = fontChoice.path;
+      out.title_font_jp = fontChoice.path;
+    }
+  }
   return out;
 }
 
@@ -1066,6 +1147,16 @@ function buildProjectJSON(state) {
   var maskModel = resolveMaskModel(state.maskModel);
   if (maskModel !== DEFAULT_MASK_MODEL) {
     project.style.mask_options = { model: maskModel };
+  }
+  // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
+  // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
+  var titleFontKey = state.titleFontKey || DEFAULT_TITLE_FONT_KEY;
+  if (titleFontKey !== DEFAULT_TITLE_FONT_KEY) {
+    var titleFontChoice = resolveTitleFontChoice(titleFontKey);
+    if (titleFontChoice.path) {
+      project.style.title_font = titleFontChoice.path;
+      project.style.title_font_jp = titleFontChoice.path;
+    }
   }
   // style.shadow は常に出力する（enabled/disabledどちらの状態も明示するため）。
   // render.pyのresolve_shadow_configは"shadow"キー省略時を「既定で有効」と解釈するので、
@@ -1173,10 +1264,12 @@ function parseProjectJSON(json, sfxLibrary) {
   var style = Object.assign({}, DEFAULT_STYLE, json.style || {});
   var freezes = (json.freezes || []).map(function (fz, i) {
     var sfxFields = resolveSfxFieldsFromJSON(fz.sfx, sfxLibrary, SFX_ALIGNS_FREEZE);
+    var titleLines = normalizeTitleLines(fz.name);
     return {
       id: "loaded-" + i + "-" + Date.now(),
       time: numOr(fz.time, 0),
-      name: fz.name || "",
+      name: titleLinesToPlainText(titleLines),
+      titleLines: titleLines,
       sfx: sfxFields.sfx,
       sfxLibraryId: sfxFields.sfxLibraryId,
       sfxAlign: sfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
@@ -1190,6 +1283,7 @@ function parseProjectJSON(json, sfxLibrary) {
         : null,
       titleSize: fz.title_size !== undefined && fz.title_size !== null ? numOr(fz.title_size, null) : null,
       titleAlign: fz.title_align ? resolveTitleAlign(fz.title_align) : null,
+      titleFontKey: (fz.title_font || fz.title_font_jp) ? titleFontKeyFromPath(fz.title_font || fz.title_font_jp) : null,
       strokes: (fz.strokes || []).map(function (st) {
         return {
           width: numOr(st.width, style.brush_width),
@@ -1307,6 +1401,7 @@ function parseProjectJSON(json, sfxLibrary) {
       : DEFAULT_STYLE.title_pos.slice(),
     titleSize: numOr(style.title_size, DEFAULT_STYLE.title_size),
     titleAlign: resolveTitleAlign(style.title_align),
+    titleFontKey: titleFontKeyFromPath(style.title_font || style.title_font_jp),
     audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
     reveal: resolveReveal(style.reveal),
     maskModel: resolveMaskModel(style.mask_options && style.mask_options.model),
@@ -1473,6 +1568,92 @@ function resolveTitleAlign(align) {
   return TITLE_ALIGNS.indexOf(align) >= 0 ? align : "center";
 }
 
+/** テロップ1行の既定値（サイズ倍率1.0・アンダーラインなし） */
+var DEFAULT_TITLE_LINE = { text: "", size: 1.0, underline: false };
+
+/**
+ * フリーズJSONの"name"（従来どおりの文字列、または{"lines":[{"text","size","underline"}]}の
+ * オブジェクト形式）を、テロップ描画・編集用の行リスト[{text,size,underline}, ...]に正規化する
+ * （render.pyのresolve_title_linesと同じ方針）。文字列は1行として扱う（size=1.0・underline=false）。
+ * 常に1件以上返す（空文字の1行になることはあるが、配列自体が空になることはない）。
+ */
+function normalizeTitleLines(name) {
+  if (name && typeof name === "object" && !Array.isArray(name)) {
+    var linesIn = Array.isArray(name.lines) ? name.lines : [];
+    var lines = linesIn.map(function (line) {
+      if (line && typeof line === "object") {
+        return {
+          text: String(line.text || ""),
+          size: Math.max(0.05, numOr(line.size, 1.0)),
+          underline: !!line.underline
+        };
+      }
+      return { text: String(line || ""), size: 1.0, underline: false };
+    });
+    return lines.length ? lines : [Object.assign({}, DEFAULT_TITLE_LINE)];
+  }
+  return [{ text: String(name || ""), size: 1.0, underline: false }];
+}
+
+/** 行リストを、freeze一覧・バリデーション等で使う1行のプレーンテキストに畳み込む */
+function titleLinesToPlainText(lines) {
+  return (lines || []).map(function (l) { return l.text; }).filter(Boolean).join(" ");
+}
+
+/** 行リストがすべて既定値（1行・サイズ1.0倍・アンダーラインなし）かどうか */
+function titleLinesAllDefault(lines) {
+  return (lines || []).length === 1 &&
+    Math.abs(numOr(lines[0].size, 1.0) - 1.0) < 1e-6 &&
+    !lines[0].underline;
+}
+
+/**
+ * 行リストをJSON出力用の"name"の値に変換する。1行・既定サイズ・アンダーラインなしの
+ * 場合は従来どおりプレーンな文字列として出力し（JSONの見た目を変えない＝完全後方互換）、
+ * それ以外（複数行、またはサイズ/アンダーラインを変更した1行）は
+ * {"lines":[{"text","size","underline"}, ...]}のオブジェクト形式で出力する。
+ */
+function titleLinesForJSON(lines) {
+  lines = lines && lines.length ? lines : [Object.assign({}, DEFAULT_TITLE_LINE)];
+  if (titleLinesAllDefault(lines)) return lines[0].text;
+  return {
+    lines: lines.map(function (l) {
+      return { text: l.text, size: round(numOr(l.size, 1.0), 2), underline: !!l.underline };
+    })
+  };
+}
+
+/**
+ * テロップに選べる追加フォント一覧（make_dummy.pyのEXTRA_TITLE_FONTSで取得したもの＋
+ * 何も選ばない「既定」）。"default"（既定）は title_font/title_font_jp キー自体を省略し、
+ * render.py既定のAnton（欧文）／Noto Sans JP（日本語）を使わせる（完全後方互換）。
+ * それ以外を選ぶと、日本語・欧文の両方に同じフォントを使う（いずれも和文フォント
+ * ファミリーで欧文グリフも収録されているため）。cssFamilyはエディタの簡易プレビュー
+ * （telopCanvas・「▶ プレビュー」）でこのフォントの雰囲気を確認するためのCSSフォント名。
+ */
+var TITLE_FONT_CHOICES = [
+  { key: "default", label: "既定（Anton／日本語はNoto Sans JP）", path: null, cssFamily: "SpotlightJP", weight: 700 },
+  { key: "notoserifjp", label: "Noto Serif JP（明朝）", path: "assets/fonts/NotoSerifJP-Bold.ttf", cssFamily: "SpotlightTitleNotoSerifJP", weight: 700 },
+  { key: "zenkakugothicnew", label: "Zen Kaku Gothic New（ゴシック）", path: "assets/fonts/ZenKakuGothicNew-Bold.ttf", cssFamily: "SpotlightTitleZenKakuGothicNew", weight: 700 },
+  { key: "delagothicone", label: "Dela Gothic One（極太見出し）", path: "assets/fonts/DelaGothicOne-Regular.ttf", cssFamily: "SpotlightTitleDelaGothicOne", weight: 400 },
+  { key: "shipporimincho", label: "Shippori Mincho（明朝）", path: "assets/fonts/ShipporiMincho-Bold.ttf", cssFamily: "SpotlightTitleShipporiMincho", weight: 700 },
+  { key: "mplusrounded1c", label: "M PLUS Rounded 1c（丸ゴシック）", path: "assets/fonts/MPLUSRounded1c-Bold.ttf", cssFamily: "SpotlightTitleMPLUSRounded1c", weight: 700 }
+];
+var DEFAULT_TITLE_FONT_KEY = "default";
+
+/** キーからTITLE_FONT_CHOICESの1件を引く。未知のキーは既定にフォールバックする */
+function resolveTitleFontChoice(key) {
+  var found = TITLE_FONT_CHOICES.filter(function (c) { return c.key === key; })[0];
+  return found || TITLE_FONT_CHOICES[0];
+}
+
+/** title_font（欧文）のパスから、それに対応するTITLE_FONT_CHOICESのキーを逆引きする（未知なら"default"） */
+function titleFontKeyFromPath(path) {
+  if (!path) return DEFAULT_TITLE_FONT_KEY;
+  var found = TITLE_FONT_CHOICES.filter(function (c) { return c.path === path; })[0];
+  return found ? found.key : DEFAULT_TITLE_FONT_KEY;
+}
+
 /** 未知の値は brush（従来どおり完全後方互換）にフォールバックする（render.py の resolve_mask_mode と同じ方針） */
 function resolveMaskMode(mode) {
   return MASK_MODES.indexOf(mode) >= 0 ? mode : "brush";
@@ -1633,6 +1814,41 @@ function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H) {
   var box = telopBoxFromAnchor(ax, ay, textWidthPx, textHeightPx, align);
   var d = clampBoxToCanvas(box, W, H);
   return [W ? (ax + d.dx) / W : 0.5, H ? (ay + d.dy) / H : 0.78];
+}
+
+/** ctx.font文字列を組み立てる（TITLE_FONT_CHOICESの実際のweightに合わせる） */
+function titleLineFontString(sizePx, fontKey) {
+  var choice = resolveTitleFontChoice(fontKey);
+  return choice.weight + " " + sizePx + 'px "' + choice.cssFamily + '", -apple-system, sans-serif';
+}
+
+/**
+ * 複数行テロップ(lines=[{text,size,underline}, ...])を、baseSizePx（1.0倍のときの文字サイズ）・
+ * fontKeyで実測し、行間なしで縦に積んだ「ブロック」全体の外接サイズと、各行の実測値
+ * （文字サイズpx・幅・高さ・アセント・アンダーライン有無）を返す。render.pyのrender_telop_layer
+ * の行レイアウト計算と同じ考え方（ブロックは1つの単位として位置決め・ドラッグされる）。
+ */
+function measureTitleLines(ctx, lines, baseSizePx, fontKey) {
+  var infos = [];
+  var maxW = 0, totalH = 0;
+  (lines || []).forEach(function (line) {
+    var sizePx = Math.max(8, Math.round(baseSizePx * numOr(line.size, 1.0)));
+    ctx.save();
+    ctx.font = titleLineFontString(sizePx, fontKey);
+    ctx.textBaseline = "alphabetic"; // fontBoundingBoxAscent/Descentをalphabeticベースラインで揃えて測る
+    var m = ctx.measureText(line.text || "");
+    var ascent = m.fontBoundingBoxAscent != null ? m.fontBoundingBoxAscent : sizePx * 0.92;
+    var descent = m.fontBoundingBoxDescent != null ? m.fontBoundingBoxDescent : sizePx * 0.23;
+    ctx.restore();
+    var height = ascent + descent;
+    infos.push({
+      text: line.text || "", sizePx: sizePx, width: m.width, height: height,
+      ascent: ascent, underline: !!line.underline
+    });
+    if (m.width > maxW) maxW = m.width;
+    totalH += height;
+  });
+  return { width: maxW, height: totalH, lines: infos };
 }
 
 /**
@@ -2125,6 +2341,17 @@ if (typeof module !== "undefined" && module.exports) {
     telopBounceScale: telopBounceScale,
     TITLE_ALIGNS: TITLE_ALIGNS,
     resolveTitleAlign: resolveTitleAlign,
+    DEFAULT_TITLE_LINE: DEFAULT_TITLE_LINE,
+    normalizeTitleLines: normalizeTitleLines,
+    titleLinesToPlainText: titleLinesToPlainText,
+    titleLinesAllDefault: titleLinesAllDefault,
+    titleLinesForJSON: titleLinesForJSON,
+    TITLE_FONT_CHOICES: TITLE_FONT_CHOICES,
+    DEFAULT_TITLE_FONT_KEY: DEFAULT_TITLE_FONT_KEY,
+    resolveTitleFontChoice: resolveTitleFontChoice,
+    titleFontKeyFromPath: titleFontKeyFromPath,
+    titleLineFontString: titleLineFontString,
+    measureTitleLines: measureTitleLines,
     MASK_MODES: MASK_MODES,
     COLOR_SOURCES: COLOR_SOURCES,
     SHADOW_SOURCES: SHADOW_SOURCES,
@@ -2368,6 +2595,7 @@ var appState = {
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
   titleAlign: DEFAULT_STYLE.title_align,
+  titleFontKey: DEFAULT_TITLE_FONT_KEY,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   reveal: DEFAULT_STYLE.reveal,
   maskModel: DEFAULT_MASK_MODEL,
@@ -2397,6 +2625,10 @@ var overlaySize = { width: 0, height: 0 };
 // 頻発するresizeで）canvasの中身が消えてしまうため、幅かアスペクト比が
 // 実際に変わった時だけ再設定するための比較基準として使う。
 var lastCanvasContentSize = { width: 0, height: 0 };
+// previewCanvas（「▶ プレビュー」の毎フレーム合成描画）のバッキングストア解像度の
+// 上限DPR。実機のフルDPR（3倍等）のまま全画面サイズにすると1フレームの画素数が
+// 跳ね上がりアニメーションがカクつく／実時間より遅れるため、他のcanvasより低く抑える。
+var PREVIEW_CANVAS_MAX_DPR = 2;
 var telopDragging = false;               // テロップをドラッグ中か（trueの間はストローク描画を行わない）
 var telopDragOffsetRatio = { x: 0, y: 0 }; // 掴んだ位置とテロップ位置(pos)のズレ（指に位置が飛ばないよう保持する）
 var previewRAF = null;
@@ -2489,19 +2721,22 @@ function init() {
     "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
     "guideCard", "guideCloseBtn",
     "playerSection", "playerControls", "video", "videoWrap", "playerCanvas", "drawCanvas", "telopCanvas", "previewCanvas", "drawHint",
+    "previewStopBtn",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "maskModeSelect", "autoMaskHint", "brushEditModeRow", "brushModeAddBtn", "brushModeEraseBtn",
     "maskPreviewBtn", "maskPreviewModal", "maskPreviewCanvas", "maskPreviewStatus", "maskPreviewCloseBtn",
-    "maskPreviewProgressWrap", "maskPreviewProgressFill", "maskPreviewSkipBtn",
+    "maskPreviewProgressWrap", "maskPreviewProgressFill", "maskPreviewSkipBtn", "maskPreviewActionsLink",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
-    "nameInput", "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
+    "titleLinesList", "addTitleLineBtn", "freezeTitleFontSelect",
+    "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
     "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
+    "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect",
     "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
@@ -2523,6 +2758,8 @@ function init() {
   preloadBrushTipImages();
   initGuideCard();
   buildFilmColorControls();
+  populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
+  populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
 
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
   els.videoFileInput.addEventListener("change", handleVideoFileChange);
@@ -2581,13 +2818,10 @@ function init() {
   els.undoStrokeBtn.addEventListener("click", undoLastStroke);
   els.clearStrokesBtn.addEventListener("click", clearAllStrokes);
   els.previewBtn.addEventListener("click", togglePreviewPlayback);
+  els.previewStopBtn.addEventListener("click", stopPreviewPlayback);
   els.maskPreviewBtn.addEventListener("click", showMaskPreview);
   els.maskPreviewCloseBtn.addEventListener("click", closeMaskPreview);
   els.maskPreviewSkipBtn.addEventListener("click", closeMaskPreview);
-  // モーダル背景（カードの外側）をタップしても閉じられるようにする
-  els.maskPreviewModal.addEventListener("click", function (e) {
-    if (e.target === els.maskPreviewModal) closeMaskPreview();
-  });
   // Escキーでも閉じられるようにする（モーダルが開いている時だけ反応する）
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !els.maskPreviewModal.hidden) closeMaskPreview();
@@ -2610,11 +2844,19 @@ function init() {
   });
   els.brushModeAddBtn.addEventListener("click", function () { setBrushEditMode("add"); });
   els.brushModeEraseBtn.addEventListener("click", function () { setBrushEditMode("erase"); });
-  els.nameInput.addEventListener("input", function () {
+  els.addTitleLineBtn.addEventListener("click", function () {
     if (!draft) return;
-    // 確定値はcommitFreezeEditでtrimして保存するが、映像上の仮表示にはリアルタイムで反映する
-    draft.name = els.nameInput.value;
+    draft.titleLines = (draft.titleLines && draft.titleLines.length) ? draft.titleLines : normalizeTitleLines(draft.name);
+    draft.titleLines.push({ text: "", size: 0.7, underline: false });
+    draft.name = titleLinesToPlainText(draft.titleLines);
+    renderTitleLinesEditor();
     redrawTelopOverlay();
+  });
+  els.freezeTitleFontSelect.addEventListener("change", function () {
+    if (!draft) return;
+    draft.titleFontKey = els.freezeTitleFontSelect.value || null;
+    redrawTelopOverlay();
+    preloadCurrentTitleFontAndRedraw();
   });
   els.titleSizeSlider.addEventListener("input", function () {
     if (!draft) return;
@@ -2660,6 +2902,11 @@ function init() {
   els.titleAlignDefaultSelect.addEventListener("change", function () {
     appState.titleAlign = resolveTitleAlign(els.titleAlignDefaultSelect.value);
     saveToLocalStorage();
+  });
+  els.titleFontDefaultSelect.addEventListener("change", function () {
+    appState.titleFontKey = resolveTitleFontChoice(els.titleFontDefaultSelect.value).key;
+    saveToLocalStorage();
+    if (draft) { redrawTelopOverlay(); preloadCurrentTitleFontAndRedraw(); }
   });
   els.audioDuringFreezeSelect.addEventListener("change", function () {
     appState.audioDuringFreeze = els.audioDuringFreezeSelect.value;
@@ -3032,6 +3279,8 @@ function startNewFreeze() {
     titlePos: null,
     titleSize: null,
     titleAlign: null,
+    titleFontKey: null,
+    titleLines: [Object.assign({}, DEFAULT_TITLE_LINE)],
     strokes: []
   }, true);
 }
@@ -3161,7 +3410,9 @@ function paintFrozenFrame() {
 function enterDrawMode() {
   els.editorTitle.innerHTML = '<span class="step-badge">④</span>' +
     (draftIsNew ? "止まった映像を指でなぞってください" : "フリーズを編集（" + draft.time.toFixed(2) + "s）");
-  els.nameInput.value = draft.name || "";
+  draft.titleLines = (draft.titleLines && draft.titleLines.length) ? draft.titleLines : normalizeTitleLines(draft.name);
+  renderTitleLinesEditor();
+  els.freezeTitleFontSelect.value = draft.titleFontKey || "";
   populateSfxLibraryOptions(els.sfxSelect, sfxLibrary);
   els.sfxSelect.value = sfxSelectValue(draft.sfxLibraryId, draft.sfx);
   els.sfxAlignSelect.value = resolveSfxAlign(draft.sfxAlign, SFX_ALIGNS_FREEZE);
@@ -3191,8 +3442,23 @@ function enterDrawMode() {
   paintFrozenFrame();
   redrawStrokesOverlay();
   redrawTelopOverlay();
+  preloadCurrentTitleFontAndRedraw();
   showDrawHint();
   layoutFixedEditorArea();
+}
+
+/**
+ * 現在draftで使われているテロップフォントを先読みし、読み込みが完了した時点で
+ * （font-display:swapによるフォールバック→本来のフォントへの切り替え後）
+ * telopCanvasを描き直す。canvasのテキストはDOMと違い自動で再描画されないため、
+ * フォント読み込みが遅い場合に一瞬だけ既定フォントで表示されたままになるのを防ぐ。
+ */
+function preloadCurrentTitleFontAndRedraw() {
+  if (!document.fonts || !document.fonts.load || !draft) return;
+  var choice = resolveTitleFontChoice(resolveTitleField(draft.titleFontKey, appState.titleFontKey));
+  document.fonts.load(choice.weight + ' 20px "' + choice.cssFamily + '"').then(function () {
+    if (draft) redrawTelopOverlay();
+  }).catch(function () {});
 }
 
 /**
@@ -3243,7 +3509,9 @@ function cancelFreezeEdit() {
  * 動画の上に残ったまま操作不能になる事態を避けるための二重の安全網）。
  */
 function commitFreezeEdit() {
-  draft.name = els.nameInput.value.trim();
+  draft.titleLines = ((draft.titleLines && draft.titleLines.length) ? draft.titleLines : normalizeTitleLines(draft.name))
+    .map(function (l) { return { text: (l.text || "").trim(), size: numOr(l.size, 1.0), underline: !!l.underline }; });
+  draft.name = titleLinesToPlainText(draft.titleLines);
   var sfxFields = applySfxSelectValue(els.sfxSelect.value);
   draft.sfx = sfxFields.sfx;
   draft.sfxLibraryId = sfxFields.sfxLibraryId;
@@ -3347,10 +3615,17 @@ function layoutOverlayCanvases() {
   }
 
   [els.playerCanvas, els.drawCanvas, els.telopCanvas, els.previewCanvas].forEach(function (canvas) {
-    canvas.width = Math.max(1, Math.round(content.width * dpr));
-    canvas.height = Math.max(1, Math.round(content.height * dpr));
+    // previewCanvasだけは、全画面プレビュー中に毎フレーム重い合成処理（マスク・影・
+    // ブラシのスタンプ描画等）を行うため、フルDPR（実機で3倍）のまま全画面サイズに
+    // すると1フレームあたりの画素数が跳ね上がりアニメーションがカクつく／実時間より
+    // 大幅に遅れる。表示上は他のcanvasと同じCSSサイズ（width/height）のまま、
+    // バッキングストアの解像度だけ抑える（ブラウザが表示時に引き伸ばすため、
+    // 見た目のシャープさより滑らかな動きを優先する）。
+    var canvasDpr = (canvas === els.previewCanvas) ? Math.min(dpr, PREVIEW_CANVAS_MAX_DPR) : dpr;
+    canvas.width = Math.max(1, Math.round(content.width * canvasDpr));
+    canvas.height = Math.max(1, Math.round(content.height * canvasDpr));
     var ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
   });
   lastCanvasContentSize = { width: content.width, height: content.height };
   return true;
@@ -3661,42 +3936,162 @@ function redrawStrokesOverlay() {
   });
 }
 
+/* ---------------- テロップの複数行入力UI（行の追加・削除・サイズ・アンダーライン） ---------------- */
+
+/** 文字サイズselectの選択肢を組み立てる（大/中/小のプリセット。既存値がどれとも一致しなければカスタムとして追加する） */
+function buildTitleLineSizeOptions(selectEl, currentSize) {
+  var presets = [{ value: 1.3, label: "大" }, { value: 1.0, label: "中" }, { value: 0.7, label: "小" }];
+  selectEl.innerHTML = "";
+  var matched = false;
+  presets.forEach(function (p) {
+    var opt = document.createElement("option");
+    opt.value = String(p.value);
+    opt.textContent = p.label;
+    if (Math.abs(currentSize - p.value) < 1e-6) { opt.selected = true; matched = true; }
+    selectEl.appendChild(opt);
+  });
+  if (!matched) {
+    var custom = document.createElement("option");
+    custom.value = String(currentSize);
+    custom.textContent = "カスタム(" + currentSize.toFixed(2) + "倍)";
+    custom.selected = true;
+    selectEl.appendChild(custom);
+  }
+}
+
+/** フォント選択selectの選択肢を組み立てる。includeInheritOptionがtrueなら先頭に「全体既定を使う」を追加する（フリーズ単位の上書き用） */
+function populateTitleFontSelectOptions(selectEl, includeInheritOption) {
+  selectEl.innerHTML = "";
+  if (includeInheritOption) {
+    var inheritOpt = document.createElement("option");
+    inheritOpt.value = "";
+    inheritOpt.textContent = "（全体既定を使う）";
+    selectEl.appendChild(inheritOpt);
+  }
+  TITLE_FONT_CHOICES.forEach(function (choice) {
+    var opt = document.createElement("option");
+    opt.value = choice.key;
+    opt.textContent = choice.label;
+    selectEl.appendChild(opt);
+  });
+}
+
+/**
+ * draft.titleLinesから #titleLinesList の行UIを再構築する。各行はテキスト・文字サイズ・
+ * アンダーライン切り替え・削除ボタンを持つ。1行しかないときは削除ボタンを隠す
+ * （常に最低1行は残す仕様のため）。
+ */
+function renderTitleLinesEditor() {
+  if (!els.titleLinesList || !draft) return;
+  var lines = (draft.titleLines && draft.titleLines.length) ? draft.titleLines : normalizeTitleLines(draft.name);
+  draft.titleLines = lines;
+  els.titleLinesList.innerHTML = "";
+  lines.forEach(function (line, i) {
+    var row = document.createElement("div");
+    row.className = "row wrap title-line-row";
+    row.style.marginTop = "6px";
+    row.style.alignItems = "center";
+    row.dataset.index = String(i);
+
+    var textInput = document.createElement("input");
+    textInput.type = "text";
+    textInput.className = "title-line-text grow";
+    textInput.placeholder = i === 0 ? "例：山田 太郎" : "例：エースストライカー";
+    textInput.value = line.text || "";
+    textInput.addEventListener("input", function () {
+      draft.titleLines[i].text = textInput.value;
+      draft.name = titleLinesToPlainText(draft.titleLines);
+      redrawTelopOverlay();
+    });
+
+    var sizeSelect = document.createElement("select");
+    sizeSelect.className = "title-line-size";
+    buildTitleLineSizeOptions(sizeSelect, numOr(line.size, 1.0));
+    sizeSelect.addEventListener("change", function () {
+      draft.titleLines[i].size = Number(sizeSelect.value);
+      redrawTelopOverlay();
+    });
+
+    var underlineBtn = document.createElement("button");
+    underlineBtn.type = "button";
+    underlineBtn.className = "small ghost mode-toggle-btn title-line-underline-btn";
+    underlineBtn.textContent = "U 下線";
+    underlineBtn.classList.toggle("selected", !!line.underline);
+    underlineBtn.setAttribute("aria-pressed", line.underline ? "true" : "false");
+    underlineBtn.addEventListener("click", function () {
+      draft.titleLines[i].underline = !draft.titleLines[i].underline;
+      underlineBtn.classList.toggle("selected", draft.titleLines[i].underline);
+      underlineBtn.setAttribute("aria-pressed", draft.titleLines[i].underline ? "true" : "false");
+      redrawTelopOverlay();
+    });
+
+    var removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "small danger title-line-remove-btn";
+    removeBtn.textContent = "✕";
+    removeBtn.setAttribute("aria-label", "この行を削除");
+    removeBtn.hidden = lines.length <= 1;
+    removeBtn.addEventListener("click", function () {
+      draft.titleLines.splice(i, 1);
+      if (!draft.titleLines.length) draft.titleLines = [Object.assign({}, DEFAULT_TITLE_LINE)];
+      draft.name = titleLinesToPlainText(draft.titleLines);
+      renderTitleLinesEditor();
+      redrawTelopOverlay();
+    });
+
+    row.appendChild(textInput);
+    row.appendChild(sizeSelect);
+    row.appendChild(underlineBtn);
+    row.appendChild(removeBtn);
+    els.titleLinesList.appendChild(row);
+  });
+}
+
 /* ---------------- テロップの仮表示・ドラッグ移動（telopCanvas） ---------------- */
 
-/** telopCanvasへ、draft.name（未入力なら何も描かない）を実効位置・大きさ・寄せで描き直す */
+/** テロップの各行のうち、実際に表示すべき行（テキストがある行）だけ取り出す */
+function draftVisibleTitleLines() {
+  if (!draft) return [];
+  var lines = draft.titleLines && draft.titleLines.length ? draft.titleLines : normalizeTitleLines(draft.name);
+  return lines.filter(function (l) { return l && l.text; });
+}
+
+/** telopCanvasへ、draft.titleLines（未入力なら何も描かない）を実効位置・大きさ・寄せ・フォントで描き直す */
 function redrawTelopOverlay() {
   if (!els.telopCanvas) return;
   var ctx = els.telopCanvas.getContext("2d");
   ctx.clearRect(0, 0, overlaySize.width, overlaySize.height);
-  if (!draft || !draft.name) return;
-  drawTelop(ctx, draft.name, overlaySize.width, overlaySize.height, 1, 1,
+  var lines = draftVisibleTitleLines();
+  if (!lines.length) return;
+  drawTelop(ctx, lines, overlaySize.width, overlaySize.height, 1, 1,
     resolveTitleField(draft.titlePos, appState.titlePos),
     resolveTitleField(draft.titleSize, appState.titleSize),
-    resolveTitleField(draft.titleAlign, appState.titleAlign));
+    resolveTitleField(draft.titleAlign, appState.titleAlign),
+    resolveTitleField(draft.titleFontKey, appState.titleFontKey));
 }
 
 /**
- * 現在のdraftから、テロップの実効位置・大きさ・寄せ・外接矩形（overlaySize基準のpx）を計算する。
- * テロップ未表示（名前未入力・レイアウト未確定）ならnull。
- * ドラッグ開始時の当たり判定と、ドラッグ中のクランプ計算の両方で使う。
+ * 現在のdraftから、テロップ（複数行ブロック全体）の実効位置・大きさ・寄せ・外接矩形
+ * （overlaySize基準のpx）を計算する。テロップ未表示（全行とも未入力・レイアウト未確定）ならnull。
+ * ドラッグ開始時の当たり判定と、ドラッグ中のクランプ計算の両方で使う
+ * （複数行はブロック全体を1つのまとまりとして移動する仕様のため、行ごとには計算しない）。
  */
 function computeEditorTelopBox() {
-  if (!draft || !draft.name || !overlaySize.width || !overlaySize.height) return null;
+  if (!overlaySize.width || !overlaySize.height) return null;
+  var lines = draftVisibleTitleLines();
+  if (!lines.length) return null;
   var W = overlaySize.width, H = overlaySize.height;
   var sizeRatio = resolveTitleField(draft.titleSize, appState.titleSize);
   var align = resolveTitleAlign(resolveTitleField(draft.titleAlign, appState.titleAlign));
   var pos = resolveTitleField(draft.titlePos, appState.titlePos) || DEFAULT_STYLE.title_pos;
-  var sizePx = Math.max(8, Math.round(H * sizeRatio));
+  var fontKey = resolveTitleField(draft.titleFontKey, appState.titleFontKey);
+  var baseSizePx = Math.max(8, Math.round(H * sizeRatio));
   var ctx = els.telopCanvas.getContext("2d");
-  ctx.save();
-  ctx.font = "700 " + sizePx + 'px "SpotlightJP", -apple-system, sans-serif';
-  var textW = ctx.measureText(draft.name).width;
-  ctx.restore();
-  var textH = sizePx * 1.15; // 当たり判定・クランプ用の概算文字高さ（少し余裕を持たせる）
+  var measured = measureTitleLines(ctx, lines, baseSizePx, fontKey);
   var anchorX = pos[0] * W, anchorY = pos[1] * H;
   return {
-    box: telopBoxFromAnchor(anchorX, anchorY, textW, textH, align),
-    align: align, pos: pos, textW: textW, textH: textH
+    box: telopBoxFromAnchor(anchorX, anchorY, measured.width, measured.height, align),
+    align: align, pos: pos, textW: measured.width, textH: measured.height
   };
 }
 
@@ -3936,17 +4331,32 @@ function showMaskPreview() {
 
   els.maskPreviewModal.hidden = false;
   releaseMaskPreviewCanvas();
+  els.maskPreviewActionsLink.hidden = true;
   els.maskPreviewStatus.textContent = "準備中…";
   els.maskPreviewProgressWrap.hidden = false;
   setMaskPreviewProgress(1);
   els.maskPreviewSkipBtn.hidden = false;
 
-  runServerMaskPreview(myToken, user, repo, token, draft).catch(function (err) {
+  var model = resolveMaskModel(appState.maskModel);
+  var pending = loadPendingConfirm(appState.videoFileName);
+  var canRecover = pending && pending.videoFileName === appState.videoFileName &&
+    Math.abs(numOr(pending.time, NaN) - numOr(draft.time, NaN)) < 1e-6 &&
+    pending.model === model;
+
+  var starter = canRecover
+    ? tryRecoverPendingConfirm(myToken, user, repo, token, pending, draft)
+    : runServerMaskPreview(myToken, user, repo, token, draft);
+
+  starter.catch(function (err) {
     if (myToken !== maskPreviewAbortToken) return;
     if (err && err.message === "__aborted__") return;
     els.maskPreviewProgressWrap.hidden = true;
     els.maskPreviewStatus.textContent = "確認に失敗しました: " + (err && err.message ? err.message : err) +
       "（「確認せずに進む」でこのまま編集を続けられます）";
+    if (err && err.actionsUrl) {
+      els.maskPreviewActionsLink.href = err.actionsUrl;
+      els.maskPreviewActionsLink.hidden = false;
+    }
   });
 }
 
@@ -3972,8 +4382,9 @@ function closeMaskPreview() {
   releaseMaskPreviewCanvas();
   els.maskPreviewProgressWrap.hidden = true;
   els.maskPreviewSkipBtn.hidden = true;
+  els.maskPreviewActionsLink.hidden = true;
   maskPreviewOpenedForDraft = null;
-  maskPreviewAbortToken += 1; // 進行中のポーリング等を打ち切る（GitHub Actions側の実行自体は止めない）
+  maskPreviewAbortToken += 1; // 進行中のポーリング等を打ち切る（GitHub Actions側の実行・pendingConfirmの記録は消さない）
 }
 
 /** frozenFrameCanvasを、長辺maxLongEdge px程度に縮小したJPEG Blobにする */
@@ -4013,10 +4424,80 @@ function drawMaskPreviewImage(url) {
 }
 
 /**
+ * すでにdispatch済み（pendingConfirmに記録済み）の確認結果を取りに行く。GitHub
+ * Actions側では既に完了していたにも関わらず、タブのバックグラウンド化・再読み込み等で
+ * 元のPromiseチェーンが失われ、画面には何も表示されないまま終わっていた事例への対策
+ * （runServerMaskPreview参照）。Releaseにpreview.pngが見つかればそれをそのまま表示し、
+ * dispatchし直さない。見つからなければ（まだ処理中／失敗／期限切れ）、通常どおり新しい
+ * 確認を開始する。
+ */
+function tryRecoverPendingConfirm(myToken, user, repo, token, pending, targetDraft) {
+  function checkAbort() {
+    if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
+  }
+  els.maskPreviewStatus.textContent = "前回の確認結果を確認しています…";
+  setMaskPreviewProgress(10);
+  return ghGetReleaseByTag(user, repo, token, pending.tag)
+    .catch(function () { return null; })
+    .then(function (rel) {
+      checkAbort();
+      var previewAsset = rel && findReleaseAsset(rel.assets, "preview.png");
+      if (!previewAsset) {
+        clearPendingConfirm(pending.videoFileName);
+        return runServerMaskPreview(myToken, user, repo, token, targetDraft);
+      }
+      return applyMaskPreviewResult(myToken, rel, pending.tag, pending.time, pending.model, targetDraft, user, repo, token);
+    });
+}
+
+/**
+ * 完了したRelease（preview.png・アルファキャッシュを含む）を取得し、画面に表示する。
+ * 通常の確認完了時と、tryRecoverPendingConfirmでの復旧時の両方から呼ばれる共通処理。
+ */
+function applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraft, user, repo, token) {
+  function checkAbort() {
+    if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
+  }
+  var previewAsset = findReleaseAsset(rel.assets, "preview.png");
+  if (!previewAsset) {
+    var err = new Error("preview.pngが見つかりませんでした。Releaseページで確認してください: " + rel.html_url);
+    err.actionsUrl = rel.html_url;
+    throw err;
+  }
+  var cacheAsset = findReleaseAsset(rel.assets, confirmedAlphaAssetName(freezeTime));
+  setMaskPreviewProgress(96);
+  return ghDownloadReleaseAsset(user, repo, token, previewAsset.id).then(function (arrayBuffer) {
+    checkAbort();
+    var blob = new Blob([arrayBuffer], { type: "image/png" });
+    maskPreviewObjectURL = URL.createObjectURL(blob);
+    return drawMaskPreviewImage(maskPreviewObjectURL).then(function () {
+      setMaskPreviewProgress(100);
+      els.maskPreviewProgressWrap.hidden = true;
+      els.maskPreviewSkipBtn.hidden = true;
+      els.maskPreviewActionsLink.hidden = true;
+      els.maskPreviewStatus.textContent = "確認完了（本番と同じモデルでの切り抜き結果です。チェッカー柄の部分が透明＝背景です）";
+      if (targetDraft && cacheAsset) {
+        targetDraft.confirmedAlpha = {
+          videoFileName: appState.videoFileName,
+          time: freezeTime,
+          model: model,
+          tag: tag
+        };
+        saveToLocalStorage();
+      }
+      clearPendingConfirm(appState.videoFileName);
+    });
+  });
+}
+
+/**
  * サーバー確認の本体。静止フレームJPEG＋paramsをjob-confirm-<tag>ブランチへコミットし、
  * extract.yml をdispatch、完了を待ってpreview.pngを取得・表示する。成功時は
  * draft.confirmedAlpha に確認結果（動画名・時刻・モデル・タグ・アセット名）を記録し、
  * 「動画を作る」実行時に同じアルファを再利用できるようにする（reuseConfirmedAlphaForFreezes参照）。
+ * Release作成が完了した時点でpendingConfirmに記録し、以後何らかの理由でこの関数の実行が
+ * 中断されても（tryRecoverPendingConfirm参照）、次回このフリーズで確認を開いた時に
+ * サーバー側の結果を拾えるようにする。
  */
 function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
   var model = resolveMaskModel(appState.maskModel);
@@ -4024,6 +4505,8 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
   var dims = resolveTargetOutputDims(appState.outputMode, videoDims.width, videoDims.height);
   var tag = makeConfirmTag(new Date());
   var freezeTime = targetDraft.time;
+  var videoFileName = appState.videoFileName;
+  var actionsUrl = "https://github.com/" + user + "/" + repo + "/actions/workflows/extract.yml";
 
   var baseCommitSha = null;
   var frameBlobSha = null;
@@ -4033,7 +4516,7 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
   }
 
-  return frozenFrameToJpegBlob(MASK_PREVIEW_LONG_EDGE_PX)
+  var chain = frozenFrameToJpegBlob(MASK_PREVIEW_LONG_EDGE_PX)
     .then(function (jpegBlob) {
       checkAbort();
       els.maskPreviewStatus.textContent = "リリースを作成中…";
@@ -4042,6 +4525,12 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function (jpegBlob) {
       checkAbort();
+      // Releaseを作成できた時点で「進行中」を記録しておく。この後の手順がタブの
+      // バックグラウンド化等で中断されても、次回このフリーズで確認を開いた際に
+      // サーバー側の結果（完了していれば）を拾えるようにする（tryRecoverPendingConfirm）。
+      savePendingConfirm(videoFileName, {
+        tag: tag, time: freezeTime, model: model, videoFileName: videoFileName, dispatchedAt: Date.now()
+      });
       els.maskPreviewStatus.textContent = "コミット先ブランチの情報を取得中…";
       setMaskPreviewProgress(8);
       return ghGetRef(user, repo, token, "heads/main").then(function (refInfo) {
@@ -4112,8 +4601,11 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     .then(function (run) {
       checkAbort();
       if (!run) {
-        throw new Error("確認ジョブの起動を確認できませんでした。GitHub Actions側では実行されている可能性があります。");
+        var notFoundErr = new Error("確認ジョブの起動を確認できませんでした。GitHub Actions側では実行されている可能性があります。");
+        notFoundErr.actionsUrl = actionsUrl;
+        throw notFoundErr;
       }
+      actionsUrl = run.html_url || actionsUrl;
       els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（1〜2分程度）";
       return pollRunUntilDone(user, repo, token, run.id, function (n, max) {
         if (myToken !== maskPreviewAbortToken) return;
@@ -4123,10 +4615,12 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function (finalRun) {
       checkAbort();
+      actionsUrl = (finalRun && finalRun.html_url) || actionsUrl;
       var status = interpretRunStatus(finalRun);
       if (status !== "success") {
-        var logsUrl = finalRun.html_url || ("https://github.com/" + user + "/" + repo + "/actions");
-        throw new Error("確認に失敗しました。ログを確認してください: " + logsUrl);
+        var failErr = new Error("確認に失敗しました。ログを確認してください。");
+        failErr.actionsUrl = actionsUrl;
+        throw failErr;
       }
       setMaskPreviewProgress(92);
       els.maskPreviewStatus.textContent = "結果を取得しています…";
@@ -4134,36 +4628,13 @@ function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
     })
     .then(function (rel) {
       checkAbort();
-      var previewAsset = findReleaseAsset(rel.assets, "preview.png");
-      if (!previewAsset) {
-        throw new Error("preview.pngが見つかりませんでした。Releaseページで確認してください: " + rel.html_url);
-      }
-      var cacheAsset = findReleaseAsset(rel.assets, confirmedAlphaAssetName(freezeTime));
-      setMaskPreviewProgress(96);
-      return ghDownloadReleaseAsset(user, repo, token, previewAsset.id).then(function (arrayBuffer) {
-        return { arrayBuffer: arrayBuffer, cacheAsset: cacheAsset };
-      });
-    })
-    .then(function (result) {
-      checkAbort();
-      var blob = new Blob([result.arrayBuffer], { type: "image/png" });
-      maskPreviewObjectURL = URL.createObjectURL(blob);
-      return drawMaskPreviewImage(maskPreviewObjectURL).then(function () {
-        setMaskPreviewProgress(100);
-        els.maskPreviewProgressWrap.hidden = true;
-        els.maskPreviewSkipBtn.hidden = true;
-        els.maskPreviewStatus.textContent = "確認完了（本番と同じモデルでの切り抜き結果です。チェッカー柄の部分が透明＝背景です）";
-        if (targetDraft && result.cacheAsset) {
-          targetDraft.confirmedAlpha = {
-            videoFileName: appState.videoFileName,
-            time: freezeTime,
-            model: model,
-            tag: tag
-          };
-          saveToLocalStorage();
-        }
-      });
+      return applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraft, user, repo, token);
     });
+
+  return chain.catch(function (err) {
+    if (err && err.message !== "__aborted__" && !err.actionsUrl) err.actionsUrl = actionsUrl;
+    throw err;
+  });
 }
 
 /* ---------------- 簡易プレビュー再生 ---------------- */
@@ -4174,13 +4645,34 @@ function togglePreviewPlayback() {
 }
 
 function stopPreviewPlayback() {
+  // 全画面表示中だったか（＝videoWrapの固定サイズ用インラインstyleを
+  // startPreviewPlaybackがクリア済みかどうか）を、クラスを外す前に覚えておく。
+  // exitDrawMode()はフリーズ編集を抜ける際、videoWrap.style.top/width/heightを
+  // 空文字にクリアした直後に「念のため」stopPreviewPlaybackを呼ぶ（実際にプレビュー中
+  // でなくても常に呼ばれる）。プレビュー中でなかった場合にまでlayoutFixedEditorArea()で
+  // 固定サイズを復元してしまうと、exitDrawMode側がクリアした直後の値を上書きして
+  // 残ってしまう（インラインstyleが消えないバグの再発）ため、実際に全画面表示から
+  // 戻る場合だけ復元処理を行う。
+  var wasFullscreen = els.videoWrap.classList.contains("previewing");
   if (previewRAF) cancelAnimationFrame(previewRAF);
   previewRAF = null;
   if (previewLogoObjectURL) { URL.revokeObjectURL(previewLogoObjectURL); previewLogoObjectURL = null; }
   releasePreviewSessionCanvases();
   els.videoWrap.classList.remove("previewing");
+  els.previewStopBtn.hidden = true;
   els.previewBtn.textContent = "▶ プレビュー";
   if (draft) setPlayStatus("フリーズ編集中");
+  if (!wasFullscreen) return;
+  // 全画面表示から通常の編集レイアウトに戻す。先にvideoWrapの固定サイズを
+  // 復元してから（layoutFixedEditorArea→sizeFixedVideoWrap）、その確定した
+  // サイズを基準にcanvasを再計算する必要がある（順序を逆にすると、canvasが
+  // 全画面時の中間サイズのままずれて残り、下の操作バーを覆ってしまう）。
+  layoutFixedEditorArea();
+  if (layoutOverlayCanvases() && draft) {
+    paintFrozenFrame();
+    redrawStrokesOverlay();
+    redrawTelopOverlay();
+  }
 }
 
 /**
@@ -4212,6 +4704,20 @@ function startPreviewPlayback() {
   // 前回の再生セッションが何らかの理由で解放されずに残っていた場合の保険
   releasePreviewSessionCanvases();
 
+  // 全画面表示に切り替えてからcanvasのサイズを再計算する（映像は幅いっぱい・縦は
+  // 収まるように、computeContentRectが動画のアスペクト比を保ったまま計算する）。
+  // 以降のW/Hはこの新しいサイズを使う必要があるため、フレーム・背景の生成より先に行う。
+  els.videoWrap.classList.add("previewing");
+  els.previewStopBtn.hidden = false;
+  // sizeFixedVideoWrap()が設定した固定サイズのインライン style（フリーズ編集中は
+  // 画面上部に小さく収める用）を解除しないと、全画面用CSS(inset:0)より優先されて
+  // しまい全画面化できない。停止時はlayoutFixedEditorArea()がsizeFixedVideoWrap()を
+  // 呼び直すことでこのサイズを復元する。
+  els.videoWrap.style.top = "";
+  els.videoWrap.style.width = "";
+  els.videoWrap.style.height = "";
+  layoutOverlayCanvases();
+
   var W = overlaySize.width, H = overlaySize.height;
   var frameCanvas, fctx, bgCanvas, geoInfo;
   try {
@@ -4231,10 +4737,10 @@ function startPreviewPlayback() {
     geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
   } catch (err) {
     showError("プレビューの生成に失敗しました: " + (err && err.message ? err.message : err));
+    stopPreviewPlayback();
     return;
   }
 
-  els.videoWrap.classList.add("previewing");
   els.previewBtn.textContent = "■ 停止";
   setPlayStatus("プレビュー中");
 
@@ -4310,7 +4816,11 @@ function startPreviewPlayback() {
   var SLIDE_IN = shadowCfg.enabled ? appState.slideSec : 0;
   var SLIDE_BACK = (shadowCfg.enabled && !logoImgEl) ? SHADOW_SLIDE_BACK_SEC : 0;
 
-  document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
+  if (document.fonts && document.fonts.load) {
+    TITLE_FONT_CHOICES.forEach(function (choice) {
+      document.fonts.load(choice.weight + ' 20px "' + choice.cssFamily + '"').catch(function () {});
+    });
+  }
 
   /** 斜め45度の白いハイライト帯を、(x,y,w,h)の矩形にscreen合成で重ねる（光彩スイープの簡易版） */
   function drawSweepBand(ctx, x, y, w, h, sweepT) {
@@ -4400,10 +4910,11 @@ function startPreviewPlayback() {
           var sinceLanding = afterReveal - SLIDE_IN;
           var fade = Math.min(1, sinceLanding / 0.15);
           var scale = (appState.titleBounce && fade < 1) ? telopBounceScale(fade) : 1;
-          drawTelop(pctx, draft.name, W, H, fade, scale,
+          drawTelop(pctx, draftVisibleTitleLines(), W, H, fade, scale,
             resolveTitleField(draft.titlePos, appState.titlePos),
             resolveTitleField(draft.titleSize, appState.titleSize),
-            resolveTitleField(draft.titleAlign, appState.titleAlign));
+            resolveTitleField(draft.titleAlign, appState.titleAlign),
+            resolveTitleField(draft.titleFontKey, appState.titleFontKey));
           drawLogoIfReady(sinceLanding);
         }
       }
@@ -4596,41 +5107,66 @@ function drawAutoLabel(pctx, W, H, progress) {
 }
 
 /**
- * 白太字＋薄い黒ドロップシャドウ。render.pyのrender_telop_layerと同じ見た目。
- * posRatio=[x,y]（0〜1、既定[0.5,0.78]）・sizeRatio（既定0.06）・align（left/center/right、既定center）で
- * 位置・大きさ・寄せを指定でき、画面端にはみ出す場合はrender.pyと同じロジックで内側に寄せる。
- * scale（既定1）を渡すと、テロップの外接矩形の中心を基準に拡大表示する（title_bounce用）。
+ * 白太字＋薄い黒ドロップシャドウ（行ごとにアンダーライン可）。render.pyのrender_telop_layerと
+ * 同じ見た目・同じ考え方。lines=[{text,size,underline}, ...]（複数行はブロック全体を1つの
+ * まとまりとして扱う）。posRatio=[x,y]（0〜1、既定[0.5,0.78]）はブロック中心のアンカー位置、
+ * sizeRatio（既定0.06）はbase文字サイズ（各行のsize倍率の基準）、align（left/center/right、
+ * 既定center）は行を揃える基準かつブロック全体の寄せ、fontKey（省略時は既定フォント）。
+ * 画面端にはみ出す場合はrender.pyと同じロジックでブロックごと内側に寄せる。
+ * scale（既定1）を渡すと、ブロックの外接矩形の中心を基準に拡大表示する（title_bounce用）。
  */
-function drawTelop(ctx, name, W, H, fade, scale, posRatio, sizeRatio, align) {
-  if (!name || fade <= 0) return;
+function drawTelop(ctx, lines, W, H, fade, scale, posRatio, sizeRatio, align, fontKey) {
+  lines = (lines || []).filter(function (l) { return l && l.text; });
+  if (!lines.length || fade <= 0) return;
   scale = scale || 1;
   posRatio = posRatio || DEFAULT_STYLE.title_pos;
   sizeRatio = sizeRatio || DEFAULT_STYLE.title_size;
   align = resolveTitleAlign(align);
-  var size = Math.max(8, Math.round(H * sizeRatio));
-  var shadowOffset = Math.max(1, Math.round(size / 20));
+  var baseSizePx = Math.max(8, Math.round(H * sizeRatio));
+  var measured = measureTitleLines(ctx, lines, baseSizePx, fontKey);
+  var maxW = measured.width, blockH = measured.height;
+  var refX = posRatio[0] * W, py = posRatio[1] * H;
+  var blockLeft, blockRight;
+  if (align === "left") { blockLeft = refX; blockRight = refX + maxW; }
+  else if (align === "right") { blockLeft = refX - maxW; blockRight = refX; }
+  else { blockLeft = refX - maxW / 2; blockRight = refX + maxW / 2; }
+  var blockTop = py - blockH / 2;
+  var d = clampBoxToCanvas({ left: blockLeft, top: blockTop, right: blockRight, bottom: blockTop + blockH }, W, H);
+  refX += d.dx;
+  blockLeft += d.dx; blockRight += d.dx;
+  blockTop += d.dy;
+  var centerX = (blockLeft + blockRight) / 2;
+  var centerY = blockTop + blockH / 2;
 
   ctx.save();
-  ctx.font = "700 " + size + 'px "SpotlightJP", -apple-system, sans-serif';
-  var textW = ctx.measureText(name).width;
-  var textH = size * 1.15;
-  var anchorX = posRatio[0] * W, anchorY = posRatio[1] * H;
-  var box = telopBoxFromAnchor(anchorX, anchorY, textW, textH, align);
-  var d = clampBoxToCanvas(box, W, H);
-  anchorX += d.dx; anchorY += d.dy;
-  var centerX = (box.left + box.right) / 2 + d.dx;
-  var centerY = (box.top + box.bottom) / 2 + d.dy;
-
   ctx.globalAlpha = Math.min(1, fade);
   ctx.translate(centerX, centerY);
   ctx.scale(scale, scale);
   ctx.textAlign = align === "left" ? "left" : align === "right" ? "right" : "center";
-  ctx.textBaseline = "middle";
-  var tx = anchorX - centerX, ty = anchorY - centerY;
-  ctx.fillStyle = "rgba(0,0,0,0.51)";
-  ctx.fillText(name, tx + shadowOffset, ty + shadowOffset);
-  ctx.fillStyle = "#fff";
-  ctx.fillText(name, tx, ty);
+  ctx.textBaseline = "alphabetic";
+  var localRefX = refX - centerX;
+  var cursorY = blockTop - centerY;
+  measured.lines.forEach(function (li) {
+    ctx.font = titleLineFontString(li.sizePx, fontKey);
+    var shadowOffset = Math.max(1, Math.round(li.sizePx / 20));
+    var baselineY = cursorY + li.ascent;
+    ctx.fillStyle = "rgba(0,0,0,0.51)";
+    ctx.fillText(li.text, localRefX + shadowOffset, baselineY + shadowOffset);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(li.text, localRefX, baselineY);
+    if (li.underline) {
+      var lineLeft, lineRight;
+      if (align === "left") { lineLeft = localRefX; lineRight = localRefX + li.width; }
+      else if (align === "right") { lineLeft = localRefX - li.width; lineRight = localRefX; }
+      else { lineLeft = localRefX - li.width / 2; lineRight = localRefX + li.width / 2; }
+      var underlineH = Math.max(1, Math.round(li.sizePx * 0.06));
+      var underlineGap = Math.max(1, Math.round(li.sizePx * 0.04));
+      var uy0 = baselineY + underlineGap;
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(lineLeft, uy0, lineRight - lineLeft, underlineH);
+    }
+    cursorY += li.height;
+  });
   ctx.restore();
 }
 
@@ -4813,6 +5349,7 @@ function applySettingsToInputs() {
   els.titleSizeDefaultSlider.value = appState.titleSize;
   els.titleSizeDefaultValue.textContent = Number(appState.titleSize).toFixed(3);
   els.titleAlignDefaultSelect.value = resolveTitleAlign(appState.titleAlign);
+  els.titleFontDefaultSelect.value = resolveTitleFontChoice(appState.titleFontKey).key;
   updateFilmColorPresetSelection();
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.revealSelect.value = resolveReveal(appState.reveal);
@@ -4839,6 +5376,34 @@ function applySettingsToInputs() {
 // 静かに上書きしてしまう（v1→v2のときと同じ理由）。キーのバージョンを上げて、
 // 古い保存データは読み込まず新しい既定値で始まるようにする。
 function storageKey(name) { return "spotlightReel:v3:" + name; }
+
+/**
+ * サーバー確認（切り抜き結果を確認）の「進行中」状態を、動画ファイル名ごとに1件だけ保存する。
+ * タブのバックグラウンド化・端末のメモリひっ迫等でページ自体が再読み込みされると、
+ * 確認処理のPromiseチェーンは跡形もなく失われる（実機で、Release作成直後から
+ * dispatch完了までの間に長時間の空白ができ、サーバー側では正常に完了していたにも
+ * 関わらず画面には何も表示されないまま終わっていた事例を確認した）。次にこのフリーズで
+ * 確認を開いた際、まずこの記録からサーバー側の結果を拾えないか確認することで、
+ * 「実は完了していたのに無言のまま失われる」事態を防ぐ。
+ */
+function pendingConfirmStorageKey(videoFileName) { return "spotlightReel:pendingConfirm:" + videoFileName; }
+
+function savePendingConfirm(videoFileName, record) {
+  try { localStorage.setItem(pendingConfirmStorageKey(videoFileName), JSON.stringify(record)); }
+  catch (e) { /* 保存できなくても致命的ではない保険機能のため無視する */ }
+}
+
+function loadPendingConfirm(videoFileName) {
+  try {
+    var raw = localStorage.getItem(pendingConfirmStorageKey(videoFileName));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function clearPendingConfirm(videoFileName) {
+  try { localStorage.removeItem(pendingConfirmStorageKey(videoFileName)); }
+  catch (e) { /* 無視 */ }
+}
 
 // 自動保存1件あたりのサイズ上限の目安。サムネイル（フリーズごとのJPEG dataURL）が
 // 大半を占めるため、これを超える場合はサムネイルを諦めて座標データだけを保存する

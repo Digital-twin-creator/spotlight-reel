@@ -713,7 +713,7 @@ async function main() {
     await page.click("#addFreezeBtn");
     await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
     await page.selectOption("#maskModeSelect", "auto");
-    await page.fill("#nameInput", "確認済みフリーズ");
+    await page.fill(".title-line-text", "確認済みフリーズ");
     await page.evaluate((confirmTag) => {
       draft.time = 1.5;
       draft.confirmedAlpha = {
@@ -731,7 +731,7 @@ async function main() {
     await page.click("#addFreezeBtn");
     await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
     await page.selectOption("#maskModeSelect", "auto");
-    await page.fill("#nameInput", "未確認フリーズ");
+    await page.fill(".title-line-text", "未確認フリーズ");
     await page.evaluate(() => { draft.time = 2.5; });
     await page.click("#commitFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
@@ -787,7 +787,7 @@ async function main() {
     await page.click("#addFreezeBtn");
     await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
     await page.selectOption("#maskModeSelect", "auto");
-    await page.fill("#nameInput", "モデル違いフリーズ");
+    await page.fill(".title-line-text", "モデル違いフリーズ");
     await page.evaluate(() => {
       draft.time = 1.5;
       // モデルが現在の設定(isnet-general-use)と異なる確認結果 → isConfirmedAlphaValidがfalseになるはず

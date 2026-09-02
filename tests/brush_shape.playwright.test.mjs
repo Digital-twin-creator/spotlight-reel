@@ -125,7 +125,7 @@ async function main() {
   console.log("");
   console.log("=== 完了後、選んだ形状がJSONに反映される ===");
   await page.selectOption("#brushShapeSelect", "marker");
-  await page.fill("#nameInput", "形状テスト");
+  await page.fill(".title-line-text", "形状テスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 

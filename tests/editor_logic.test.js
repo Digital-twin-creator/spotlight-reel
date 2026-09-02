@@ -980,6 +980,226 @@ test("buildProjectJSON/parseProjectJSON: title_pos/title_size/title_alignを全�
   assert.strictEqual(otherFz.titlePos, null);
 });
 
+/* ---- テロップの複数行対応（title.lines契約：normalizeTitleLines/titleLinesForJSON） ---- */
+
+test("normalizeTitleLines: 文字列は1行（size=1.0・underline=false）として扱う", () => {
+  assert.deepStrictEqual(core.normalizeTitleLines("山田 太郎"), [{ text: "山田 太郎", size: 1.0, underline: false }]);
+});
+test("normalizeTitleLines: 空・未指定は空文字1行になる（配列自体は空にならない）", () => {
+  assert.deepStrictEqual(core.normalizeTitleLines(""), [{ text: "", size: 1.0, underline: false }]);
+  assert.deepStrictEqual(core.normalizeTitleLines(undefined), [{ text: "", size: 1.0, underline: false }]);
+  assert.deepStrictEqual(core.normalizeTitleLines(null), [{ text: "", size: 1.0, underline: false }]);
+});
+test("normalizeTitleLines: {lines:[...]}形式を行ごとのsize/underline込みで読み取る", () => {
+  const lines = core.normalizeTitleLines({
+    lines: [{ text: "山田 太郎", size: 1.0, underline: true }, { text: "エースストライカー", size: 0.55 }]
+  });
+  assert.deepStrictEqual(lines, [
+    { text: "山田 太郎", size: 1.0, underline: true },
+    { text: "エースストライカー", size: 0.55, underline: false }
+  ]);
+});
+test("normalizeTitleLines: 行に文字列だけが混ざっていてもtext扱いで正規化される", () => {
+  const lines = core.normalizeTitleLines({ lines: ["ただの文字列", { text: "オブジェクト行" }] });
+  assert.deepStrictEqual(lines, [
+    { text: "ただの文字列", size: 1.0, underline: false },
+    { text: "オブジェクト行", size: 1.0, underline: false }
+  ]);
+});
+test("normalizeTitleLines: lines配列が空のオブジェクトは空文字1行にフォールバックする", () => {
+  assert.deepStrictEqual(core.normalizeTitleLines({ lines: [] }), [{ text: "", size: 1.0, underline: false }]);
+});
+
+test("titleLinesToPlainText: 空でない行のtextをスペース区切りで1行にまとめる", () => {
+  assert.strictEqual(core.titleLinesToPlainText([
+    { text: "山田 太郎", size: 1.0, underline: true }, { text: "エースストライカー", size: 0.55, underline: false }
+  ]), "山田 太郎 エースストライカー");
+});
+test("titleLinesToPlainText: 空文字の行は無視される", () => {
+  assert.strictEqual(core.titleLinesToPlainText([
+    { text: "", size: 1.0, underline: false }, { text: "本文", size: 1.0, underline: false }
+  ]), "本文");
+});
+
+test("titleLinesAllDefault: 1行・サイズ1.0・アンダーラインなしならtrue", () => {
+  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田 太郎", size: 1.0, underline: false }]), true);
+});
+test("titleLinesAllDefault: 複数行・サイズ違い・アンダーラインありのいずれでもfalse", () => {
+  assert.strictEqual(core.titleLinesAllDefault([{ text: "A" }, { text: "B" }].map(l => ({ text: l.text, size: 1.0, underline: false }))), false);
+  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田", size: 0.8, underline: false }]), false);
+  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田", size: 1.0, underline: true }]), false);
+});
+
+test("titleLinesForJSON: 既定の1行はプレーンな文字列として出力する（JSON後方互換）", () => {
+  assert.strictEqual(core.titleLinesForJSON([{ text: "山田 太郎", size: 1.0, underline: false }]), "山田 太郎");
+});
+test("titleLinesForJSON: 複数行は{lines:[...]}のオブジェクト形式で出力する", () => {
+  const out = core.titleLinesForJSON([
+    { text: "山田 太郎", size: 1.0, underline: true },
+    { text: "エースストライカー", size: 0.55, underline: false }
+  ]);
+  assert.deepStrictEqual(out, {
+    lines: [
+      { text: "山田 太郎", size: 1, underline: true },
+      { text: "エースストライカー", size: 0.55, underline: false }
+    ]
+  });
+});
+test("titleLinesForJSON: 1行でもサイズやアンダーラインを既定から変えていればオブジェクト形式になる", () => {
+  const out = core.titleLinesForJSON([{ text: "山田 太郎", size: 1.3, underline: false }]);
+  assert.deepStrictEqual(out, { lines: [{ text: "山田 太郎", size: 1.3, underline: false }] });
+});
+
+test("freezeToJSON経由：titleLinesが無いフリーズは従来どおりnameが文字列になる（完全後方互換）", () => {
+  const state = sampleState();
+  state.freezes[0].name = "従来どおりのフリーズ名";
+  delete state.freezes[0].titleLines;
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.name === "従来どおりのフリーズ名")[0];
+  assert.strictEqual(fz.name, "従来どおりのフリーズ名");
+});
+test("freezeToJSON経由：titleLinesがある複数行フリーズはnameが{lines:[...]}になる", () => {
+  const state = sampleState();
+  state.freezes[0].name = "無視される（titleLinesが優先）";
+  state.freezes[0].titleLines = [
+    { text: "山田 太郎", size: 1.0, underline: true },
+    { text: "エースストライカー", size: 0.55, underline: false }
+  ];
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.deepStrictEqual(fz.name, {
+    lines: [
+      { text: "山田 太郎", size: 1, underline: true },
+      { text: "エースストライカー", size: 0.55, underline: false }
+    ]
+  });
+});
+test("buildProjectJSON/parseProjectJSON: 複数行タイトルを往復できる（titleLines・nameとも復元される）", () => {
+  const state = sampleState();
+  state.freezes[0].titleLines = [
+    { text: "山田 太郎", size: 1.0, underline: true },
+    { text: "エースストライカー", size: 0.55, underline: false }
+  ];
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  const loadedFz = loaded.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.deepStrictEqual(loadedFz.titleLines, [
+    { text: "山田 太郎", size: 1.0, underline: true },
+    { text: "エースストライカー", size: 0.55, underline: false }
+  ]);
+  assert.strictEqual(loadedFz.name, "山田 太郎 エースストライカー");
+});
+
+/* ---- テロップのフォント選択（TITLE_FONT_CHOICES／resolveTitleFontChoice／titleFontKeyFromPath） ---- */
+
+test("TITLE_FONT_CHOICES: 先頭は既定（pathがnull）、それ以外は5種すべてassets/fonts/配下のパスを持つ", () => {
+  assert.strictEqual(core.TITLE_FONT_CHOICES[0].key, "default");
+  assert.strictEqual(core.TITLE_FONT_CHOICES[0].path, null);
+  assert.strictEqual(core.TITLE_FONT_CHOICES.length, 6);
+  core.TITLE_FONT_CHOICES.slice(1).forEach(choice => {
+    assert.ok(choice.path && choice.path.indexOf("assets/fonts/") === 0, choice.key + "のpathがassets/fonts/配下でない");
+    assert.ok(choice.cssFamily, choice.key + "にcssFamilyが無い");
+  });
+});
+test("resolveTitleFontChoice: 未知のキーは既定にフォールバックする", () => {
+  assert.strictEqual(core.resolveTitleFontChoice("nonexistent-key").key, "default");
+  assert.strictEqual(core.resolveTitleFontChoice(undefined).key, "default");
+});
+test("resolveTitleFontChoice: 既知のキーはそのまま解決する", () => {
+  assert.strictEqual(core.resolveTitleFontChoice("notoserifjp").cssFamily, "SpotlightTitleNotoSerifJP");
+});
+test("titleFontKeyFromPath: 未指定(null/undefined)は既定キーになる", () => {
+  assert.strictEqual(core.titleFontKeyFromPath(null), core.DEFAULT_TITLE_FONT_KEY);
+  assert.strictEqual(core.titleFontKeyFromPath(undefined), core.DEFAULT_TITLE_FONT_KEY);
+});
+test("titleFontKeyFromPath: 既知のpathは対応するキーへ逆引きできる", () => {
+  assert.strictEqual(core.titleFontKeyFromPath("assets/fonts/DelaGothicOne-Regular.ttf"), "delagothicone");
+});
+test("titleFontKeyFromPath: 未知のpathは既定キーにフォールバックする", () => {
+  assert.strictEqual(core.titleFontKeyFromPath("assets/fonts/存在しないフォント.ttf"), core.DEFAULT_TITLE_FONT_KEY);
+});
+
+/* ---- measureTitleLines（複数行ブロックの実測。ctxはNode用のフェイクを使う） ---- */
+
+function makeFakeMeasureCtx() {
+  var fontStr = "";
+  return {
+    save: function () {},
+    restore: function () {},
+    get font() { return fontStr; },
+    set font(v) { fontStr = v; },
+    set textBaseline(v) {},
+    measureText: function (text) {
+      var m = /([\d.]+)px/.exec(fontStr);
+      var sizePx = m ? Number(m[1]) : 10;
+      return {
+        width: (text || "").length * sizePx * 0.6,
+        fontBoundingBoxAscent: sizePx * 0.9,
+        fontBoundingBoxDescent: sizePx * 0.2
+      };
+    }
+  };
+}
+
+test("measureTitleLines: 1行なら高さはascent+descent、幅は文字数に比例する", () => {
+  const ctx = makeFakeMeasureCtx();
+  const m = core.measureTitleLines(ctx, [{ text: "ABCD", size: 1.0, underline: false }], 40, "default");
+  assert.strictEqual(m.lines.length, 1);
+  assert.strictEqual(m.lines[0].sizePx, 40);
+  assert.ok(Math.abs(m.height - 40 * 1.1) < 1e-6);
+  assert.ok(Math.abs(m.width - 4 * 40 * 0.6) < 1e-6);
+});
+test("measureTitleLines: 複数行は高さが行の合計になり、幅は最も広い行に揃う", () => {
+  const ctx = makeFakeMeasureCtx();
+  const m = core.measureTitleLines(ctx, [
+    { text: "山田太郎", size: 1.0, underline: true },
+    { text: "エース", size: 0.55, underline: false }
+  ], 40, "default");
+  assert.strictEqual(m.lines.length, 2);
+  assert.strictEqual(m.lines[0].sizePx, 40);
+  assert.strictEqual(m.lines[1].sizePx, 22); // round(40*0.55)
+  const expectedHeight = (40 * 1.1) + (22 * 1.1);
+  assert.ok(Math.abs(m.height - expectedHeight) < 1e-6);
+  // 1行目（4文字・size40）の方が2行目（3文字・size22）より幅が広い
+  assert.ok(m.width > 22 * 0.6 * 3);
+  assert.ok(Math.abs(m.width - 4 * 40 * 0.6) < 1e-6);
+});
+test("measureTitleLines: sizeが極端に小さくても最低8pxを下回らない", () => {
+  const ctx = makeFakeMeasureCtx();
+  const m = core.measureTitleLines(ctx, [{ text: "A", size: 0.01, underline: false }], 40, "default");
+  assert.strictEqual(m.lines[0].sizePx, 8);
+});
+
+/* ---- buildProjectJSON/parseProjectJSON: テロップのフォント選択（title_font/title_font_jp）の往復 ---- */
+
+test("buildProjectJSON: フォントが既定のままなら title_font/title_font_jp は出力されない（完全後方互換）", () => {
+  const state = sampleState();
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.title_font, undefined);
+  assert.strictEqual(project.style.title_font_jp, undefined);
+});
+test("buildProjectJSON/parseProjectJSON: 全体既定のフォントを往復できる", () => {
+  const state = sampleState();
+  state.titleFontKey = "zenkakugothicnew";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.title_font, "assets/fonts/ZenKakuGothicNew-Bold.ttf");
+  assert.strictEqual(project.style.title_font_jp, "assets/fonts/ZenKakuGothicNew-Bold.ttf");
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.titleFontKey, "zenkakugothicnew");
+});
+test("buildProjectJSON/parseProjectJSON: フリーズ単位のフォント上書きを往復できる（上書きの無い方はnullのまま）", () => {
+  const state = sampleState();
+  state.freezes[0].titleFontKey = "shipporimincho";
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.strictEqual(fz.title_font, "assets/fonts/ShipporiMincho-Bold.ttf");
+  const loaded = core.parseProjectJSON(project);
+  const loadedFz = loaded.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.strictEqual(loadedFz.titleFontKey, "shipporimincho");
+  const otherFz = loaded.freezes.filter(f => f.time !== state.freezes[0].time)[0];
+  assert.strictEqual(otherFz.titleFontKey, null);
+});
+
 /* ---- テロップの外接矩形計算・画面端クランプ（ドラッグUI・render.pyと同じ考え方） ---- */
 
 test("telopBoxFromAnchor: centerはアンカーを中心に左右へ半分ずつ広がる", () => {

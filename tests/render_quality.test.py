@@ -231,6 +231,94 @@ try:
           f"CFR={out_cfr_info['duration']:.2f}s / VFR={vfr_out_info['duration']:.2f}s")
 
     # ------------------------------------------------------------------
+    # 2.5) テロップの複数行対応（title.lines契約：resolve_title_lines/render_telop_layer）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== テロップの複数行対応：resolve_title_lines（JSON契約の正規化） ===")
+    check(render.resolve_title_lines({"name": "山田 太郎"}) ==
+          [{"text": "山田 太郎", "size": 1.0, "underline": False}],
+          "文字列は1行（size=1.0・underline=False）として正規化される")
+    check(render.resolve_title_lines({"name": ""}) == [{"text": "", "size": 1.0, "underline": False}],
+          "空文字・未指定は空文字1行に正規化される（配列自体は空にならない）")
+    multi = render.resolve_title_lines({"name": {"lines": [
+        {"text": "山田 太郎", "size": 1.0, "underline": True},
+        {"text": "エースストライカー", "size": 0.55},
+    ]}})
+    check(multi == [
+        {"text": "山田 太郎", "size": 1.0, "underline": True},
+        {"text": "エースストライカー", "size": 0.55, "underline": False},
+    ], f"{{lines:[...]}}形式は行ごとのsize/underlineを保ったまま正規化される: {multi}")
+
+    print("")
+    print("=== テロップの複数行対応：render_telop_layerが複数行・サイズ違い・アンダーラインを描く ===")
+    font_path_default = render.resolve_title_font_path(dict(render.DEFAULT_STYLE, name="山田 太郎"))
+    W2, H2 = 540, 960
+    size_px_base = max(8, int(round(H2 * render.DEFAULT_STYLE["title_size"])))
+
+    single_bgr, single_alpha, _cx, _cy = render.render_telop_layer(
+        render.resolve_title_lines({"name": "山田 太郎"}), W2, H2, {}, font_path_default, size_px_base)
+    check(single_bgr is not None and float(single_alpha.sum()) > 0, "1行のテロップが従来どおり描画される")
+
+    multi_lines = [
+        {"text": "山田 太郎", "size": 1.0, "underline": True},
+        {"text": "エースストライカー", "size": 0.55, "underline": False},
+    ]
+    multi_bgr, multi_alpha, _cx2, cy2 = render.render_telop_layer(
+        multi_lines, W2, H2, {}, font_path_default, size_px_base)
+    check(multi_bgr is not None and float(multi_alpha.sum()) > 0, "複数行のテロップが描画される")
+
+    # 複数行の方が縦方向に描画されている行数が多く、非透明画素の縦方向の広がり(行の高さの合計相当)が
+    # 1行のときより大きくなるはず（複数行対応が実際に効いていることの確認）
+    def alpha_row_has_content(alpha, y, threshold=10):
+        return bool((alpha[y, :, 0] > threshold / 255.0).any())
+
+    def vertical_extent(alpha):
+        rows = np.where(alpha[:, :, 0].max(axis=1) > 10 / 255.0)[0]
+        return (int(rows.min()), int(rows.max())) if len(rows) else (0, 0)
+
+    single_extent = vertical_extent(single_alpha)
+    multi_extent = vertical_extent(multi_alpha)
+    single_h = single_extent[1] - single_extent[0]
+    multi_h = multi_extent[1] - multi_extent[0]
+    check(multi_h > single_h * 1.3,
+          f"複数行のテロップは1行より縦方向に大きく広がる（複数行が積み上がっている）: "
+          f"1行={single_h}px / 複数行={multi_h}px")
+
+    # 1行目（underline=True）の下端付近に、アンダーライン（横棒）による非透明画素があるはず。
+    # 2行目の直前（1行目と2行目の間）を軽くスキャンし、連続した横方向の非透明画素（下線）を探す。
+    found_underline_row = False
+    for y in range(multi_extent[0], multi_extent[0] + int(multi_h * 0.6)):
+        row = multi_alpha[y, :, 0] > 10 / 255.0
+        if row.sum() > 20:  # 文字の一部ではなく横に連続した塊（下線）らしき行
+            # 連続run長を見る（下線は文字と違い、太い矩形として連続する）
+            max_run = 0
+            cur = 0
+            for v in row:
+                if v:
+                    cur += 1
+                    max_run = max(max_run, cur)
+                else:
+                    cur = 0
+            if max_run > row.sum() * 0.8:  # ほぼ隙間なく連続＝下線らしい
+                found_underline_row = True
+                break
+    check(found_underline_row, "underline=Trueの行の下にアンダーライン（連続した横棒）が描かれている")
+
+    print("")
+    print("=== テロップの複数行対応：フルレンダリング（title.linesを含むJSON）がエラーなく完走する ===")
+    multiline_project = sample_project("dummy_input.mp4")
+    multiline_project["freezes"][0]["name"] = {
+        "lines": [
+            {"text": "山田 太郎", "size": 1.0, "underline": True},
+            {"text": "エースストライカー", "size": 0.55},
+        ]
+    }
+    multiline_out = os.path.join(tmpdir, "multiline_telop.mp4")
+    render_direct(multiline_project, video_path, multiline_out, tmpdir)
+    check(os.path.exists(multiline_out) and os.path.getsize(multiline_out) > 0,
+          "title.lines（複数行・サイズ違い・アンダーライン）を含むプロジェクトのフルレンダリングが成功する")
+
+    # ------------------------------------------------------------------
     # 3) テロップ描画：name を入れた全フリーズで画素が変化している
     # ------------------------------------------------------------------
     print("")
@@ -298,10 +386,12 @@ try:
     print("=== フォント読み込み失敗時はエラー終了する ===")
     raised = False
     try:
-        render.render_telop_layer("テスト", 200, 100, None, "assets/fonts/存在しないフォント.ttf", 24)
+        render.render_telop_layer(
+            render.resolve_title_lines({"name": "テスト"}), 200, 100, {},
+            "assets/fonts/存在しないフォント.ttf", 24)
     except RuntimeError:
         raised = True
-    check(raised, "font=None かつ text非空でrender_telop_layerがRuntimeErrorを送出する")
+    check(raised, "フォントが読み込めない場合、render_telop_layerがRuntimeErrorを送出する")
 
     raised_pipeline = False
     err_msg = ""

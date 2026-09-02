@@ -1161,10 +1161,38 @@ def contains_japanese(text):
     return False
 
 
+def resolve_title_lines(fz):
+    """
+    fz["name"] を、テロップ描画用の行リスト [{"text","size","underline"}, ...] に正規化する。
+
+    - 文字列（従来形式）は1行として扱う（size=1.0倍・underline=false）。
+    - {"lines": [{"text","size","underline"}, ...]} 形式にも対応する。各行のtextは
+      文字列化し、sizeは指定が無ければ1.0倍、underlineは指定が無ければfalse。
+    - 空でも必ず1件以上返す（textが空文字の1行）ことで、呼び出し側は常に
+      「行のリスト」として扱える（分岐を減らすため）。
+    """
+    name = fz.get("name")
+    if isinstance(name, dict):
+        lines_in = name.get("lines") or []
+        lines = []
+        for line in lines_in:
+            if isinstance(line, dict):
+                text = str(line.get("text", ""))
+                size = float(line.get("size", 1.0))
+                underline = bool(line.get("underline", False))
+            else:
+                text = str(line)
+                size = 1.0
+                underline = False
+            lines.append({"text": text, "size": max(0.05, size), "underline": underline})
+        return lines or [{"text": "", "size": 1.0, "underline": False}]
+    return [{"text": str(name or ""), "size": 1.0, "underline": False}]
+
+
 def resolve_title_font_path(fz):
     """
-    title_font / title_font_jp（テキストが日本語を含むかで選ぶ）から実パスを解決する。
-    どちらも未指定なら font にフォールバックする（既存JSONとの後方互換のため）。
+    title_font / title_font_jp（全行を結合したテキストが日本語を含むかで選ぶ）から
+    実パスを解決する。どちらも未指定なら font にフォールバックする（既存JSONとの後方互換）。
 
     フォントは render.py に同梱されたアセット（assets/fonts/配下）である前提のため、
     cwd や プロジェクトJSONの置き場所（json_dir）には依存せず、常に render.py 自身の
@@ -1173,7 +1201,8 @@ def resolve_title_font_path(fz):
     spotlight-reelのクローンが別ディレクトリに存在し、render.pyの実行時cwdは前者になる
     ため、cwd基準で探すとフォントが見つからずテロップが描けない不具合があった。
     """
-    key = "title_font_jp" if contains_japanese(fz.get("name", "")) else "title_font"
+    combined_text = "".join(line["text"] for line in resolve_title_lines(fz))
+    key = "title_font_jp" if contains_japanese(combined_text) else "title_font"
     path = fz.get(key) or fz.get("font")
     return resolve_path(path, [SCRIPT_DIR])
 
@@ -1224,13 +1253,18 @@ def clamp_box_to_canvas(bbox, W, H):
     return dx, dy
 
 
-def render_telop_layer(text, W, H, font, font_path, size_px, pos_ratio=(0.5, 0.78), align="center"):
+def render_telop_layer(lines, W, H, font_cache, font_path, base_size_px, pos_ratio=(0.5, 0.78), align="center"):
     """
-    テロップを1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
+    テロップ（複数行対応）を1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
     フェードインは毎フレームこのアルファに係数を掛けるだけで済ませる。
-    pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をテキストのアンカー位置とし、
-    alignに応じて左寄せ/中央/右寄せする。画面端にはみ出す場合は自動で内側に寄せる。
-    戻り値の中心x,yは実際に描画された文字の外接矩形の中心（バウンス演出の基準点）。
+
+    lines は resolve_title_lines() が返す形式（[{"text","size","underline"}, ...]）。
+    行ごとに文字サイズ（base_size_pxに対する倍率）・アンダーラインの有無を変えられる。
+    複数行はブロック全体を1つのまとまりとして扱い、pos_ratio=[x, y]（0〜1、出力サイズに
+    対する比率）をブロック中心のアンカー位置とする。alignに応じてブロック全体を
+    左寄せ/中央/右寄せする（各行はブロックの基準位置に揃えて配置される）。
+    画面端にはみ出す場合はブロックごと自動で内側に寄せる。
+    戻り値の中心x,yは実際に描画されたブロックの外接矩形の中心（バウンス演出の基準点）。
 
     フォントが読み込めていない（file_pathが存在しない／破損しているなど）場合は、
     OpenCVの既定フォント（日本語グリフを持たず、実質「何も描かれない」に等しい）へ
@@ -1238,36 +1272,82 @@ def render_telop_layer(text, W, H, font, font_path, size_px, pos_ratio=(0.5, 0.7
     フォントが見つからないまま全フレームで無言のうちに文字が描かれない」という
     不具合があったため、失敗は必ず気づける形にする。
     """
-    if not text:
+    visible_lines = [line for line in (lines or []) if line.get("text")]
+    if not visible_lines:
         return None, None, 0, 0
-    if font is None:
-        raise RuntimeError(
-            f"テロップ用フォントを読み込めませんでした: {font_path}\n"
-            f"（name={text!r}）。title_font / title_font_jp / font で指定した"
-            "フォントファイルが存在し、正しく読み込めるか確認してください"
-            "（例: python make_dummy.py でダウンロードに失敗していないか）。"
-        )
+
+    line_infos = []
+    for line in visible_lines:
+        size_px = max(8, int(round(base_size_px * float(line.get("size", 1.0)))))
+        font_key = (font_path, size_px)
+        if font_key not in font_cache:
+            font_cache[font_key] = load_font(font_path, size_px)
+        font = font_cache[font_key]
+        if font is None:
+            raise RuntimeError(
+                f"テロップ用フォントを読み込めませんでした: {font_path}\n"
+                f"（name={line['text']!r}）。title_font / title_font_jp / font で指定した"
+                "フォントファイルが存在し、正しく読み込めるか確認してください"
+                "（例: python make_dummy.py でダウンロードに失敗していないか）。"
+            )
+        ascent, descent = font.getmetrics()
+        line_infos.append({
+            "text": line["text"], "font": font, "size_px": size_px,
+            "underline": bool(line.get("underline")), "ascent": ascent, "descent": descent,
+        })
 
     align = resolve_title_align(align)
-    px = float(pos_ratio[0]) * W if pos_ratio and len(pos_ratio) > 0 else W * 0.5
-    py = float(pos_ratio[1]) * H if pos_ratio and len(pos_ratio) > 1 else H * 0.78
-    shadow_offset = max(1, size_px // 20)
-    shadow_alpha = 130   # 薄い黒ドロップシャドウ（0〜255）
+    anchor_h = {"left": "l", "center": "m", "right": "r"}[align]
 
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-
-    anchor = {"left": "lm", "center": "mm", "right": "rm"}[align]
     draw = ImageDraw.Draw(layer)
-    bbox = draw.textbbox((px, py), text, font=font, anchor=anchor)
-    dx, dy = clamp_box_to_canvas(bbox, W, H)
-    px, py = px + dx, py + dy
-    cx, cy = (bbox[0] + dx + bbox[2] + dx) / 2.0, (bbox[1] + dy + bbox[3] + dy) / 2.0
-    # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
-    draw.text((px + shadow_offset, py + shadow_offset), text, font=font, anchor=anchor,
-              fill=(0, 0, 0, shadow_alpha))
-    draw.text((px, py), text, font=font, anchor=anchor, fill=(255, 255, 255, 255))
-    rgba = np.array(layer)
 
+    # 行間の詰め方はシンプルに隙間なし（各行のascent+descentをそのまま積み上げる）とする。
+    # ブロック幅は最も広い行の幅（alignの基準になる）。
+    block_h = 0.0
+    max_w = 0.0
+    for li in line_infos:
+        li["width"] = draw.textlength(li["text"], font=li["font"])
+        max_w = max(max_w, li["width"])
+        block_h += li["ascent"] + li["descent"]
+
+    ref_x = float(pos_ratio[0]) * W if pos_ratio and len(pos_ratio) > 0 else W * 0.5
+    py = float(pos_ratio[1]) * H if pos_ratio and len(pos_ratio) > 1 else H * 0.78
+
+    if align == "left":
+        block_left, block_right = ref_x, ref_x + max_w
+    elif align == "right":
+        block_left, block_right = ref_x - max_w, ref_x
+    else:
+        block_left, block_right = ref_x - max_w / 2.0, ref_x + max_w / 2.0
+    block_top = py - block_h / 2.0
+    block_bottom = block_top + block_h
+
+    dx, dy = clamp_box_to_canvas((block_left, block_top, block_right, block_bottom), W, H)
+    ref_x += dx
+    block_top += dy
+    cx = (block_left + dx + block_right + dx) / 2.0
+    cy = (block_top + block_top + block_h) / 2.0
+
+    shadow_alpha = 130   # 薄い黒ドロップシャドウ（0〜255）
+    anchor = anchor_h + "a"  # 例："la"（左・アセンダー基準）。行を上から積み上げるための基準。
+    cursor_y = block_top
+    for li in line_infos:
+        size_px = li["size_px"]
+        shadow_offset = max(1, size_px // 20)
+        # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
+        draw.text((ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
+                  anchor=anchor, fill=(0, 0, 0, shadow_alpha))
+        draw.text((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=(255, 255, 255, 255))
+        if li["underline"]:
+            bbox = draw.textbbox((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
+            underline_h = max(1, round(size_px * 0.06))
+            underline_gap = max(1, round(size_px * 0.04))
+            uy0 = bbox[3] + underline_gap
+            draw.rectangle((bbox[0], uy0, bbox[2], uy0 + underline_h), fill=(255, 255, 255, 255))
+        cursor_y += li["ascent"] + li["descent"]
+
+    rgba = np.array(layer)
     rgb = rgba[:, :, :3].astype(np.float32)
     bgr = rgb[:, :, ::-1].copy()  # PILはRGB、cv2はBGR
     alpha = (rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
@@ -1887,13 +1967,10 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
     font_path = resolve_title_font_path(fz)
-    font_key = (font_path, size_px)
-    if font_key not in font_cache:
-        font_cache[font_key] = load_font(font_path, size_px)
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
     telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(
-        fz.get("name", ""), W, H, font_cache[font_key], font_path, size_px, title_pos, title_align)
+        resolve_title_lines(fz), W, H, font_cache, font_path, size_px, title_pos, title_align)
     bounce = bool(fz.get("title_bounce"))
 
     # 1) 出現アニメ開始まで静止
@@ -1914,7 +1991,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
 
     # Actionsのログで各フリーズの影の状態を確認できるようにする（実機で影が出ない場合の
     # 切り分け用：有効/無効・実際に使われる方向・影マスクのX重心を毎回出力する）
-    freeze_label = f"t={float(fz.get('time', 0.0)):.2f}s 「{fz.get('name', '')}」"
+    freeze_label_text = " / ".join(line["text"] for line in resolve_title_lines(fz) if line["text"])
+    freeze_label = f"t={float(fz.get('time', 0.0)):.2f}s 「{freeze_label_text}」"
     if shadow_cfg:
         mask_x_ratio = mask_x_center_ratio(shadow_done_mask, W)
         shadow_direction = shadow_cfg.get("direction", "auto")
@@ -2041,11 +2119,10 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
     font_path = resolve_title_font_path(fz)
-    font = load_font(font_path, size_px)
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
     telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(
-        fz.get("name", ""), W, H, font, font_path, size_px, title_pos, title_align)
+        resolve_title_lines(fz), W, H, font_cache, font_path, size_px, title_pos, title_align)
     before_img = blend_telop(before_img, telop_bgr, telop_alpha, 1.0)
     after_img = blend_telop(after_img, telop_bgr, telop_alpha, 1.0)
 

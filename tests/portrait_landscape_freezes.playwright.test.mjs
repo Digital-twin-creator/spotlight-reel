@@ -120,7 +120,7 @@ async function runForOrientation(browser, label, videoPath) {
 
     const box = await page.locator("#drawCanvas").boundingBox();
     await dragStroke(page, box);
-    await page.fill("#nameInput", names[i]);
+    await page.fill(".title-line-text", names[i]);
     await page.click("#commitFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 

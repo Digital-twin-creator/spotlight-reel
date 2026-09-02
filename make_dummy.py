@@ -51,6 +51,47 @@ ANTON_FONT_URLS = [
 ]
 ANTON_FONT_PATH = os.path.join(FONT_DIR, "Anton-Regular.ttf")
 
+# エディタでテロップの行ごとに選べる追加フォント一式（すべてGoogle Fonts OFL）。
+# 日本語対応を優先して選定：明朝体・ゴシック体・見出し向けの太いディスプレイ体・丸ゴシックなど、
+# 雰囲気の異なる選択肢を揃える。
+EXTRA_TITLE_FONTS = [
+    {
+        "key": "notoserifjp",
+        "label": "Noto Serif JP",
+        "urls": ["https://raw.githubusercontent.com/google/fonts/main/ofl/notoserifjp/NotoSerifJP%5Bwght%5D.ttf"],
+        "path": os.path.join(FONT_DIR, "NotoSerifJP-Bold.ttf"),
+        "variable": True,   # 可変フォント。render.py側でBoldウェイトを選ぶ
+    },
+    {
+        "key": "zenkakugothicnew",
+        "label": "Zen Kaku Gothic New",
+        "urls": ["https://raw.githubusercontent.com/google/fonts/main/ofl/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf"],
+        "path": os.path.join(FONT_DIR, "ZenKakuGothicNew-Bold.ttf"),
+        "variable": False,
+    },
+    {
+        "key": "delagothicone",
+        "label": "Dela Gothic One",
+        "urls": ["https://raw.githubusercontent.com/google/fonts/main/ofl/delagothicone/DelaGothicOne-Regular.ttf"],
+        "path": os.path.join(FONT_DIR, "DelaGothicOne-Regular.ttf"),
+        "variable": False,  # このファミリーはRegularウェイトのみ（元から極太のディスプレイ体）
+    },
+    {
+        "key": "shipporimincho",
+        "label": "Shippori Mincho",
+        "urls": ["https://raw.githubusercontent.com/google/fonts/main/ofl/shipporimincho/ShipporiMincho-Bold.ttf"],
+        "path": os.path.join(FONT_DIR, "ShipporiMincho-Bold.ttf"),
+        "variable": False,
+    },
+    {
+        "key": "mplusrounded1c",
+        "label": "M PLUS Rounded 1c",
+        "urls": ["https://raw.githubusercontent.com/google/fonts/main/ofl/mplusrounded1c/MPLUSRounded1c-Bold.ttf"],
+        "path": os.path.join(FONT_DIR, "MPLUSRounded1c-Bold.ttf"),
+        "variable": False,
+    },
+]
+
 
 def log(msg):
     print(msg, flush=True)
@@ -439,6 +480,12 @@ def ensure_font():
 def ensure_title_font():
     """Anton-Regular.ttf（欧文タイトル用）が無ければ Google Fonts からダウンロードする"""
     ensure_font_file(ANTON_FONT_URLS, ANTON_FONT_PATH, "タイトル用欧文フォント(Anton)")
+
+
+def ensure_extra_title_fonts():
+    """テロップの行ごとのフォント選択肢として使う追加フォント一式（EXTRA_TITLE_FONTS）を取得する"""
+    for spec in EXTRA_TITLE_FONTS:
+        ensure_font_file(spec["urls"], spec["path"], f"テロップ選択用フォント({spec['label']})")
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +958,7 @@ def main():
     log("=== フォントを確認 ===")
     ensure_font()
     ensure_title_font()
+    ensure_extra_title_fonts()
 
     log("=== ダミー動画を生成（縦） ===")
     video_path = os.path.join(EXAMPLES_DIR, "dummy_input.mp4")

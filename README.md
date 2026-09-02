@@ -50,6 +50,7 @@ spotlight-reel/
 │   ├── film_logo_bounce.playwright.test.mjs    # freeze_sec・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
 │   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
 │   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
+│   ├── title_lines_editor.playwright.test.mjs  # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・フォント選択）の回帰テスト（任意、要playwright-core）
 │   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのUI回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   ├── startup_robustness.playwright.test.mjs  # 巨大/壊れた自動保存データ・起動失敗時の復旧UIの回帰テスト（任意、要playwright-core）
@@ -360,6 +361,20 @@ python extract.py input.png --out outdir/ \
       "strokes": [
         { "width": 0.12, "points": [[0.5, 0.5], [0.52, 0.55]] }
       ]
+    },
+    {
+      "time": 13.0,
+      "name": {
+        "lines": [
+          { "text": "複数行くん", "size": 1.0, "underline": true },
+          { "text": "サブタイトル", "size": 0.55 }
+        ]
+      },
+      "title_font": "assets/fonts/ZenKakuGothicNew-Bold.ttf",
+      "title_font_jp": "assets/fonts/ZenKakuGothicNew-Bold.ttf",
+      "strokes": [
+        { "width": 0.12, "points": [[0.5, 0.5], [0.52, 0.55]] }
+      ]
     }
   ],
   "logo": {
@@ -380,18 +395,43 @@ python extract.py input.png --out outdir/ \
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`reveal_sec` / `slide_sec` / `hold_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
   `background` / `font` / `audio_during_freeze` /
-  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` / `color_source` /
-  `mask_options` / `reveal` / `shadow` を個別上書き可能。
-  `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
+  `title_pos` / `title_size` / `title_align` / `title_font` / `title_font_jp` / `brush_fade_sec` /
+  `color_source` / `mask_options` / `reveal` / `shadow` を個別上書き可能。
+  `title_bounce` のみ `style` でしか指定できません）。
   1フリーズの流れは「①塗り（`reveal_sec`）→②ズレ（`slide_sec`）→③静止（`hold_sec`）」の
   3段構成です。詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)を参照。
-- `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
+- `title_pos`：テロップ（複数行の場合はブロック全体）中心の位置
+  （出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
   `x` はそれぞれテロップの左端／右端の位置として扱われる（`center` のときのみ中心）。
-  画面端にはみ出す場合は自動で内側に寄せられる。
-- `title_size`：文字サイズ（出力の高さに対する比率）。既定 `0.06`。
-- `title_align`：テロップの水平寄せ。`left` / `center`（既定） / `right`。
-  不明な値は `center` として扱われる。
+  画面端にはみ出す場合はブロックごと自動で内側に寄せられる。
+- `title_size`：文字サイズ（出力の高さに対する比率。複数行の場合は各行の基準サイズ）。既定 `0.06`。
+- `title_align`：テロップの水平寄せ（複数行の場合は行ごとの揃え位置＝ブロック全体の寄せ）。
+  `left` / `center`（既定） / `right`。不明な値は `center` として扱われる。
+- `title_font` / `title_font_jp`：テロップに使うフォントファイルのパス（`title_font` は日本語を
+  含まない名前、`title_font_jp` は日本語を含む名前に使われ、どちらも未指定なら `font` に
+  フォールバックする。複数行の場合は全行を結合したテキストで日本語判定する）。
+  `assets/fonts/` には既定のAnton／Noto Sans JPに加え、Noto Serif JP（明朝）・
+  Zen Kaku Gothic New（ゴシック）・Dela Gothic One（極太見出し）・Shippori Mincho（明朝）・
+  M PLUS Rounded 1c（丸ゴシック）を同梱しており（`make_dummy.py` で取得）、
+  エディタからはこれらを全体既定・フリーズ単位のどちらでも選べます。
+- `name`：テロップの文字列。**プレーンな文字列**（従来どおり・1行）に加えて、
+  複数行・行ごとの文字サイズ／アンダーラインを指定できる**オブジェクト形式**にも対応しています。
+  ```json
+  "name": {
+    "lines": [
+      { "text": "山田 太郎", "size": 1.0, "underline": true },
+      { "text": "エースストライカー", "size": 0.55 }
+    ]
+  }
+  ```
+  各行は `text`（本文）・`size`（`title_size` に対する倍率。既定 `1.0`）・
+  `underline`（アンダーラインの有無。既定 `false`）を持ちます。行間の詰め方はシンプルに
+  隙間なし（各行の高さをそのまま積み上げる）。複数行はブロック全体を1つのまとまりとして
+  `title_pos`/`title_align` で位置・寄せを決め、エディタの位置ドラッグもブロック単位で
+  移動します。アンダーラインは各行の文字幅に合わせ、太さは文字サイズの約6%、
+  色は文字色（白）と同じです。1行・既定サイズ・アンダーラインなしの場合は
+  従来どおりプレーンな文字列のまま出力され、JSONの見た目は変わりません（完全後方互換）。
 - `brush_fade_sec`：ブラシ完了時点でまだ先端に残っている「乾いていない白い絵の具」を、
   何秒かけてフェードアウトさせるか（既定 `0.3`）。`0` を指定すると従来どおり
   フェードなし（ブラシ完了と同時に即座に消える）になる。この既定値0.3は、
@@ -481,7 +521,10 @@ python extract.py input.png --out outdir/ \
    （位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、寄せは `title_align`・
    既定 `center`、文字サイズは `title_size`・既定は高さの6%。日本語を含む名前は
    `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら `font` に
-   フォールバックする。白文字＋薄い黒ドロップシャドウ。`title_pos` が画面端に
+   フォールバックする。白文字＋薄い黒ドロップシャドウ。`name` を `{"lines":[...]}`
+   形式にすると複数行になり、行ごとに文字サイズ倍率・アンダーラインの有無を指定できる
+   （行間は詰めずそのまま積み上げる。複数行でも `title_pos`/`title_align` はブロック
+   全体を1つの単位として位置・寄せを決める）。`title_pos` が画面端に
    はみ出す位置を指しても、自動で内側に寄せられ画面外に出ない。指定したフォント
    ファイルが見つからない・読み込めない場合は、文字が描かれないまま気づかずに
    完成する事態を避けるため、その場でエラー終了する）を0.15秒でフェード
@@ -570,12 +613,31 @@ python extract.py input.png --out outdir/ \
     アルファは記録されません）。別のフリーズを新たに編集して改めてボタンを押すと、
     その時点の静止フレームで必ず新しい確認が走るため、古いフリーズの結果を誤って
     見せ続けることはありません。
-  - 閉じ方は「✕」ボタン（画面右上に固定表示）・Escキー・モーダル外（背景）タップの
-    いずれでも可能です。閉じると編集画面のスクロール・タッチ操作がすぐに復帰します。
+  - **表示は画面幅いっぱいの全画面オーバーレイ**（黒背景・映像は幅100%で縦は収まる
+    範囲まで拡大表示）です。「▶ プレビュー」の再生も同様に全画面表示になります
+    （実機での「プレビューが小さすぎる」という指摘への対応。小さなcanvasのままの
+    表示は残していません）。閉じ方は右上の大きな「✕」ボタン（44px角以上）・Escキーの
+    いずれでも可能です（全画面化に伴い、背景タップでの close は廃止しました。
+    背景に露出したピクセルが無くなり判定が成立しなくなったため）。閉じると編集画面の
+    スクロール・タッチ操作がすぐに復帰します。
+  - **タブのバックグラウンド化・再読み込みへの耐性**：確認用Releaseを作成した直後、
+    その情報（タグ・時刻・モデル・動画ファイル名）を `localStorage` に記録しておき、
+    同じフリーズを再び開いた時、まずそのReleaseを直接確認します。iOSでタブが
+    バックグラウンドに回ってJavaScriptの処理が中断され、サーバー側の確認自体は
+    成功していてもエディタ側が結果を取得できないまま待ち続ける、という状況が
+    発生しても、次に開いた時点で `preview.png` が既にあれば再dispatchせずそのまま
+    表示します（無ければ通常どおり新しく確認をやり直します）。
+  - **失敗時は無言にならない**：取得に失敗した場合は、エラーメッセージとともに
+    該当のGitHub Actions実行ページへのリンク（「🔍 Actionsページで確認」）を表示します。
+    `extract.yml`／`render.yml` 側にも「確認用Releaseが無ければ自動作成する」保険の
+    ステップを追加しており、エディタ側のRelease作成とdispatchの間にタブが閉じられる
+    等の想定外の順序になった場合でも、アップロード自体は失敗しません。
   - **メモリ対策**：iPhone実機でページがクラッシュする不具合の対策として、プレビュー
-    表示用のcanvasは最大幅720pxに留め、使い終わり次第 `width`/`height` を0にして
-    即座にバッキングストアを解放します（参照を外すだけだとiOS SafariのGCが遅れ、
-    繰り返し開閉するとメモリを使い切ってページごと落ちることがあるため）。
+    表示用のcanvasのバッキングストア解像度は端末の実DPRを最大2倍相当に留め
+    （全画面表示は解像度が大きく上がるため、フル DPR のままだと描画負荷が
+    増えすぎる）、使い終わり次第 `width`/`height` を0にして即座にバッキングストアを
+    解放します（参照を外すだけだとiOS SafariのGCが遅れ、繰り返し開閉するとメモリを
+    使い切ってページごと落ちることがあるため）。
 - **`color_source` と `shadow.source` の混在**：例えば「カラー化はブラシ、影は自動切り抜き」
   （`color_source: "brush"`、`shadow: {"source": "auto"}`）のような組み合わせも可能です。
   この場合、自動切り抜きはそのフリーズだけ実行されます（他のフリーズが
@@ -852,6 +914,7 @@ node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動�
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/film_logo_bounce.playwright.test.mjs # freeze_sec・テロップバウンス・ラストロゴ設定のE2E
 node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
+node tests/title_lines_editor.playwright.test.mjs # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・フォント選択）のE2E
 node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのE2E、
                                                  # サーバー確認プレビュー（extract.ymlのdispatch・進捗表示・
                                                  # 「確認せずに進む」・confirmedAlphaの記録、GitHub APIはモック）

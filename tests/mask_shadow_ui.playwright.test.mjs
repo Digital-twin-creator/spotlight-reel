@@ -395,6 +395,13 @@ async function main() {
   check(await page.isVisible("#maskPreviewModal"), "ボタンを押すと（結果を待たず）すぐにモーダルが表示される");
   check(await page.isVisible("#maskPreviewProgressWrap"), "進捗バーが表示される");
   check(await page.isVisible("#maskPreviewSkipBtn"), "「確認せずに進む」の選択肢が表示される");
+  const modalBox = await page.locator("#maskPreviewModal").boundingBox();
+  const viewportSize = page.viewportSize();
+  check(Math.abs(modalBox.width - viewportSize.width) < 1 && Math.abs(modalBox.height - viewportSize.height) < 1,
+    "モーダルは画面幅いっぱいの全画面オーバーレイになっている: " + JSON.stringify({ modalBox, viewportSize }));
+  const closeBtnBox = await page.locator("#maskPreviewCloseBtn").boundingBox();
+  check(closeBtnBox.width >= 44 && closeBtnBox.height >= 44,
+    "右上の閉じるボタンが十分大きい（44px角以上）: " + JSON.stringify(closeBtnBox));
   await page.waitForFunction(() => {
     var status = document.getElementById("maskPreviewStatus");
     return status && status.textContent.indexOf("確認完了") >= 0;
@@ -431,6 +438,70 @@ async function main() {
     "✕で閉じるとプレビューcanvasのバッキングストアを即座に解放する（width/height=0）: " + JSON.stringify(canvasSizeAfterCloseBtn));
 
   console.log("");
+  console.log("=== サーバー確認：タブのバックグラウンド化等で見失った結果も、次に開いた時に拾える（pendingConfirm復旧） ===");
+  {
+    // タブのバックグラウンド化・端末側の再読み込み等で元のPromiseチェーンが失われても、
+    // サーバー側では既に完了していることがある（実機で確認された事例）。次にこの
+    // フリーズで確認を開いた時、dispatchし直さずそのままその結果を拾えることを検証する。
+    const recoveryTag = "job-confirm-recovery-test";
+    const currentTime = await page.evaluate(() => draft.time);
+    const currentModel = await page.evaluate(() => resolveMaskModel(appState.maskModel));
+    const currentVideoFileName = await page.evaluate(() => appState.videoFileName);
+    await page.evaluate(({ tag, time, model, videoFileName }) => {
+      localStorage.setItem("spotlightReel:pendingConfirm:" + videoFileName, JSON.stringify({
+        tag, time, model, videoFileName, dispatchedAt: Date.now()
+      }));
+    }, { tag: recoveryTag, time: currentTime, model: currentModel, videoFileName: currentVideoFileName });
+
+    const recoveryMock = makeConfirmMock({
+      tag: recoveryTag, runId: 777015, cacheAssetTimeLabel: Number(currentTime).toFixed(3)
+    });
+    await routeConfirmApiGithub(page, recoveryMock);
+    await page.evaluate(() => { draft.confirmedAlpha = null; });
+
+    await page.click("#maskPreviewBtn");
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+      null, { timeout: 15000 });
+
+    check(recoveryMock.createReleaseCalls === 0, "復旧時はReleaseを新規作成しない（既存のものをそのまま使う）: " + recoveryMock.createReleaseCalls);
+    check(recoveryMock.blobCalls === 0, "復旧時は静止フレーム等の再アップロードをしない: " + recoveryMock.blobCalls);
+    check(recoveryMock.dispatchCalls === 0, "復旧時はextract.ymlを再dispatchしない: " + recoveryMock.dispatchCalls);
+    check(recoveryMock.getReleaseByTagCalls >= 1, "保存しておいたタグでReleaseを直接確認する");
+    const confirmedAlphaAfterRecovery = await page.evaluate(() => draft.confirmedAlpha);
+    check(!!confirmedAlphaAfterRecovery && confirmedAlphaAfterRecovery.tag === recoveryTag,
+      "復旧した結果がdraft.confirmedAlphaに記録される: " + JSON.stringify(confirmedAlphaAfterRecovery));
+    const pendingAfterRecovery = await page.evaluate((videoFileName) =>
+      localStorage.getItem("spotlightReel:pendingConfirm:" + videoFileName), currentVideoFileName);
+    check(pendingAfterRecovery === null, "復旧が完了するとpendingConfirmの記録は消される");
+
+    await page.click("#maskPreviewCloseBtn");
+  }
+
+  console.log("");
+  console.log("=== サーバー確認：失敗時はエラーメッセージとActionsへのリンクを表示する（無言にならない） ===");
+  {
+    const failMock = makeConfirmMock({
+      runId: 777016,
+      runStatusSequence: [{ status: "completed", conclusion: "failure" }],
+    });
+    await routeConfirmApiGithub(page, failMock);
+
+    await page.click("#maskPreviewBtn");
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("失敗しました") >= 0,
+      null, { timeout: 15000 });
+
+    check(await page.isVisible("#maskPreviewActionsLink"), "失敗時はActionsページへのリンクが表示される（無言にならない）");
+    const actionsHref = await page.getAttribute("#maskPreviewActionsLink", "href");
+    check(!!actionsHref && actionsHref.indexOf("/actions/runs/777016") >= 0,
+      "リンク先が該当のActions run（777016）を指している: " + actionsHref);
+    check((await page.textContent("#maskPreviewStatus")).indexOf("確認せずに進む") >= 0,
+      "エラーメッセージに「確認せずに進む」で続けられる旨が含まれる");
+
+    await page.click("#maskPreviewCloseBtn");
+    check(await page.isHidden("#maskPreviewActionsLink"), "閉じるとActionsリンクも隠れる（次回の確認に持ち越さない）");
+  }
+
+  console.log("");
   console.log("=== 「確認せずに進む」：結果を待たずにモーダルを閉じられ、confirmedAlphaは記録されない ===");
   const skipMock = makeConfirmMock({ runId: 777010 });
   await routeConfirmApiGithub(page, skipMock);
@@ -445,7 +516,10 @@ async function main() {
   check(pageErrors.length === 0, "スキップ後もページ例外が発生していない: " + JSON.stringify(pageErrors));
 
   console.log("");
-  console.log("=== 簡易プレビュー：Esc・モーダル外タップでも閉じ、閉じた後は編集操作が復帰する ===");
+  console.log("=== サーバー確認：Escキーでも閉じ、閉じた後は編集操作が復帰する（全画面化により背景タップは廃止） ===");
+  // 全画面オーバーレイ化により、映像とチロームが画面全体を隙間なく覆うため、
+  // 「カード外（背景）をタップして閉じる」という以前の操作は成立しなくなった
+  // （閉じるボタン・Escキーのみが閉じる手段になる）。
   const drawBox = await page.locator("#drawCanvas").boundingBox();
   const escTapMock = makeConfirmMock({ runId: 777011 });
   await routeConfirmApiGithub(page, escTapMock);
@@ -457,13 +531,13 @@ async function main() {
   await page.keyboard.press("Escape");
   check(await page.isHidden("#maskPreviewModal"), "Escキーでもモーダルが閉じる");
 
-  const tapOutMock = makeConfirmMock({ runId: 777012 });
-  await routeConfirmApiGithub(page, tapOutMock);
+  const closeBtnMock = makeConfirmMock({ runId: 777012 });
+  await routeConfirmApiGithub(page, closeBtnMock);
   await page.click("#maskPreviewBtn");
   await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
     null, { timeout: 15000 });
-  await page.mouse.click(8, 8); // カード外（背景）の左上をタップ
-  check(await page.isHidden("#maskPreviewModal"), "モーダル外（背景）をタップしても閉じる");
+  await page.click("#maskPreviewCloseBtn");
+  check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが閉じる");
 
   // 閉じた直後、下に隠れていた描画キャンバスへのタッチがすぐ復帰する
   // （モーダルの残骸がブロックし続けていないことの確認）
@@ -529,7 +603,7 @@ async function main() {
   check(JSON.stringify(strokeModes) === JSON.stringify(["add", "erase"]),
     "draft.strokesが描いた順に['add','erase']になる: " + JSON.stringify(strokeModes));
 
-  await page.fill("#nameInput", "自動＋ブラシ修正テスト");
+  await page.fill(".title-line-text", "自動＋ブラシ修正テスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
@@ -546,7 +620,7 @@ async function main() {
   const box2 = await page.locator("#drawCanvas").boundingBox();
   await page.waitForTimeout(200);
   await dragStroke(page, box2, 0.3, 0.3, 0.5, 0.4);
-  await page.fill("#nameInput", "従来ブラシテスト");
+  await page.fill(".title-line-text", "従来ブラシテスト");
   await page.click("#commitFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
@@ -724,7 +798,7 @@ async function main() {
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.selectOption("#maskModeSelect", "auto");
-  await page.fill("#nameInput", "プレビュー影テスト");
+  await page.fill(".title-line-text", "プレビュー影テスト");
   await page.evaluate(() => {
     appState.shadowEnabled = true;
     appState.shadowDirection = "right";
@@ -736,34 +810,63 @@ async function main() {
 
   /** previewCanvasの、mask="auto"代用マスクの左端付近・縦中央よりやや下の1px色をCSS座標基準で読む */
   const readProbePixel = () => page.evaluate(() => {
-    var dpr = window.devicePixelRatio || 1;
-    var ctx = document.getElementById("previewCanvas").getContext("2d");
+    var canvas = document.getElementById("previewCanvas");
+    var ctx = canvas.getContext("2d");
     var W = overlaySize.width, H = overlaySize.height;
+    // previewCanvasのバッキングストア解像度は、全画面プレビュー時のカクつき対策で
+    // window.devicePixelRatioより低いdprに抑えていることがある(PREVIEW_CANVAS_MAX_DPR)。
+    // CSSピクセル(W/H基準)から実際の物理ピクセルへは、canvas自身の実測比率で変換する。
+    var effectiveDpr = canvas.width / W;
     var bx = W * 0.25; // buildAutoPlaceholderMaskのbxと同じ式
-    var x = Math.round((bx + 6) * dpr), y = Math.round(H * 0.7 * dpr);
+    var x = Math.round((bx + 6) * effectiveDpr), y = Math.round(H * 0.7 * effectiveDpr);
     var d = ctx.getImageData(x, y, 1, 1).data;
     return [d[0], d[1], d[2]];
   });
 
+  const videoWrapBeforePreview = await page.locator("#videoWrap").boundingBox();
   await page.click("#previewBtn");
   check((await page.textContent("#previewBtn")) === "■ 停止", "プレビュー開始でボタン表示が「■ 停止」になる");
-  // HOLD(0.3s)+BRUSH(auto既定wipeで0.4s)の途中(0.6s、progress=0.75)。まだスライド開始前で、
-  // wipeはH*0.75まで下から現れているのでプローブ位置(H*0.7)は「人物」で覆われている。
-  await page.waitForTimeout(600);
-  const beforeSlide = await readProbePixel();
-  // さらに700ms待つ（合計1.3s）と、着地(0.3+0.4+0.2=0.9s)を過ぎ保持中。人物は右へ8%W分
-  // ずれた位置にあり、プローブ位置(元の左端付近)は人物が去って影（#123456）が見えているはず。
-  await page.waitForTimeout(700);
-  const afterSlide = await readProbePixel();
+  check(await page.isVisible("#previewStopBtn"), "プレビュー開始で全画面用の閉じるボタンが表示される（下の操作バーには指が届かないため）");
+  const videoWrapDuringPreview = await page.locator("#videoWrap").boundingBox();
+  check(videoWrapDuringPreview.y < 1 && videoWrapDuringPreview.height > videoWrapBeforePreview.height * 1.3,
+    "「▶ プレビュー」再生中はvideoWrapが画面全体を覆う全画面オーバーレイになる（編集時より高さが大幅に増える）: " +
+    JSON.stringify({ beforeHeight: videoWrapBeforePreview.height, duringHeight: videoWrapDuringPreview.height, duringY: videoWrapDuringPreview.y }));
+  // HOLD(0.3s)開始直後はまだスライド前で、プローブ位置(H*0.7)は「人物」で覆われている
+  // （＝影色(#00FF00)にはなっていない）はずである。全画面化により1フレームあたりの
+  // 描画コストが増えて実時間の進み方が実行環境のCPU負荷に左右されやすくなったため、
+  // 固定待機time+固定サンプリングではなく、早い段階のスナップショット1点と、
+  // その後の遷移をポーリングで待つ形にして、CPU負荷による揺らぎに頑健にする。
+  await page.waitForTimeout(150);
+  const earlySlide = await readProbePixel();
+  const distFromShadowColor = (px) => Math.hypot(px[0] - 0, px[1] - 255, px[2] - 0);
+  check(distFromShadowColor(earlySlide) > 60,
+    "プレビュー開始直後（HOLD中のはず）はまだプローブ位置が影色になっていない: " + JSON.stringify(earlySlide));
 
-  const dist = Math.hypot(
-    beforeSlide[0] - afterSlide[0], beforeSlide[1] - afterSlide[1], beforeSlide[2] - afterSlide[2]);
-  check(dist > 30,
-    "スライドインの着地前後でプローブ位置の色が大きく変わる(=影が現れる演出が反映されている): " +
-    "before=" + JSON.stringify(beforeSlide) + " after=" + JSON.stringify(afterSlide) + " dist=" + dist.toFixed(1));
+  // 着地（HOLD+wipe+スライドの合計、既定で0.9s程度）を過ぎると、人物は右へ8%W分ずれた
+  // 位置にあり、プローブ位置（元の左端付近）は人物が去って影（#00FF00）が見えているはず。
+  // 実時間の進みが遅い環境でも確実に検出できるよう、十分な猶予(8秒)でポーリングする。
+  await page.waitForFunction(() => {
+    var canvas = document.getElementById("previewCanvas");
+    var ctx = canvas.getContext("2d");
+    var W = overlaySize.width, H = overlaySize.height;
+    var effectiveDpr = canvas.width / W;
+    var bx = W * 0.25;
+    var x = Math.round((bx + 6) * effectiveDpr), y = Math.round(H * 0.7 * effectiveDpr);
+    var d = ctx.getImageData(x, y, 1, 1).data;
+    return d[1] > 200 && d[0] < 60 && d[2] < 60; // ほぼ純粋な緑(#00FF00)
+  }, null, { timeout: 8000 });
+  check(true, "スライドインの着地後、プローブ位置の色が影色（緑）に変わる(=影が現れる演出が反映されている)");
 
-  await page.click("#previewBtn");
-  check((await page.textContent("#previewBtn")) === "▶ プレビュー", "「■ 停止」を押すとプレビューが止まりボタン表示が戻る");
+  // フルスクリーン中は#previewBtn自体がvideoWrap(z-index高)の下に隠れて指が届かないため、
+  // 実際に押せる#previewStopBtnで止める（下の操作バーには指が届かないという設計どおり）。
+  await page.click("#previewStopBtn");
+  check((await page.textContent("#previewBtn")) === "▶ プレビュー", "全画面用の閉じるボタンで停止するとプレビューが止まりボタン表示も戻る");
+  check(await page.isHidden("#previewStopBtn"), "停止すると全画面用の閉じるボタンも隠れる");
+  const videoWrapAfterStop = await page.locator("#videoWrap").boundingBox();
+  check(Math.abs(videoWrapAfterStop.height - videoWrapBeforePreview.height) < 5,
+    "停止すると通常の編集レイアウト（全画面ではない高さ）に戻る: " +
+    JSON.stringify({ beforeHeight: videoWrapBeforePreview.height, afterStopHeight: videoWrapAfterStop.height }));
+
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
@@ -794,7 +897,7 @@ async function main() {
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
-  await page.fill("#nameInput", "SFXライブラリテスト");
+  await page.fill(".title-line-text", "SFXライブラリテスト");
   await page.selectOption("#sfxSelect", "lib:" + libId);
   check(!(await page.isHidden("#sfxAlignSelect")), "ライブラリファイルを選ぶとsfxAlignSelectが表示される");
   await page.selectOption("#sfxAlignSelect", "end_at_landing");
