@@ -21,3 +21,8 @@ pillow
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2
 torchvision==0.17.2
+# torch==2.2.2はNumPy 2.0より前にビルドされており、NumPy 2.0系（ABIが変わった）が
+# 入っていると "RuntimeError: Numpy is not available" で落ちる（実Actionsジョブでの
+# 検証で発覚）。冒頭のnumpy行（バージョン指定無し）より後にこの行が評価されるよう、
+# ここで明示的に1系に固定する。
+numpy<2
