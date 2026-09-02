@@ -286,6 +286,49 @@ python extract.py input.png --out outdir/ \
   関数が実際に呼ばれるまで遅延されるため、`mask: "brush"` のみのプロジェクトでは
   `rembg` / `onnxruntime` が未インストールでも `render.py` は問題なく動作します。
 
+### 動画モード（RVM: Robust Video Matting）
+
+上記の静止画モデル（isnet-general-use / birefnet-portrait / birefnet-general-lite）は
+1フレームだけを見て切り抜くため、次のような構造的な失敗が起きえます：
+
+- 背景の巻き込み（服・壁の色が背景と紛らわしく、境界を誤検出する）
+- 手・腕など身体の一部がシルエットから欠落する
+
+これを時間方向の情報で防ぐのが動画モード（`--model rvm-mobilenetv3`）です。
+[RVM (Robust Video Matting)](https://github.com/PeterL1n/RobustVideoMatting)（MITライセンス、
+公式が配布しているONNXエクスポート済みモデルをダウンロードし、rembgと共通の依存である
+onnxruntimeで実行）を使い、フリーズ時刻の前後クリップを切り出して先頭（＝一番過去）
+から時系列順に1フレームずつモデルへ通し、再帰状態（ConvGRUの隠れ状態）を温めながら
+フリーズ時刻のフレームまで進めることで、静止画単体では得られない文脈を使った推定になります。
+
+```bash
+python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
+    --video-time 3.2 --output-width 1080 --output-height 1920
+```
+
+- `--video-time`：フリーズ時刻（秒）。動画モードでは入力は画像ではなく動画ファイルで、
+  この時刻の前後クリップを自前でffmpeg切り出しします。
+- `--output-width` / `--output-height`：出力解像度（レターボックス整形に使用）。
+- `--pre-sec` / `--post-sec`：クリップの前後マージン（既定 1.5秒 / 0.5秒）。RVMは
+  過去のフレームだけを見る純粋な因果的（過去→未来の一方向）再帰モデルで、あるフレームの
+  出力はそれより後のフレームの影響を一切受けません。そのため実際の推論はクリップ先頭から
+  フリーズ時刻フレームまでで打ち切られ、`--post-sec` 分は主に「ffmpegのシーク精度の
+  丸め誤差でフリーズ時刻がクリップ末尾ぎりぎりにならないための安全マージン」として
+  切り出すだけで、推論そのものには使われません。
+- 出力ファイル・`metadata.json` の形式は静止画モードと同じ契約です
+  （`extractor` には `"rvm-mobilenetv3"` が記録されます）。
+- ONNXモデルファイル（`rvm_mobilenetv3_fp32.onnx`）は初回のみダウンロードし、
+  `~/.cache/rvm` にキャッシュされます（GitHub Actionsでのキャッシュ方法は
+  [`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
+  追加の依存は不要です（rembgが既に依存しているonnxruntimeをそのまま使うため）。
+  当初はRVM本体のモデルコードをtorch.hub経由で取得しtorch/torchvisionで実行する
+  方式にしていましたが、RVM本体（2021年公開・以降更新なし）がtorchvisionの
+  非公開の内部APIに依存しており、最新のtorch/torchvisionと組み合わせるとアルファが
+  常に0になる不具合があったため、公式のONNXエクスポート済みモデル（固定済みの
+  計算グラフで、モデルコード側のバージョン依存が構造的に発生しない）に切り替えました。
+- エディタの自動切り抜きモデル選択では**動画（安定・推奨）**として選べ、
+  新規プロジェクトの既定になっています（詳細は次項「`mask_options`」）。
+
 ## プロジェクトJSON契約
 
 ```json
@@ -450,12 +493,17 @@ python extract.py input.png --out outdir/ \
   詳細は次項「[マスクの作り方（`color_source`）と出現アニメ（`reveal`）](#マスクの作り方color_sourceと出現アニメreveal)」参照。
 - `mask_options`：`color_source: "auto"` のときの自動切り抜き設定。
   `{"model": "...", "refine": "vitmatte"|null, "decontaminate": true|false}`。
-  省略可（省略時は `extract.py` の既定モデル・`refine: null`・`decontaminate: false`）。
+  省略可（省略時は `extract.py` の既定モデル（`isnet-general-use`）・`refine: null`・
+  `decontaminate: false`。**この既定はエディタの新規プロジェクト初期値とは別物**で、
+  もっぱら旧JSONとの後方互換のために変更していません）。
   エディタの全体設定に「自動切り抜きのモデル」の選択肢があり、
-  **標準（速い）**＝`isnet-general-use`（既定・約3〜9秒/枚）と
+  **動画（安定・推奨）**＝`rvm-mobilenetv3`（新規プロジェクトの既定。前後クリップから
+  時間方向の情報を使って切り抜く。詳細は[「動画モード（RVM）」](#動画モードrvm-robust-video-matting)）、
+  **標準（速い）**＝`isnet-general-use`（JSON契約上の既定・約3〜9秒/枚）、
   **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）
-  のどちらかを選べます。標準を選んだ場合はJSONに `mask_options` キー自体を出力しません
-  （完全後方互換）。
+  の3種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
+  （完全後方互換）。動画（RVM）・高精度を選んだ場合は `mask_options.model` が明示的に
+  出力されます。
 - `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
   表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
   `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /
@@ -589,6 +637,17 @@ python extract.py input.png --out outdir/ \
      Git Data API経由でコミットし、動画のフルレンダリングは行わない軽量ワークフロー
      `extract.yml` を起動します。進捗バーと「起動を待っています…」「サーバーで
      切り抜き中…（経過約N秒）」といった状況表示が進み、**所要は概ね1〜2分程度**です。
+     **動画（RVM）モードを選んでいる場合**は、静止フレームに加えて、フリーズ時刻から
+     `MASK_PREVIEW_CLIP_PRE_SEC`（1.5秒）さかのぼった時点〜フリーズ時刻までを、
+     `<video>` 要素を実際にシークしながら`MASK_PREVIEW_CLIP_FPS`（12fps）間隔で
+     canvasキャプチャした低解像度JPEG連番（`clip_0000.jpg`, `clip_0001.jpg`, ...
+     長辺480px。末尾が必ずフリーズ時刻そのもの）も同じブランチへアップロードします
+     （RVMは過去のフレームだけを見る因果的モデルのため、フリーズ時刻より後の
+     フレームは取得しません）。`params.json` には `clip_fps` / `clip_frame_count` /
+     `clip_target_index`（末尾フレームの添字）が追加され、サーバー側の
+     `.github/scripts/extract_and_cache.py` がこのクリップ連番を
+     `extract.rvm_infer_alpha()` へ渡します（`spotlight-jobs` 側の詳細は
+     [そちらのREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
   2. 完了すると、サーバー側が生成したチェッカー背景合成のプレビュー画像
      （`preview.png`）を取得してモーダルに表示します。透明（背景）部分がチェッカー柄で
      見えるため、本番と同じ精度で切り抜き結果を確認できます。
