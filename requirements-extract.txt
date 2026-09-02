@@ -6,5 +6,8 @@ pillow
 # 動画モード（RVM: Robust Video Matting、extract.pyのrvm-mobilenetv3）用。
 # GPU版torchはサイズが大きく（数GB）、GitHub ActionsランナーにGPUも無いため、
 # --extra-index-urlでCPU専用ビルド（数百MB）を優先的に解決させる。
+# torchvisionはRVMのモデルコード（mobilenetv3.py）がエンコーダの実装に使っている
+# （実Actionsジョブでの検証で発覚：torch.hub.load()時にModuleNotFoundErrorで判明）。
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
+torchvision
