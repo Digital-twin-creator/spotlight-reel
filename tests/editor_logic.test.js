@@ -940,6 +940,48 @@ test("isFrameInvalid: サンプルが1点も取れなければ無効", () => {
   assert.strictEqual(core.isFrameInvalid([]), true);
 });
 
+/* ---- estimateForegroundMaskCoarse（切り抜き結果の簡易プレビュー用、GrabCut風の粗い前景推定） ---- */
+
+function makeSyntheticFrame(W, H, bgColor, subjectColor, subjectRect) {
+  const rgba = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const inSubject = x >= subjectRect.x0 && x < subjectRect.x1 && y >= subjectRect.y0 && y < subjectRect.y1;
+      const c = inSubject ? subjectColor : bgColor;
+      rgba[i] = c[0]; rgba[i + 1] = c[1]; rgba[i + 2] = c[2]; rgba[i + 3] = 255;
+    }
+  }
+  return rgba;
+}
+
+test("estimateForegroundMaskCoarse: 一様な単色背景の中央に別色の矩形があれば、中央は前景・四隅は背景と判定される", () => {
+  const W = 60, H = 100;
+  const subjectRect = { x0: 20, x1: 40, y0: 30, y1: 80 };
+  const rgba = makeSyntheticFrame(W, H, [30, 30, 200], [230, 200, 60], subjectRect);
+  const mask = core.estimateForegroundMaskCoarse(rgba, W, H);
+  assert.strictEqual(mask.length, W * H);
+  const at = (x, y) => mask[y * W + x];
+  assert.strictEqual(at(30, 55), 255, "被写体矩形の中心は前景と判定される");
+  assert.strictEqual(at(2, 2), 0, "左上の隅は背景と判定される");
+  assert.strictEqual(at(W - 3, 2), 0, "右上の隅は背景と判定される");
+  assert.strictEqual(at(2, H - 3), 0, "左下の隅は背景と判定される");
+  assert.strictEqual(at(W - 3, H - 3), 0, "右下の隅は背景と判定される");
+});
+
+test("estimateForegroundMaskCoarse: 完全な単色画像（被写体なし）でもクラッシュせず、外周は背景のまま", () => {
+  const W = 40, H = 60;
+  const rgba = makeSyntheticFrame(W, H, [100, 100, 100], [100, 100, 100], { x0: 0, x1: 0, y0: 0, y1: 0 });
+  const mask = core.estimateForegroundMaskCoarse(rgba, W, H);
+  assert.strictEqual(mask.length, W * H);
+  assert.strictEqual(mask[2 * W + 2], 0, "単色画像では外周（背景に固定される領域）は背景のまま");
+});
+
+test("estimateForegroundMaskCoarse: 幅・高さが0以下なら空配列を返す（クラッシュしない）", () => {
+  assert.strictEqual(core.estimateForegroundMaskCoarse(new Uint8ClampedArray(0), 0, 0).length, 0);
+  assert.strictEqual(core.estimateForegroundMaskCoarse(new Uint8ClampedArray(0), 10, 0).length, 0);
+});
+
 /* ---- makeJobTag ---- */
 test("makeJobTag: job-YYYYMMDD-HHMMSS 形式（UTC基準）になる", () => {
   const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5)); // 2026-08-29T15:30:05Z

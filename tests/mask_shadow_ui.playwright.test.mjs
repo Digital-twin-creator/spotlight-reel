@@ -117,6 +117,29 @@ async function main() {
   check(await page.isVisible("#autoMaskHint"), "auto選択時はautoMaskHint（なぞらなくてOK）が表示される");
   check(await page.isHidden("#brushEditModeRow"), "auto選択時はbrushEditModeRowが隠れたまま");
 
+  console.log("");
+  console.log("=== 「切り抜き結果を確認」ボタン：自動系モードでのみ表示され、押すと簡易プレビューが出る ===");
+  check(await page.isVisible("#maskPreviewBtn"), "mask='auto'のときは「切り抜き結果を確認」ボタンが表示される");
+  check(await page.isHidden("#maskPreviewModal"), "押す前はモーダルが隠れている");
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => {
+    var status = document.getElementById("maskPreviewStatus");
+    return status && status.textContent.indexOf("解析完了") >= 0;
+  }, null, { timeout: 5000 });
+  check(await page.isVisible("#maskPreviewModal"), "ボタンを押すとモーダルが表示される");
+  const previewCanvasSize = await page.evaluate(() => {
+    var c = document.getElementById("maskPreviewCanvas");
+    return { w: c.width, h: c.height };
+  });
+  check(previewCanvasSize.w > 1 && previewCanvasSize.h > 1,
+    "簡易プレビューのcanvasに実際のサイズで描画されている: " + JSON.stringify(previewCanvasSize));
+  check((await page.textContent("#maskPreviewStatus")).indexOf("解析完了") >= 0,
+    "解析完了のステータス文言が表示される");
+  await page.click("#maskPreviewCloseBtn");
+  check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが隠れる");
+
+  await page.selectOption("#maskModeSelect", "brush");
+  check(await page.isHidden("#maskPreviewBtn"), "mask='brush'に戻すと「切り抜き結果を確認」ボタンは隠れる");
   await page.selectOption("#maskModeSelect", "auto+brush");
   check(await page.isHidden("#autoMaskHint"), "auto+brush選択時はautoMaskHintが隠れる");
   check(await page.isVisible("#brushEditModeRow"), "auto+brush選択時はbrushEditModeRow（足す/消す）が表示される");
@@ -180,8 +203,18 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   console.log("");
+  console.log("=== 全体設定：影の色プリセットUIを見つけやすくするため、既定で開いている ===");
+  // 実機で「影の色プリセットが見つからない」という報告があったため、settingsSectionが
+  // ページ読み込み直後から既定で開いていて、追加の操作なしに影の色プリセットが見える
+  // ことを確認する（以前は既定で閉じていたため見落とされていた）。
+  check(await page.evaluate(() => document.getElementById("settingsSection").open),
+    "settingsSectionはページ読み込み直後から既定で開いている（影の色プリセットが最初から見える）");
+  check(await page.isVisible("#filmColorPresetRow"),
+    "何も操作しなくても影の色プリセット行（#filmColorPresetRow）が最初から見えている");
+
+  console.log("");
   console.log("=== 全体設定：影（フィルム色）のオン/オフとスライダー・方向 ===");
-  // 全体設定は <details class="card"> の中にあり既定で閉じているため、先に開く
+  // （既に開いているが、念のため明示的にも開いておく）
   await page.evaluate(() => { document.getElementById("settingsSection").open = true; });
 
   // 実機で影が一切出ない不具合の再発防止：エディタの初期状態は必ずONで、
