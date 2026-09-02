@@ -200,8 +200,9 @@ function sampleState() {
   return {
     videoFileName: "dummy_input.mp4",
     outputMode: "1080x1920",
-    freezeSec: 2.5,
-    brushAnimSec: 0.8,
+    revealSec: 0.8,
+    slideSec: 0.4,
+    holdSec: 2.5,
     audioDuringFreeze: "mute",
     freezes: [
       {
@@ -221,8 +222,9 @@ test("buildProjectJSON: version, video, output, style, freezes を契約どお�
   assert.strictEqual(project.version, 1);
   assert.strictEqual(project.video, "dummy_input.mp4");
   assert.deepStrictEqual(project.output, { width: 1080, height: 1920, fps: 30 });
-  assert.strictEqual(project.style.freeze_sec, 2.5);
-  assert.strictEqual(project.style.brush_anim_sec, 0.8);
+  assert.strictEqual(project.style.reveal_sec, 0.8);
+  assert.strictEqual(project.style.slide_sec, 0.4);
+  assert.strictEqual(project.style.hold_sec, 2.5);
   assert.strictEqual(project.style.audio_during_freeze, "mute");
   assert.strictEqual(project.style.font, "assets/fonts/NotoSansJP-Bold.ttf");
   assert.strictEqual(project.freezes.length, 2);
@@ -277,6 +279,103 @@ test("buildProjectJSON: sfx未設定のフリーズは sfx キーを出力しな
   assert.strictEqual("sfx" in fz, false);
 });
 
+/* ---- color_source（新）/ mask（旧・後方互換） ---- */
+
+test("buildProjectJSON: maskModeが brush/auto ならcolor_sourceキーで出力し、maskキーは出力しない", () => {
+  const state = sampleState();
+  state.freezes[0].maskMode = "auto";
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === 5.5)[0];
+  assert.strictEqual(fz.color_source, "auto");
+  assert.strictEqual("mask" in fz, false);
+});
+
+test("buildProjectJSON: maskModeが auto+brush（後方互換のハイブリッド）なら旧maskキーで出力し、color_sourceは出力しない", () => {
+  const state = sampleState();
+  state.freezes[0].maskMode = "auto+brush";
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === 5.5)[0];
+  assert.strictEqual(fz.mask, "auto+brush");
+  assert.strictEqual("color_source" in fz, false);
+});
+
+test("resolveColorSourceForFreeze: color_sourceキーがあれば優先し、無ければ旧maskキーを読み替える", () => {
+  assert.strictEqual(core.resolveColorSourceForFreeze({ color_source: "auto" }), "auto");
+  assert.strictEqual(core.resolveColorSourceForFreeze({ mask: "auto+brush" }), "auto+brush");
+  assert.strictEqual(core.resolveColorSourceForFreeze({}), "brush");
+  assert.strictEqual(core.resolveColorSourceForFreeze({ color_source: "nonsense" }), "brush");
+});
+
+test("parseProjectJSON: color_source（新）とmask（旧）のどちらもmaskModeとして読み込める", () => {
+  const withNew = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    freezes: [{ time: 1, name: "a", color_source: "auto", strokes: [] }]
+  });
+  assert.strictEqual(withNew.freezes[0].maskMode, "auto");
+  const withLegacy = core.parseProjectJSON({
+    version: 1, video: "x.mp4",
+    freezes: [{ time: 1, name: "a", mask: "auto+brush", strokes: [] }]
+  });
+  assert.strictEqual(withLegacy.freezes[0].maskMode, "auto+brush");
+});
+
+/* ---- shadow.source（新）：影に使うマスクの種類 ---- */
+
+test("parseProjectJSON: shadow.sourceを読み込める（未指定はsame）", () => {
+  const withSource = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { shadow: { source: "brush" } }
+  });
+  assert.strictEqual(withSource.shadowSource, "brush");
+  const withoutSource = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { shadow: {} }
+  });
+  assert.strictEqual(withoutSource.shadowSource, "same");
+});
+
+test("buildProjectJSON/parseProjectJSON: shadow.sourceを含めて往復できる", () => {
+  const state = sampleState();
+  state.shadowEnabled = true;
+  state.shadowSource = "brush";
+  const loaded = core.parseProjectJSON(core.buildProjectJSON(state));
+  assert.strictEqual(loaded.shadowSource, "brush");
+});
+
+/* ---- reveal="none"（自動マスクを一瞬で全体表示し、reveal_sec秒だけ静止して待つ） ---- */
+
+test("resolveReveal: 'none'はREVEALSに含まれ、そのまま返る", () => {
+  assert.ok(core.REVEALS.indexOf("none") >= 0);
+  assert.strictEqual(core.resolveReveal("none"), "none");
+});
+
+/* ---- reveal_sec/slide_sec/hold_secの旧キー読み替え（freeze_sec/brush_anim_sec/shadow.slide_sec） ---- */
+
+test("parseProjectJSON: 旧freeze_sec/brush_anim_secは新しいhold_sec/reveal_secとして読み替えられる", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { freeze_sec: 1.8, brush_anim_sec: 0.9 }
+  });
+  assert.strictEqual(loaded.holdSec, 1.8);
+  assert.strictEqual(loaded.revealSec, 0.9);
+});
+
+test("parseProjectJSON: shadow.slide_sec（旧）はstyle.slide_sec（新）より優先される", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { slide_sec: 0.3, shadow: { slide_sec: 0.9 } }
+  });
+  assert.strictEqual(loaded.slideSec, 0.9);
+});
+
+test("parseProjectJSON: 新しいstyle.slide_secはshadow.slide_secが無ければそのまま使われる", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { slide_sec: 0.3, shadow: {} }
+  });
+  assert.strictEqual(loaded.slideSec, 0.3);
+});
+
 /* ---- parseProjectJSON: buildと逆変換して一致するか ---- */
 test("parseProjectJSON: buildProjectJSON の出力を読み込んで往復できる", () => {
   const state = sampleState();
@@ -284,7 +383,9 @@ test("parseProjectJSON: buildProjectJSON の出力を読み込んで往復でき
   const loaded = core.parseProjectJSON(project);
   assert.strictEqual(loaded.videoFileName, state.videoFileName);
   assert.strictEqual(loaded.outputMode, "1080x1920");
-  assert.strictEqual(loaded.freezeSec, 2.5);
+  assert.strictEqual(loaded.revealSec, 0.8);
+  assert.strictEqual(loaded.slideSec, 0.4);
+  assert.strictEqual(loaded.holdSec, 2.5);
   assert.strictEqual(loaded.freezes.length, 2);
   assert.strictEqual(loaded.freezes[0].time, 2.5);
   assert.strictEqual(loaded.freezes[0].name, "赤い人");
@@ -300,15 +401,22 @@ test("parseProjectJSON: 未知のキーがあっても無視して読み込め�
 
 test("parseProjectJSON: style が省略されていても既定値を補う", () => {
   const loaded = core.parseProjectJSON({ version: 1, video: "x.mp4", freezes: [] });
-  assert.strictEqual(loaded.freezeSec, core.DEFAULT_STYLE.freeze_sec);
-  assert.strictEqual(loaded.brushAnimSec, core.DEFAULT_STYLE.brush_anim_sec);
+  assert.strictEqual(loaded.revealSec, core.REVEAL_SEC_DEFAULT);
+  assert.strictEqual(loaded.slideSec, core.SLIDE_SEC_DEFAULT);
+  assert.strictEqual(loaded.holdSec, core.HOLD_SEC_DEFAULT);
   assert.strictEqual(loaded.audioDuringFreeze, "mute");
 });
 
 /* ---- 演出追加：影（フィルム色）／テロップバウンス／ラストロゴ ---- */
 
-test("DEFAULT_STYLE: freeze_secの既定値は1.2、film_offset等は後方互換パース専用の無効化デフォルト", () => {
-  assert.strictEqual(core.DEFAULT_STYLE.freeze_sec, 1.2);
+test("DEFAULT_STYLE: reveal_sec/slide_sec/hold_secの既定値は0.5/0.5/2.0、film_offset等は後方互換パース専用の無効化デフォルト", () => {
+  // reveal_sec/slide_sec/hold_sec（そしてfreeze_sec/brush_anim_sec、mask）はDEFAULT_STYLEに
+  // 意図的に含めていない（shadowキーと同じ理由。render.pyのDEFAULT_STYLEと同じ設計）
+  assert.strictEqual(core.DEFAULT_STYLE.freeze_sec, undefined);
+  assert.strictEqual(core.DEFAULT_STYLE.brush_anim_sec, undefined);
+  assert.strictEqual(core.REVEAL_SEC_DEFAULT, 0.5);
+  assert.strictEqual(core.SLIDE_SEC_DEFAULT, 0.5);
+  assert.strictEqual(core.HOLD_SEC_DEFAULT, 2.0);
   assert.strictEqual(core.DEFAULT_STYLE.mono_contrast, 1.0);
   assert.deepStrictEqual(core.DEFAULT_STYLE.film_offset, [0, 0]);
   assert.strictEqual(core.DEFAULT_STYLE.title_bounce, false);
@@ -322,6 +430,7 @@ test("DEFAULT_SHADOW: render.pyのSHADOW_*_DEFAULTと同じ値", () => {
   assert.strictEqual(core.DEFAULT_SHADOW.offsetY, 0.02);
   assert.strictEqual(core.DEFAULT_SHADOW.blur, 0.0);
   assert.strictEqual(core.DEFAULT_SHADOW.slideSec, 0.5);
+  assert.strictEqual(core.DEFAULT_SHADOW.source, "same");
   assert.strictEqual(core.SHADOW_SLIDE_BACK_SEC, 0.25);
 });
 
@@ -394,8 +503,16 @@ test("buildProjectJSON: shadowEnabledがtrueならstyle.shadowを契約どおり
   assert.strictEqual(project.style.title_bounce, true);
   assert.deepStrictEqual(project.style.shadow, {
     color: "#00C8FF", alpha: 0.9, distance: 0.05, direction: "left",
-    offset_y: core.DEFAULT_SHADOW.offsetY, blur: 0.02, slide_sec: core.DEFAULT_SHADOW.slideSec
+    offset_y: core.DEFAULT_SHADOW.offsetY, blur: 0.02, source: "same"
   });
+});
+
+test("buildProjectJSON: shadowSourceを設定するとstyle.shadow.sourceに反映される", () => {
+  const state = sampleState();
+  state.shadowEnabled = true;
+  state.shadowSource = "auto";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.shadow.source, "auto");
 });
 
 test("buildProjectJSON: shadowEnabledがfalseならstyle.shadow={enabled:false}を明示的に出力する（キー省略はしない）", () => {

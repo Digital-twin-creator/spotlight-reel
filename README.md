@@ -26,7 +26,7 @@ spotlight-reel/
 ├── requirements-extract.txt # rembg, onnxruntime, numpy, pillow（extract.py / mask:"auto"系のみで必要）
 ├── assets/
 │   ├── fonts/             # NotoSansJP-Bold.ttf, Anton-Regular.ttf（欧文タイトル用）
-│   ├── sfx/                # shakin.wav, don.wav（差し替え可。後述「効果音を差し替える」参照）
+│   ├── sfx/                # shakin.wav, don.wav, impact.wav（差し替え可。後述「効果音を差し替える」参照）
 │   └── brushes/            # round/hake/marker/spray.png（筆先スタンプ画像、白＋アルファ）
 ├── cache/                  # render.pyが自動切り抜きのアルファをキャッシュするディレクトリ（gitignore対象）
 ├── examples/
@@ -84,8 +84,9 @@ spotlight-reel/
    「▶ プレビュー」の簡易再生に反映される。
    「▶ プレビュー」で、影（フィルム色）のスライド演出・テロップのバウンス・
    （ラストフリーズなら）ロゴの着地とスイープ演出も含めた雰囲気をその場で確認できる。
-4. 「全体設定」でフリーズの長さ・影（フィルム色。色プリセット・濃さ・ズレ距離・
-   方向（自動/左/右）・ぼかし）・テロップのバウンスON/OFFなどを、「ラストロゴ」で
+4. 「全体設定」で演出の3段構成（①塗り・②ズレ・③静止それぞれの秒数）・
+   影（フィルム色。色プリセット・濃さ・ズレ距離・方向（自動/左/右）・ぼかし・
+   影に使うマスク）・テロップのバウンスON/OFFなどを、「ラストロゴ」で
    動画末尾やラストフリーズに重ねるロゴ画像・背景（ロゴに合わせる／動画に重ねる／
    色指定）・表示時間・タイミングを、それぞれ必要に応じて調整できる。
 5. 必要なだけフリーズを追加したら（一覧のカードから編集・削除・シークが可能）、
@@ -264,8 +265,9 @@ python extract.py input.png --out outdir/ \
   "video": "input.mp4",
   "output": { "width": 1080, "height": 1920, "fps": 30 },
   "style": {
-    "freeze_sec": 1.2,
-    "brush_anim_sec": 0.8,
+    "reveal_sec": 0.5,
+    "slide_sec": 0.5,
+    "hold_sec": 2.0,
     "brush_width": 0.12,
     "brush_shape": "round",
     "mono_contrast": 1.3,
@@ -282,7 +284,7 @@ python extract.py input.png --out outdir/ \
     "reveal": "wipe",
     "shadow": {
       "color": "#FF6432", "alpha": 0.8, "distance": 0.03,
-      "direction": "auto", "offset_y": 0.02, "blur": 0, "slide_sec": 0.5
+      "direction": "auto", "offset_y": 0.02, "blur": 0, "source": "same"
     }
   },
   "freezes": [
@@ -294,7 +296,7 @@ python extract.py input.png --out outdir/ \
       "title_pos": [0.15, 0.15],
       "title_size": 0.08,
       "title_align": "left",
-      "mask": "brush",
+      "color_source": "brush",
       "strokes": [
         { "width": 0.12, "points": [[0.42, 0.31], [0.44, 0.45], [0.43, 0.60]] }
       ]
@@ -302,7 +304,7 @@ python extract.py input.png --out outdir/ \
     {
       "time": 5.5,
       "name": "自動くん",
-      "mask": "auto",
+      "color_source": "auto",
       "mask_options": { "model": "birefnet-general-lite", "refine": null, "decontaminate": false }
     },
     {
@@ -313,14 +315,24 @@ python extract.py input.png --out outdir/ \
         { "width": 0.08, "mode": "add", "points": [[0.30, 0.20], [0.34, 0.22]] },
         { "width": 0.06, "mode": "erase", "points": [[0.55, 0.60], [0.58, 0.63]] }
       ]
+    },
+    {
+      "time": 9.0,
+      "name": "混在くん（カラーはブラシ・影は自動切り抜き）",
+      "color_source": "brush",
+      "shadow": { "source": "auto" },
+      "strokes": [
+        { "width": 0.12, "points": [[0.5, 0.5], [0.52, 0.55]] }
+      ]
     }
   ],
   "logo": {
     "image": "store_logo.png",
     "at": "last_freeze",
     "background": "auto",
-    "duration_sec": 1.2,
-    "sfx": "don"
+    "duration_sec": 2.2,
+    "width_ratio": 0.55,
+    "sfx": "impact"
   }
 }
 ```
@@ -330,12 +342,13 @@ python extract.py input.png --out outdir/ \
 - `points` の座標と `width`（太さ）は動画サイズに対する **0〜1の比率** です。
   `x` は幅、`y` は高さ、`width` は幅を基準にします。
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
-  （`freeze_sec` / `brush_anim_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
+  （`reveal_sec` / `slide_sec` / `hold_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
   `background` / `font` / `audio_during_freeze` /
-  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` / `mask` / `mask_options` /
-  `reveal` を個別上書き可能。
-  `shadow` / `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します。
-  影演出は人物ごとの上書きを廃止し `style.shadow` 1つに一本化されています）。
+  `title_pos` / `title_size` / `title_align` / `brush_fade_sec` / `color_source` /
+  `mask_options` / `reveal` / `shadow` を個別上書き可能。
+  `title_font` / `title_font_jp` / `title_bounce` は `style` のみで指定します）。
+  1フリーズの流れは「①塗り（`reveal_sec`）→②ズレ（`slide_sec`）→③静止（`hold_sec`）」の
+  3段構成です。詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)を参照。
 - `title_pos`：テロップ中心の位置（出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
   `x` はそれぞれテロップの左端／右端の位置として扱われる（`center` のときのみ中心）。
@@ -352,17 +365,22 @@ python extract.py input.png --out outdir/ \
 - `brush_shape` は `round`（丸筆・既定値）/ `hake`（ハケ）/ `marker`（平筆マーカー）/
   `spray`（スプレー）のいずれか。未指定・不明な値は `round` として扱われます
   （後方互換：この項目が無い既存のJSONもそのまま動きます）。
-- `mask`：人物マスクの作り方。`brush`（既定・従来どおりブラシスタンプ） /
-  `auto`（`extract.py` の自動切り抜きをそのまま使う） / `auto+brush`（自動アルファを
-  ブラシで修正）のいずれか。未指定・不明な値は `brush` として扱われます（完全後方互換）。
-  詳細は次項「[マスクの作り方（`mask`）と出現アニメ（`reveal`）](#マスクの作り方maskと出現アニメreveal)」参照。
-- `mask_options`：`mask: "auto"` / `"auto+brush"` のときの自動切り抜き設定。
+- `color_source`：カラー化に使うマスクの種類。`brush`（既定・従来どおりブラシスタンプ） /
+  `auto`（`extract.py` の自動切り抜きをそのまま使う）のいずれか。未指定・不明な値は
+  `brush` として扱われます。旧 `mask` キー（`brush` / `auto` / `auto+brush`）も引き続き
+  読み込めます（`color_source` が無ければ `mask` を読み替える）。`auto+brush`
+  （自動アルファをブラシで修正するハイブリッドモード）は `color_source` には存在せず、
+  `mask: "auto+brush"` のままお使いください。
+  詳細は次項「[マスクの作り方（`color_source`）と出現アニメ（`reveal`）](#マスクの作り方color_sourceと出現アニメreveal)」参照。
+- `mask_options`：`color_source: "auto"` のときの自動切り抜き設定。
   `{"model": "...", "refine": "vitmatte"|null, "decontaminate": true|false}`。
   省略可（省略時は `extract.py` の既定モデル・`refine: null`・`decontaminate: false`）。
-- `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ0.4秒で拭き取るように表示） /
-  `fade`（0.3秒でフェードイン） / `brush`（`mask: "auto+brush"` のときのみ有効。従来どおり
-  ストロークで塗って出す）のいずれか。`mask: "brush"` のときは無関係（常にストローク自体の
-  伸びるアニメーションになる）。
+- `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
+  表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
+  `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /
+  `brush`（`mask: "auto+brush"` のときのみ有効。従来どおりストロークで塗って出す）
+  のいずれか。`color_source: "brush"` のときは無関係（常にストローク自体の伸びる
+  アニメーションになる）。
 - `shadow`：影（フィルム色）演出。**省略時は既定で有効**（`SHADOW_*_DEFAULT` の値。
   詳細は次項）。無効にしたい場合は `"shadow": null` または
   `"shadow": {"enabled": false}` を明示的に指定してください。詳細は
@@ -372,7 +390,7 @@ python extract.py input.png --out outdir/ \
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
 - 新しいキー（`mono_contrast` / `title_font` /
   `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo` /
-  `mask` / `mask_options` / `reveal`）は
+  `color_source` / `mask_options` / `reveal`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
   （後方互換。詳細は次項）。`brush_fade_sec` と `shadow` は例外です：
   `brush_fade_sec` は省略時に既定値 `0.3` が使われます（＝白い絵の具がフェードアウトする、
@@ -382,30 +400,42 @@ python extract.py input.png --out outdir/ \
   上書き不可）は今も読み込めますが、`shadow` キー自体が無く、かつ `film_offset` が
   非ゼロの場合のみ `shadow` の設定へ自動的に読み替えられます（詳細は次項）。
   新規プロジェクトでは `shadow` を使ってください。
+  同様に旧 `mask` / `freeze_sec` / `brush_anim_sec`（それぞれ `color_source` /
+  `hold_sec` / `reveal_sec` に相当）も引き続き読み込めます。ただし `freeze_sec` は
+  **意味が変わっています**：旧バージョンでは「フリーズ全体の長さ」でしたが、新バージョンでは
+  「③静止（`hold_sec`）だけの長さ」として読み替えられます（詳細は
+  [「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)を参照）。
 
 ### 演出仕様（1フリーズあたり）
 
-1. **フリーズ開始〜ブラシ開始（0.3秒固定）**：静止フレームを `background` で処理して表示
+1フリーズの流れは「**①塗り（`reveal_sec`）→②ズレ（`slide_sec`）→③静止（`hold_sec`）**」の
+3段構成です（それぞれ独立した秒数を指定でき、旧バージョンのような全体予算による
+比例縮小は行いません）。
+
+0. **フリーズ開始〜①塗り開始（0.3秒固定）**：静止フレームを `background` で処理して表示
    - `mono`：グレースケール化（`mono_contrast` でコントラストを強調。1.0が無効化＝既定値）
    - `dark`：元のカラーを30%の明るさに減光
-2. **人物の出現（ブラシは `brush_anim_sec`、`mask: "auto"`/`"auto+brush"` は `reveal` に従う
-   固定時間）**：人物は「元の位置」に出現する。この間、`shadow` があってもまだ人物の真下に
-   完全に隠れているため見えない
-   - `brush_shape` の筆先画像（`assets/brushes/<shape>.png`、白＋アルファ）を軌跡に沿って
-     一定間隔でスタンプする「筆先スタンプ方式」。各スタンプは進行方向に合わせて回転する
-   - `round`：柔らかい縁の丸筆（従来の丸キャップ相当）
-   - `hake`：毛筋（縦方向の濃淡バンド）・縁のギザつき・わずかな不透明度ムラを持つ平たいハケ
-   - `marker`：角の丸い長方形。縁はくっきりしていて、重なった部分は自然と少し濃くなる
-   - `spray`：円形範囲にランダムな点をまき散らしたスプレー
-   - 複数ストロークがある場合は合計時間 `brush_anim_sec` の中で順番に描く
-3. **影演出のスライドイン（`shadow` があれば、`slide_sec` 秒。既定0.5秒）**：
+1. **①塗り（`reveal_sec` 秒。既定0.5秒）**：人物は「元の位置」に出現する。この間、
+   `shadow` があってもまだ人物の真下に完全に隠れているため見えない
+   - `color_source: "brush"`（既定）：`brush_shape` の筆先画像
+     （`assets/brushes/<shape>.png`、白＋アルファ）を軌跡に沿って一定間隔でスタンプする
+     「筆先スタンプ方式」。各スタンプは進行方向に合わせて回転する
+     （`round`＝柔らかい縁の丸筆／`hake`＝毛筋・縁のギザつき・わずかな不透明度ムラを持つ
+     平たいハケ／`marker`＝角の丸い長方形、重なった部分は自然と少し濃くなる／
+     `spray`＝円形範囲にランダムな点をまき散らしたスプレー）。複数ストロークがある場合は
+     合計時間 `reveal_sec` の中で順番に描く
+   - `color_source: "auto"`：`extract.py` の自動切り抜きアルファを `reveal` に従って
+     出現させる（`wipe`＝下から上へワイプ、`fade`＝フェードイン、`none`＝一瞬で全体表示して
+     `reveal_sec` 秒だけ静止して待つ）。詳細は次項
+     「[マスクの作り方（`color_source`）と出現アニメ（`reveal`）](#マスクの作り方color_sourceと出現アニメreveal)」
+2. **②ズレ（`shadow` があれば `slide_sec` 秒。既定0.5秒）**：
    人物レイヤー（マスク＋カラー）だけを、元の位置から `distance` ぶんEase-Out Cubic
    （急停止ではなく滑らかに減速するイージング）でずらす。影自体は元の位置に
    固定されたまま動かないため、そのズレ量ぶん影が覗くように「現れる」。
    `shadow` が無ければこの区間は無い（0秒）。詳細は
    [「影（`shadow`）演出」](#影shadow演出)を参照
-4. **着地の瞬間**：ブラシ先端にまだ残っている白い絵の具を `brush_fade_sec`
-   （既定0.3秒）かけてフェードアウトさせ、人物カラーだけが残るようにする
+3. **着地の瞬間（②の終わり＝③の始まり）**：ブラシ先端にまだ残っている白い絵の具を
+   `brush_fade_sec`（既定0.3秒）かけてフェードアウトさせ、人物カラーだけが残るようにする
    （`brush_fade_sec: 0` で無効化＝旧バージョンと同じ即時消灯）。同時に名前テロップ
    （位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、寄せは `title_align`・
    既定 `center`、文字サイズは `title_size`・既定は高さの6%。日本語を含む名前は
@@ -419,47 +449,65 @@ python extract.py input.png --out outdir/ \
    [「効果音を差し替える」](#効果音を差し替える)）を鳴らす。`title_bounce: true` なら
    フェードインと同じ0.15秒の間に130%→100%へ急停止イージングで縮む「はずむ」演出になる
    （このときテロップの外接矩形の中心を基準に拡大縮小する）。`shadow` が無い場合、
-   この「着地の瞬間」はブラシ完了と同時（従来どおり）
-5. **残り時間**：`freeze_sec` になるまでカラー化＋テロップを保持
-   （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの保持時間が
+   この「着地の瞬間」は①塗り完了と同時（従来どおり）
+4. **③静止（`hold_sec` 秒。既定2.0秒）**：カラー化＋テロップを保持する。テロップは
+   この着地の瞬間に出現し、③静止の終わりまで表示され続ける
+   （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの③静止が
    ラストロゴの表示に必要な長さを満たすよう自動的に延長される。詳細は次項）
-6. **影演出のスライドバック（`shadow` があり、かつこのフリーズでラストロゴを表示しない場合、
+5. **影演出のスライドバック（`shadow` があり、かつこのフリーズでラストロゴを表示しない場合、
    0.25秒固定）**：通常再生に戻る直前に、人物を元の位置へ戻し影を隠す（戻さないと
    再生再開時に人物が飛んで見えるため）。ラストロゴを表示するフリーズではこの区間は無い
    （＝通常再生に戻る演出自体がそこには無いため）
-7. 通常再生に戻る
+6. 通常再生に戻る
 
-### マスクの作り方（`mask`）と出現アニメ（`reveal`）
+`reveal_sec` / `slide_sec` / `hold_sec` は旧バージョンの `brush_anim_sec` / なし
+（`shadow.slide_sec` 相当） / `freeze_sec` を改名・統合したものです。旧キーは
+今も読み込めます（詳細は[「ルール」](#ルール)の後方互換に関する記述を参照）。
+
+### マスクの作り方（`color_source`）と出現アニメ（`reveal`）
 
 人物の「どこをカラー復元するか」（マスク）の作り方を、フリーズ単位（または `style` で
 全体既定）で選べます。ブラシは「マスクの作り方の1つ」および「自動切り抜きの修正手段」
-として引き続き使えます。
+として引き続き使えます。**カラー化に使うマスク（`color_source`）と、影の形に使うマスク
+（`shadow.source`）は別々に指定できます**（後述）。
 
-- **`mask: "brush"`**（既定）：従来どおり、ストロークを筆先スタンプで描いた範囲をマスクにする。
-  出現アニメは常にストローク自体が `brush_anim_sec` かけて伸びていく演出（`reveal` は無関係）。
-- **`mask: "auto"`**：`extract.py`（`mask_options` の設定で自動切り抜き）で得たアルファを
-  そのままマスクとして使う。ブラシは不要（ストロークがあっても無視される）。
-  出現は `reveal` に従う（`wipe` または `fade`）。
-- **`mask: "auto+brush"`**：自動アルファを、ブラシストロークで修正してからマスクにする。
+- **`color_source: "brush"`**（既定）：従来どおり、ストロークを筆先スタンプで描いた範囲を
+  マスクにする。出現アニメは常にストローク自体が `reveal_sec` かけて伸びていく演出
+  （`reveal` は無関係）。
+- **`color_source: "auto"`**：`extract.py`（`mask_options` の設定で自動切り抜き）で得た
+  アルファをそのままマスクとして使う。ブラシは不要（ストロークがあっても無視される）。
+  出現は `reveal` に従う：
+  - `reveal: "wipe"`（既定）：下から上へ `reveal_sec` 秒で拭き取るように表示
+  - `reveal: "fade"`：`reveal_sec` 秒でフェードイン
+  - `reveal: "none"`：一瞬で全体を表示し、`reveal_sec` 秒だけ動かず静止して待つ
+    （＝先に色が付いた状態でしばらく間を置いてから②ズレへ進む）
+- **`mask: "auto+brush"`**（旧キー・`color_source` には存在しない後方互換のハイブリッド
+  モード）：自動アルファを、ブラシストロークで修正してからマスクにする。
   ストロークに `"mode": "add"`（省略時の既定。塗った範囲のアルファを1相当に塗り足す）または
   `"mode": "erase"`（塗った範囲のアルファを0相当に削る）を持たせる。修正はフリーズごとに
   1回だけ計算する静的な補正で、時間変化（出現アニメ）は別途 `reveal` が担当する：
   - `reveal: "wipe"`（既定）／`"fade"`：修正後のアルファ全体を、下から上へのワイプ
     （0.4秒固定）／フェードイン（0.3秒固定）で出現させる（ストロークの形はマスクの
     "どこを直したか" にのみ使われ、出現の順序には関係しない）
-  - `reveal: "brush"`：従来のブラシ演出と同じく、ストロークが伸びる進み具合（`brush_anim_sec`）
+  - `reveal: "brush"`：従来のブラシ演出と同じく、ストロークが伸びる進み具合（`reveal_sec`）
     に沿って、なぞった範囲から順に修正後のアルファを出現させる（`add`/`erase`どちらの
     ストロークも「なぞった」範囲として出現タイミングの判定に使われる）
 - 自動切り抜きの結果（アルファ）は `cache/<動画のファイル名>_<フリーズ時刻>.npz` に
   キャッシュされ、同じ動画・同じフリーズ時刻での再レンダリング時は再計算されません
   （`cache/` はプロジェクトのカレントディレクトリ基準。gitignore対象）。
-- `mask: "auto"` / `"auto+brush"` を使うプロジェクトは、`extract.py` の依存
+- **`color_source` と `shadow.source` の混在**：例えば「カラー化はブラシ、影は自動切り抜き」
+  （`color_source: "brush"`、`shadow: {"source": "auto"}`）のような組み合わせも可能です。
+  この場合、自動切り抜きはそのフリーズだけ実行されます（他のフリーズが
+  `color_source: "brush"` のままなら、そちらでは自動切り抜きは走りません）。
+  詳細は次項「[影（`shadow`）演出」](#影shadow演出)の `source` を参照。
+- `color_source: "auto"` を使うプロジェクトは、`extract.py` の依存
   （`requirements-extract.txt`。詳細は[「自動切り抜き（`extract.py`）」](#自動切り抜きextractpy)）
-  が別途必要です。`mask: "brush"` のみのプロジェクトはこの依存が無くても動作します。
+  が別途必要です。`color_source: "brush"`（既定）のみのプロジェクトはこの依存が無くても
+  動作します。
 
 ### 影（`shadow`）演出
 
-人物アルファ（`mask` が `brush` / `auto` / `auto+brush` のいずれでも）がある場合に、
+人物アルファ（`color_source` が `brush` / `auto` のいずれでも）がある場合に、
 人物が少しスライドして自分の「元の位置」に影を覗かせる演出です。
 以前の「フィルム色縁取り」（旧 `film_offset` / `film_color` / `film_alpha`）と
 統合されており、影レイヤーの実体はそのフィルム色のベタ塗りです（`blur: 0` が既定の
@@ -478,27 +526,39 @@ python extract.py input.png --out outdir/ \
 ```json
 "shadow": {
   "color": "#FF6432", "alpha": 0.8, "distance": 0.03,
-  "direction": "auto", "offset_y": 0.02, "blur": 0, "slide_sec": 0.5
+  "direction": "auto", "offset_y": 0.02, "blur": 0, "source": "same"
 }
 ```
 
-- `color`：影の色（`"#RRGGBB"`。既定 `"#FF6432"`）
+- `color`：影の色（`"#RRGGBB"`。既定 `"#FF6432"`）。エディタには6つの色プリセット
+  （白 `#FFFFFF` / 黒 `#000000` / フィルムオレンジ `#FF6432` / シアン `#32C8FF` /
+  マゼンタ `#FF32A0` / イエロー `#FFD232`）を用意していますが、JSON上は任意の
+  `#RRGGBB` を指定できます。
 - `alpha`：影の濃さ（不透明度、0〜1。既定 `0.8`）
 - `distance`：人物がスライドする距離。出力幅に対する比率（既定 `0.03`）。
   影自体は動かず「人物の元の位置」に固定されたままなので、このスライド量ぶんだけ
   影が覗いて見える
 - `direction`：スライドする向き。`"auto"`（既定）／`"left"`／`"right"`。
-  `"auto"` の場合、人物マスクのX重心を計算し、画面中心より右なら右へ・左なら左へ
-  自動判定する（中心±5%以内は判定があいまいなため、既定の `"right"` になる）
+  `"auto"` の場合、影の形に使うマスク（`source` 参照）のX重心を計算し、画面中心より
+  右なら右へ・左なら左へ自動判定する（中心±5%以内は判定があいまいなため、既定の
+  `"right"` になる）
 - `offset_y`：Y方向のズレ量。出力幅に対する比率、下方向がプラス（既定 `0.02`）。
   X方向とは違い自動判定は無く、常にこの比率がそのまま使われる
 - `blur`：影のぼかし量。出力幅に対する比率（既定 `0`＝ぼかし無し）
-- `slide_sec`：人物がスライドインする時間・秒（既定 `0.5`。以前は0.2秒）。人物の出現アニメ
-  （ブラシ／`reveal`）が完了した直後から、この時間かけて Ease-Out Cubic
+- `source`：**影の形に使うマスクの種類**。`"same"`（既定・`color_source` と同じマスクを
+  使う） / `"brush"`（色付けの方式に関係なく、このフリーズの全ストロークを使う） /
+  `"auto"`（色付けの方式に関係なく、自動切り抜きのアルファを使う。キャッシュ済みで
+  なければこのフリーズだけ切り抜きを実行する）。例えば `color_source: "brush"` と
+  `source: "auto"` を組み合わせると、「カラー化はブラシで塗るが、影の形は自動切り抜きの
+  シルエットに沿う」という演出になります。
+- 人物がスライドインする時間（②ズレ）は、`style`/フリーズの `slide_sec`
+  （既定 `0.5`。旧 `shadow.slide_sec` を統合・改名したもの。互換のため
+  `shadow.slide_sec` を明示した場合はそちらが優先されます）で指定します。
+  人物の①塗りが完了した直後から、この時間かけて Ease-Out Cubic
   （急停止ではなく最後まで滑らかに減速するイージング。以前はEase-Out Expoで
   終盤ほぼ完全に停止していた）イージングで0〜`distance` までスライドし、
   着地の瞬間にテロップ（`title_bounce` があればバウンス）と効果音が発火する。
-  保持時間が終わり通常再生に戻る直前には、0.25秒（固定。以前は0.1秒）かけて
+  ③静止が終わり通常再生に戻る直前には、0.25秒（固定。以前は0.1秒）かけて
   人物を元の位置へ戻し、影を隠す（詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)参照）
 - レイヤー順は **背景 → 影（人物の元の位置。動かない） → 人物（スライド後の位置）
   → テロップ → ロゴ**
@@ -507,18 +567,21 @@ python extract.py input.png --out outdir/ \
   （後方互換）：
   `color` ← `film_color`、`alpha` ← `film_alpha`、`distance` ← `|film_offset.x|`、
   `direction` ← `film_offset.x >= 0 ? "right" : "left"`、`offset_y` ← `film_offset.y`、
-  `blur` ← `0`、`slide_sec` ← 既定値 `0.5`。ただし旧バージョンの縁取りは静止した
-  演出だったのに対し、読み替え後は新しいスライドアニメが付くため、見た目は
-  「フィルム色そのもの」から「スライドして現れる影」に変わります。
+  `blur` ← `0`、`slide_sec` ← 既定値 `0.5`、`source` ← `"same"`。ただし旧バージョンの
+  縁取りは静止した演出だったのに対し、読み替え後は新しいスライドアニメが付くため、
+  見た目は「フィルム色そのもの」から「スライドして現れる影」に変わります。
 - **確認用のログ**：`render.py` はフリーズごとに `影=有効/無効`・`方向=left/right`・
-  `マスクX中心=0.xx`（人物マスクのX重心、画面幅に対する比率。0が左端、1が右端）を
-  標準出力に出します（GitHub Actionsのログでも確認できます）。実機で影が出ない・
-  向きが想定と違う場合は、まずこのログで「影が無効になっていないか」「方向が
-  意図どおりか」を確認してください。
+  `マスクX中心=0.xx`（影の形に使うマスクのX重心、画面幅に対する比率。0が左端、
+  1が右端）・`source=same/brush/auto`（影に使ったマスクの種類）を標準出力に出します
+  （GitHub Actionsのログでも確認できます）。実機で影が出ない・向きが想定と違う場合は、
+  まずこのログで「影が無効になっていないか」「方向が意図どおりか」を確認してください。
 
 ### ラストロゴ（`logo`）演出「インパクト着地＋光彩スイープ」
 
-- `logo.image`：ロゴ画像（PNG推奨、透過対応）のパス。省略するとロゴ演出は無効
+- `logo.image`：ロゴ画像（PNG推奨、透過対応）のパス。省略するとロゴ演出は無効。
+  読み込んだ画像は、内容部分（アルファがあればアルファのしきい値、無ければ四隅の
+  背景色との画素差分）を自動検出してクロップしてから使われます（余白の少ない
+  ロゴ画像を用意するほど、`width_ratio` で指定した表示幅いっぱいに大きく見えます）。
 - `logo.at`：`"end"`（動画の末尾に新しい区間として追加。既定値）または
   `"last_freeze"`（時刻が一番遅いフリーズの保持中に表示）
 - `logo.background`：ロゴの背後に敷く画面
@@ -532,15 +595,22 @@ python extract.py input.png --out outdir/ \
     （`"video"` の場合はクロスフェードせず、静止フレームの上に直接重ねます）。
 - `logo.duration_sec`：**着地してからの表示時間**（秒）。既定 2.2 秒（以前は1.2秒。
   よりゆっくり・重厚な表示にするため延長した）
-- `logo.sfx`：着地の瞬間に鳴らす効果音（省略可、既定は用意していれば `don`）
+- `logo.width_ratio`：ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき）。既定
+  `0.55`（以前は0.4固定）
+- `logo.sfx`：着地の瞬間に鳴らす効果音。既定は `impact`（低く重いインパクト音。
+  `don` より尾が長い。詳細は[「効果音を差し替える」](#効果音を差し替える)）
 - `logo.sfx_tail`：`logo.sfx` に、簡易的な減衰ディレイ（コムフィルタ風のエコーを
   0.6秒かけて重ねる簡易リバーブ近似）を付けて低音の余韻を残すか。既定 `true`。
   `false` にすると効果音ファイルをそのまま（テールなしで）鳴らす
 - タイムライン（着地開始 t=0 として、既定値の場合。以前のバージョンよりゆっくり・
   重厚な「間」を意識した構成に変更している）
-  1. `0.00-0.45s` **着地**：Scale 160%→100%・不透明度0→1 を Ease-Out Quart
-     （`1-(1-t)^4`）でアニメーションさせる（以前は200%→100%を0.15秒、
-     Ease-Out Expo相当のcubic-bezierで行っていた）
+  1. `0.00-0.45s` **着地**：**アンティシペーション＋セトル**でアニメーションさせる。
+     ゆっくり入って（0〜60%はEase-Inで加速しながら）一気に落ち、Scale 160%から
+     100%を2%だけ沈み込んでから、残り40%でEase-Outしながら100%へ戻る（不透明度は
+     0→1へ、沈み込み区間の終わりまでに先行して完全不透明になる）。単純な
+     Ease-Out Quartより重厚感・弾力が出るため、`--preview` とダミーレンダリングで
+     見比べて採用した（以前はScale 200%→100%を0.15秒、Ease-Out Expo相当の
+     cubic-bezierで行っていた）
   2. `0.45-0.50s` **白フラッシュ**：着地の瞬間に効果音を鳴らし、画面全体を白く
      screen合成で0.05秒フラッシュさせる（強さは `flash_strength`。以前より弱め）
   3. `0.45-0.70s` **画面の揺れ**：着地の瞬間、画面全体をごくわずかに揺らす
@@ -552,31 +622,38 @@ python extract.py input.png --out outdir/ \
      `sweep_sec`秒かけて走らせる。ロゴ画像の輝度をマスクにしてscreen合成するため、
      黒背景の不透明PNGでも「明るい部分（文字など）」だけに光が乗る
   5. `1.50s-終了` **保持**：ゆっくり103%まで拡大しながら維持し、終了直前の
-     `fade_sec`秒（既定0.6秒）で背景色（`"video"` の場合は黒）へ暗転する
+     `fade_sec`秒（既定0.4秒）で背景色（`"video"` の場合は黒）へ暗転する
   6. 合計の表示区間は「着地(`landing_sec`) + `duration_sec`」秒
 - 上記のうち以下のパラメータは `logo{}` 配下で個別に上書きできます（それ以外は固定値）：
 
   | キー | 既定値 | 意味 |
   | --- | --- | --- |
   | `scale_from` | `1.6` | スタンバイ時の初期スケール（160%。以前は200%） |
-  | `landing_sec` | `0.45` | 着地（縮小＋フェードイン）にかかる時間（以前は0.15秒） |
+  | `landing_sec` | `0.45` | 着地（アンティシペーション＋セトル）にかかる時間（以前は0.15秒） |
   | `shake_sec` | `0.25` | 着地の瞬間の画面の揺れが収まるまでの時間 |
   | `shake_amplitude` | `0.004` | 画面の揺れの振幅（出力幅に対する比率） |
   | `sweep_start_sec` | `0.35` | 着地完了から光彩スイープ開始までの間隔 |
   | `sweep_sec` | `0.70` | 光彩スイープにかかる時間（以前は0.30秒） |
   | `flash_strength` | `0.35` | 白フラッシュの強さ（0〜1。以前は0.6） |
   | `duration_sec` | `2.2` | 着地からの表示時間（以前は1.2秒） |
-  | `fade_sec` | `0.6` | 終了直前、背景色へ暗転する時間（以前は0.3秒固定） |
+  | `fade_sec` | `0.4` | 終了直前、背景色へ暗転する時間（以前は0.3秒→0.6秒→0.4秒） |
   | `sfx_tail` | `true` | `logo.sfx` に減衰ディレイのテールを付けるか |
+  | `width_ratio` | `0.55` | ロゴの基準表示幅（出力幅に対する比率。以前は0.4固定） |
 
 ### 効果音を差し替える
 
-`assets/sfx/shakin.wav` / `assets/sfx/don.wav` は、`make_dummy.py` が最初に生成する
-**仮の合成音**です。フリー効果音サイト（例: [効果音ラボ](https://soundeffect-lab.info/)、
+`assets/sfx/shakin.wav` / `assets/sfx/don.wav` / `assets/sfx/impact.wav` は、
+`make_dummy.py` が最初に生成する**仮の合成音**（「映画予告編ふう」の質感を意識した
+もの。`shakin` は複数の非整数倍音を重ねた金属的な高域シマー＋短い残響、`don` は
+40〜60Hzのサブベース＋アタックの打撃ノイズ＋1.2秒以上の減衰リバーブ尾、`impact` は
+`don` よりさらに低く重く、尾も長い、ラストロゴ着地用のSE）です。いずれもピークで
+歪まないようリミッター的に正規化して仕上げています。
+
+フリー効果音サイト（例: [効果音ラボ](https://soundeffect-lab.info/)、
 [OtoLogic](https://otologic.jp/)、[PIXABAY Sound Effects](https://pixabay.com/sound-effects/)
 など、利用規約を確認の上で商用可否に注意して選んでください）から気に入った音を
-ダウンロードし、同じファイル名（`shakin.wav` / `don.wav`。他の名前で使う場合は
-プロジェクトJSONの `sfx` / `logo.sfx` にその名前を指定）で `assets/sfx/` に
+ダウンロードし、同じファイル名（`shakin.wav` / `don.wav` / `impact.wav`。他の名前で
+使う場合はプロジェクトJSONの `sfx` / `logo.sfx` にその名前を指定）で `assets/sfx/` に
 上書き保存するだけで、以後 `render.py` はその音をそのまま使います
 （特別な設定は不要。ファイルの存在確認だけで優先的に読み込む仕組みのため）。
 `python make_dummy.py` を再実行しても、既に存在する `assets/sfx/*.wav` は
@@ -586,12 +663,17 @@ python extract.py input.png --out outdir/ \
 
 - 元動画の音声は、フリーズ区間を挿入した分だけ後ろへずれます。
 - フリーズ中は `audio_during_freeze` が `mute` なら無音、`keep` なら直前0.5秒をループします。
-- 効果音はブラシ完了の瞬間にミックスされます。
+- 効果音は①塗り完了の瞬間（`shadow` があれば②ズレの着地の瞬間）にミックスされます。
 - `logo.sfx` は、ロゴが着地する瞬間（`landing_sec` 経過後。`at: "last_freeze"` かつ背景色
   クロスフェードがある場合はそのぶんも加算した後）に鳴ります。`logo.at: "end"` の場合、
   動画末尾に無音区間（着地+表示ぶん）を追加した上で、その中の着地位置で鳴ります。
   `logo.sfx_tail`（既定 `true`）が有効な場合、この効果音に0.6秒の減衰ディレイの
   テールが付き、低音の余韻が残ります。
+- **音量バランス**：各効果音（`sfx` / `logo.sfx`）は、元動画の音声（RMS基準）より
+  約3dB大きく聞こえるよう自動的に正規化されます（元動画がほぼ無音の場合は、
+  測定不能な基準に引きずられないよう既定のラウドネスを使います）。最終ミックス後は
+  単純な `clip` ではなく、しきい値を超えた部分だけtanhで滑らかに丸め込む簡易
+  リミッターを通すため、音量アップしてもピークで歪みません。
 - 入力動画が可変フレームレート(VFR)（iPhoneのスクリーン録画などで典型的。負荷でフレーム
   間隔がばらつき、`ffprobe` の `r_frame_rate` と `avg_frame_rate` が大きく食い違う）と
   判定された場合、`render.py` は処理前に自動でffmpegを使い固定フレームレート(CFR)へ
@@ -632,9 +714,11 @@ node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携�
 
 python tests/render_quality.test.py   # render.pyの品質回帰テスト（音声連続性・VFR正規化・
                                        # テロップ描画・ブラシの白フェード・フォント読み込み
-                                       # 失敗時のエラー終了・shadow・mask=auto/auto+brush。
-                                       # 要ffmpeg/numpy、初回はダミーVFR動画を生成。
-                                       # mask=auto系はrembgが無ければ自動でスキップされる）
+                                       # 失敗時のエラー終了・shadow・mask=auto/auto+brush・
+                                       # ①②③の3段時間・color_source/shadow.sourceの混在・
+                                       # ロゴの自動クロップ/着地カーブ/sfx_tail・旧キーのみの
+                                       # JSONの後方互換。要ffmpeg/numpy、初回はダミーVFR動画を
+                                       # 生成。mask=auto系・混在検証はrembgが無ければ自動でスキップされる）
 
 # 任意：extract.py単体の検証（要 pip install -r requirements-extract.txt）
 python extract.py examples/extract_test_silhouette.png --out /tmp/extract_out/

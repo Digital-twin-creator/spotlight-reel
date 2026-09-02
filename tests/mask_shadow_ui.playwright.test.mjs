@@ -162,7 +162,8 @@ async function main() {
 
   projectJson = await page.evaluate(() => buildProjectJSON(appState));
   const brushFz = projectJson.freezes.filter((f) => f.name === "従来ブラシテスト")[0];
-  check(brushFz.mask === "brush", "brushフリーズのmaskが'brush': " + brushFz.mask);
+  check(brushFz.color_source === "brush" && !("mask" in brushFz),
+    "brushフリーズはcolor_source='brush'で出力され、旧maskキーは出力しない: " + brushFz.color_source);
   check(brushFz.strokes.length === 1 && !("mode" in brushFz.strokes[0]),
     "brushフリーズのストロークにmodeキーが付与されない（JSON出力が従来どおり）: " +
     JSON.stringify(brushFz.strokes[0]));
@@ -235,6 +236,31 @@ async function main() {
   await page.selectOption("#revealSelect", "fade");
   const styleFadeReveal = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(styleFadeReveal.reveal === "fade", "revealSelectを'fade'にするとstyle.revealが'fade'になる: " + styleFadeReveal.reveal);
+
+  console.log("");
+  console.log("=== 全体設定：shadow.source（影に使うマスク） ===");
+  check((await page.inputValue("#shadowSourceSelect")) === "same", "shadowSourceSelectの既定はsame");
+  await page.selectOption("#shadowSourceSelect", "auto");
+  const styleShadowSourceAuto = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleShadowSourceAuto.shadow.source === "auto",
+    "shadowSourceSelectを'auto'にするとstyle.shadow.sourceが'auto'になる: " + styleShadowSourceAuto.shadow.source);
+  await page.selectOption("#shadowSourceSelect", "same");
+
+  console.log("");
+  console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec） ===");
+  check((await page.inputValue("#revealSecSlider")) === "0.5", "revealSecSliderの既定は0.5");
+  check((await page.inputValue("#slideSecSlider")) === "0.5", "slideSecSliderの既定は0.5");
+  check((await page.inputValue("#holdSecSlider")) === "2", "holdSecSliderの既定は2.0");
+  await page.fill("#revealSecSlider", "0.8");
+  await page.dispatchEvent("#revealSecSlider", "input");
+  await page.fill("#slideSecSlider", "0.4");
+  await page.dispatchEvent("#slideSecSlider", "input");
+  await page.fill("#holdSecSlider", "3");
+  await page.dispatchEvent("#holdSecSlider", "input");
+  const styleTiming = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleTiming.reveal_sec === 0.8 && styleTiming.slide_sec === 0.4 && styleTiming.hold_sec === 3,
+    "3つのスライダーを操作するとstyle.reveal_sec/slide_sec/hold_secに反映される: " +
+    JSON.stringify({ reveal_sec: styleTiming.reveal_sec, slide_sec: styleTiming.slide_sec, hold_sec: styleTiming.hold_sec }));
   await page.selectOption("#revealSelect", "wipe");
 
   console.log("");

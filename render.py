@@ -36,9 +36,15 @@ from PIL import Image, ImageDraw, ImageFont
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # style の既定値（プロジェクトJSONの style / 各freeze で上書きされる）
+#
+# reveal_sec / slide_sec / hold_sec / brush_anim_sec / freeze_sec は、意図的にここへ
+# 既定値を持たせていない（shadowキーと同じ理由）。1フリーズの流れを「①塗り(reveal_sec)→
+# ②ズレ(slide_sec)→③静止(hold_sec)」の3段に分解した際、「JSON側で省略された」ことと
+# 「旧キー（brush_anim_sec/freeze_sec）が明示的に指定された」ことを区別できないと、
+# 後方互換の読み替え（resolve_reveal_sec/resolve_hold_sec）が正しく行えないため。
+# 新しいJSONは reveal_sec/slide_sec/hold_sec だけを使うこと（各既定値は
+# REVEAL_SEC_DEFAULT/SHADOW_SLIDE_IN_SEC_DEFAULT/HOLD_SEC_DEFAULT）。
 DEFAULT_STYLE = {
-    "freeze_sec": 1.2,            # フリーズ全体の長さ（秒）
-    "brush_anim_sec": 0.8,        # ブラシが伸びるアニメーションの長さ（秒）
     "brush_width": 0.12,          # ブラシ太さ（動画幅に対する比率）
     "brush_shape": "round",       # round | hake | marker | spray
     "mono_contrast": 1.0,         # mono背景のコントラスト倍率（1.0=従来どおり無加工）
@@ -58,16 +64,22 @@ DEFAULT_STYLE = {
     "title_align": "center",      # テロップの水平寄せ（left | center | right、title_posのxを基準）
     "brush_fade_sec": 0.3,        # ブラシ完了後、先端に残る白い絵の具をフェードアウトさせる時間（秒）。0でフェードなし
     "audio_during_freeze": "mute",  # mute | keep
-    "mask": "brush",              # brush | auto | auto+brush（マスクの作り方。省略時は従来どおりブラシ）
-    "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool}（mask="auto"/"auto+brush"時のみ使用）
-    "reveal": "wipe",             # wipe | fade | brush（人物の出現アニメ。brushはauto+brushでのみ有効）
+    # mask は廃止（color_source/shadow.sourceに分離）。旧JSONとの後方互換のためだけに
+    # ここに残しており、resolve_color_source()がcolor_source未指定時にこれを読み替える。
+    "mask": "brush",              # brush | auto | auto+brush（後方互換専用。新JSONはcolor_sourceを使う）
+    "mask_options": None,         # {"model": "...", "refine": "vitmatte"|None, "decontaminate": bool}（自動切り抜きを使う場合のみ使用）
+    "reveal": "wipe",             # wipe | fade | brush | none（人物の出現アニメ）
+    # color_source（カラー化に使うマスク）もここには持たせない。省略時は上のmaskキーを
+    # 読み替える（resolve_color_source参照）ことで、新旧どちらのJSONも同じロジックで扱える。
+    # "color_source": "brush" | "auto"
     # 影（フィルム色）演出はキーをここに含めない（意図的）。
     # style/freezeのJSONに"shadow"キーが無い場合、resolve_shadow_config()は既定で
     # 影を有効にする（フルデフォルト値）。DEFAULT_STYLEにここで既定値を持たせてしまうと
     # 「JSON側で省略された」ことと「明示的に"shadow": nullが指定された」ことを
     # 区別できなくなってしまうため、あえて持たせていない。
     # {"color": "#RRGGBB", "alpha": 0〜1, "distance": 出力幅比, "direction": "auto"|"left"|"right",
-    #  "offset_y": 出力幅比, "blur": 出力幅比（既定0＝従来のフィルム色ベタ塗り）, "slide_sec": 秒}
+    #  "offset_y": 出力幅比, "blur": 出力幅比（既定0＝従来のフィルム色ベタ塗り）,
+    #  "source": "same"|"brush"|"auto"（影の形に使うマスク。既定"same"=color_sourceと同じ）}
     # 無効にしたい場合は "shadow": null または "shadow": {"enabled": false} を指定する。
 }
 
@@ -91,9 +103,12 @@ TELOP_BOUNCE_FROM = 1.3       # title_bounce=true のときの初期スケール
 BRUSH_PAINT_ALPHA = 0.85      # 描いている最中の白い絵の具の不透明度
 DARK_GAIN = 0.30              # background="dark" のときの明るさ倍率
 
-LOGO_WIDTH_RATIO = 0.4        # ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき）
+LOGO_WIDTH_RATIO_DEFAULT = 0.55   # ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき。以前は0.4固定）
 DEFAULT_LOGO_AT = "end"       # logo.at の既定値・不明値のフォールバック先
 DEFAULT_LOGO_BACKGROUND = "auto"  # logo.background の既定値・不明値のフォールバック先
+LOGO_CROP_MARGIN_RATIO = 0.06     # ロゴ自動クロップ時に残す余白（検出した外接矩形の辺の長さに対する比率）
+LOGO_CROP_ALPHA_THRESH = 0.02     # クロップ判定：これを超えるアルファを「内容」とみなす
+LOGO_CROP_COLOR_THRESH = 18.0     # クロップ判定（不透明PNG用）：四隅平均色とのBGR差分合計がこれを超えれば「内容」
 
 # ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
 # scale_from/landing_sec/sweep_start_sec/sweep_sec/flash_strength/shake_sec/shake_amplitude/
@@ -102,6 +117,8 @@ DEFAULT_LOGO_BACKGROUND = "auto"  # logo.background の既定値・不明値の�
 # last_freezeのクロスフェード時間・SFXテールの長さ）は固定値。
 LOGO_SCALE_FROM_DEFAULT = 1.6     # スタンバイ時の初期スケール（160%。以前は200%）
 LOGO_LANDING_SEC_DEFAULT = 0.45   # 着地（縮小＋フェードイン）にかかる時間（以前は0.15秒）
+LOGO_LANDING_ANTICIPATION_RATIO = 0.6  # 着地アニメのうち「ゆっくり入って一気に落ちる」区間の割合（残りが沈み込み→セトル）
+LOGO_LANDING_DIP_DEFAULT = 0.02   # 着地の沈み込み量（スケール絶対値。セトル時に100%を一瞬下回る量）
 LOGO_FLASH_SEC = 0.05             # 着地直後の白フラッシュの長さ（固定）
 LOGO_FLASH_STRENGTH_DEFAULT = 0.35  # 白フラッシュの強さ（screen合成、0〜1。以前は0.6）
 LOGO_SHAKE_SEC_DEFAULT = 0.25         # 着地の瞬間に画面全体をわずかに揺らす時間
@@ -110,7 +127,7 @@ LOGO_SWEEP_START_SEC_DEFAULT = 0.35   # 着地完了から光彩スイープ開�
 LOGO_SWEEP_SEC_DEFAULT = 0.70     # 光彩スイープにかかる時間（以前は0.3秒）
 LOGO_SWEEP_WIDTH_RATIO = 0.25     # 光彩帯の幅（ロゴ幅に対する比率、固定）
 LOGO_GROW_TO = 1.03               # 保持中にゆっくり拡大する先（103%、固定）
-LOGO_FADE_TO_BG_SEC_DEFAULT = 0.6  # 終了直前、背景色へ暗転する時間（以前は0.3秒）
+LOGO_FADE_TO_BG_SEC_DEFAULT = 0.4  # 終了直前、背景色へ暗転する時間（以前は0.3秒→0.6秒→0.4秒）
 LOGO_BG_CROSSFADE_SEC = 0.15      # last_freeze時、静止フレーム→背景色へのフェード時間（固定）
 LOGO_DURATION_SEC_DEFAULT = 2.2   # 着地からの表示時間の既定値（以前は1.2秒）
 LOGO_SFX_TAIL_SEC = 0.6           # logo.sfx_tail=true（既定）のときに付ける減衰ディレイの長さ（固定）
@@ -119,11 +136,17 @@ AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
 KEEP_LOOP_SEC = 0.5           # audio_during_freeze="keep" のときにループする長さ
 
-MASK_MODES = ("brush", "auto", "auto+brush")
-REVEALS = ("wipe", "fade", "brush")
+COLOR_SOURCES = ("brush", "auto")
+SHADOW_SOURCES = ("same", "brush", "auto")
+MASK_MODES = ("brush", "auto", "auto+brush")   # 後方互換専用（旧maskキー）。新JSONはcolor_sourceを使う
+REVEALS = ("wipe", "fade", "brush", "none")
 CACHE_DIR_NAME = "cache"      # 自動切り抜きのアルファをキャッシュするディレクトリ（cwd基準）
-AUTO_REVEAL_WIPE_SEC = 0.4    # mask="auto"/"auto+brush"（reveal="wipe"）の出現アニメの長さ（固定）
-AUTO_REVEAL_FADE_SEC = 0.3    # 同上、reveal="fade"の場合の長さ（固定）
+
+# 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定の秒数。
+# reveal_sec/slide_sec/hold_sec がJSON側で省略された場合に使う（resolve_reveal_sec/
+# resolve_hold_sec/_shadow_cfg_from_dict参照）。
+REVEAL_SEC_DEFAULT = 0.5
+HOLD_SEC_DEFAULT = 2.0
 
 # 影（フィルム色）演出。人物の出現が完了した後、人物レイヤーだけを0→distanceまで
 # スライドさせ、元の位置に静止したままの影レイヤーを覗かせる。
@@ -133,7 +156,7 @@ SHADOW_ALPHA_DEFAULT = 0.8
 SHADOW_DISTANCE_DEFAULT = 0.03    # 出力幅に対する比率
 SHADOW_OFFSET_Y_DEFAULT = 0.02    # 出力幅に対する比率（下方向）
 SHADOW_DIRECTION_AMBIGUOUS_BAND = 0.05  # マスクX重心が画面中心からこの比率以内なら「あいまい」とみなす
-SHADOW_SLIDE_IN_SEC_DEFAULT = 0.5  # スライドインの時間（既定。shadow.slide_secで上書き可）
+SHADOW_SLIDE_IN_SEC_DEFAULT = 0.5  # スライドインの時間（既定。slide_sec/shadow.slide_secで上書き可）
 SHADOW_SLIDE_BACK_SEC = 0.25       # 保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定）
 
 
@@ -497,7 +520,7 @@ def resolve_brush_shape(shape):
 
 
 def resolve_mask_mode(mode):
-    """未知の値は brush（従来どおり完全後方互換）にフォールバックする"""
+    """未知の値は brush（従来どおり完全後方互換）にフォールバックする（後方互換専用。新JSONはresolve_color_sourceを使う）"""
     mode = mode or "brush"
     if mode not in MASK_MODES:
         warn(f"mask='{mode}' は未知の値です。brush として扱います。")
@@ -505,10 +528,29 @@ def resolve_mask_mode(mode):
     return mode
 
 
+def resolve_color_source(fz):
+    """
+    カラー化に使うマスクの種類を解決する。戻り値は "brush" | "auto" | "auto+brush"
+    （auto+brushは旧mask値の後方互換専用。新JSONのcolor_sourceには存在しない）。
+
+    "color_source" キーがあればそれを優先する（"brush"|"auto"のみ有効）。
+    無ければ旧 "mask" キーを読み替える（resolve_mask_mode。省略時はbrush）。
+    """
+    if "color_source" in fz:
+        source = fz.get("color_source") or "brush"
+        if source not in COLOR_SOURCES:
+            warn(f"color_source='{source}' は未知の値です。brush として扱います。")
+            return "brush"
+        return source
+    return resolve_mask_mode(fz.get("mask"))
+
+
 def resolve_reveal(reveal, mask_mode):
     """
     未知の値は wipe にフォールバックする。
-    reveal="brush" は mask="auto+brush" の場合のみ有効（それ以外はwipeにフォールバック）。
+    reveal="brush" は mask_mode="auto+brush" の場合のみ有効（それ以外はwipeにフォールバック）。
+    reveal="none" は mask_mode="brush" 以外（auto/auto+brush）でのみ意味を持つ
+    （mask_mode="brush"は常にブラシの progressive な描画を行うため、reveal自体を無視する）。
     """
     reveal = reveal or "wipe"
     if reveal not in REVEALS:
@@ -641,7 +683,31 @@ def draw_stroke_mask(geo, W, H, start_len, end_len, shape):
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 
-def _shadow_cfg_from_dict(shadow):
+def resolve_slide_sec(fz, shadow):
+    """
+    影スライドインの秒数を解決する（②ズレ）。優先順位:
+      1. shadow.slide_sec（旧キー。明示されていれば後方互換で最優先）
+      2. fz の slide_sec（新キー。style/freezeのどちらでも指定可）
+      3. SHADOW_SLIDE_IN_SEC_DEFAULT（既定0.5秒）
+    """
+    if isinstance(shadow, dict) and "slide_sec" in shadow:
+        return max(1e-3, float(shadow["slide_sec"]))
+    if "slide_sec" in fz:
+        return max(1e-3, float(fz["slide_sec"]))
+    return SHADOW_SLIDE_IN_SEC_DEFAULT
+
+
+def resolve_shadow_source(shadow):
+    """shadow.source（影の形に使うマスク）を解決する。未知の値・未指定は既定'same'にフォールバックする"""
+    source = shadow.get("source") if isinstance(shadow, dict) else None
+    source = source or "same"
+    if source not in SHADOW_SOURCES:
+        warn(f"shadow.source='{source}' は未知の値です。'same' として扱います。")
+        source = "same"
+    return source
+
+
+def _shadow_cfg_from_dict(shadow, fz):
     """shadow辞書（キー省略可）から、既定値で埋めた実効設定を組み立てる"""
     shadow = shadow if isinstance(shadow, dict) else {}
     direction = shadow.get("direction") or "auto"
@@ -655,7 +721,8 @@ def _shadow_cfg_from_dict(shadow):
         "direction": direction,
         "offset_y": float(shadow.get("offset_y", SHADOW_OFFSET_Y_DEFAULT)),
         "blur": max(0.0, float(shadow.get("blur", 0.0))),
-        "slide_sec": max(1e-3, float(shadow.get("slide_sec", SHADOW_SLIDE_IN_SEC_DEFAULT))),
+        "slide_sec": resolve_slide_sec(fz, shadow),
+        "source": resolve_shadow_source(shadow),
     }
 
 
@@ -679,7 +746,7 @@ def resolve_shadow_config(fz):
             return None
         if isinstance(shadow, dict) and shadow.get("enabled") is False:
             return None
-        return _shadow_cfg_from_dict(shadow)
+        return _shadow_cfg_from_dict(shadow, fz)
 
     film_offset = fz.get("film_offset") or (0.0, 0.0)
     fx, fy = float(film_offset[0]), float(film_offset[1])
@@ -691,11 +758,12 @@ def resolve_shadow_config(fz):
             "direction": "right" if fx >= 0 else "left",
             "offset_y": fy,
             "blur": 0.0,
-            "slide_sec": SHADOW_SLIDE_IN_SEC_DEFAULT,
+            "slide_sec": resolve_slide_sec(fz, None),
+            "source": "same",
         }
 
     # "shadow"キーも旧film_offsetも無い → 既定で影を有効にする
-    return _shadow_cfg_from_dict(None)
+    return _shadow_cfg_from_dict(None, fz)
 
 
 def mask_x_center_ratio(mask_u8, W):
@@ -751,19 +819,22 @@ def render_shadow_layer(mask_u8, shadow_cfg):
 
 
 def composite_layers(bg, color, mask_u8, W, H, shadow_cfg=None,
-                      slide_dx=0.0, slide_dy=0.0, paint_mask_u8=None):
+                      slide_dx=0.0, slide_dy=0.0, paint_mask_u8=None, shadow_mask_u8=None):
     """
     1フレーム分の合成処理（マスクの作り方＝ブラシ／自動／自動＋ブラシ には依存しない、
     共通の「マスクさえあれば合成できる」部分）。
     レイヤー順: 背景 → 影（人物の元の位置。動かない） → 人物（(slide_dx, slide_dy)だけ
     ずらした位置） → （描いている最中の白い絵の具、あれば）。
-    影は常にmask_u8の位置（＝人物の「元の位置」）に固定して描き、人物レイヤーだけを
-    ずらすことで、そのズレ量ぶん影が「現れる」ように見せる（影自体は動かさない）。
+    影は常に shadow_mask_u8（省略時はmask_u8と同じ）の位置（＝人物の「元の位置」）に
+    固定して描き、人物レイヤー（mask_u8）だけをずらすことで、そのズレ量ぶん影が
+    「現れる」ように見せる（影自体は動かさない）。shadow.source（影に使うマスクの種類）が
+    color_sourceと異なる場合、shadow_mask_u8にその別マスクを渡す。
     """
     out = bg.astype(np.float32)
 
     if shadow_cfg:
-        shadow_mask, shadow_alpha, shadow_color = render_shadow_layer(mask_u8, shadow_cfg)
+        sm_mask = shadow_mask_u8 if shadow_mask_u8 is not None else mask_u8
+        shadow_mask, shadow_alpha, shadow_color = render_shadow_layer(sm_mask, shadow_cfg)
         sm = (shadow_mask.astype(np.float32) / 255.0)[:, :, None] * shadow_alpha
         out = out * (1.0 - sm) + np.array(shadow_color, dtype=np.float32) * sm
 
@@ -880,13 +951,16 @@ def build_mask_context(fz, frame, W, H, cache_dir, video_path):
     """
     フリーズ1回分の「マスクの作り方」に関する下ごしらえを1回だけ計算する
     （iter_freeze_frames と render_preview の両方から使う共通処理）。
+    ここで作るのはカラー化（reveal）に使うマスクの文脈で、color_source（新）/
+    旧maskキーの読み替えで決まる mask_mode に基づく。影(shadow)に使うマスクは
+    shadow.source が"same"以外の場合、build_shadow_mask()で別途作る。
     """
     shape = resolve_brush_shape(fz.get("brush_shape"))
     strokes = fz.get("strokes") or []
     default_width = float(fz.get("brush_width", 0.12))
     all_geo, all_total = build_stroke_geometry(strokes, W, H, default_width)
 
-    mask_mode = resolve_mask_mode(fz.get("mask"))
+    mask_mode = resolve_color_source(fz)
     reveal = resolve_reveal(fz.get("reveal"), mask_mode)
 
     base_mask = None
@@ -900,6 +974,31 @@ def build_mask_context(fz, frame, W, H, cache_dir, video_path):
         "mask_mode": mask_mode, "reveal": reveal, "shape": shape,
         "all_geo": all_geo, "all_total": all_total, "base_mask": base_mask,
     }
+
+
+def build_shadow_mask(fz, frame, W, H, cache_dir, video_path, shadow_cfg, color_done_mask):
+    """
+    影(shadow)の形として使うマスクを、shadow_cfg["source"]に従って作る。
+      - "same"（既定）：カラー化で完成させたマスク(color_done_mask)をそのまま使う（従来どおり）
+      - "brush"：色付けの方式に関係なく、このフリーズの全ストロークを完全に描いた静的マスクを使う
+      - "auto"：色付けの方式に関係なく、自動切り抜き（rembg）のアルファを使う
+        （キャッシュ済みでなければこのフリーズだけ切り抜きを実行する。他のフリーズが
+        color_source="brush"のままなら、そちらでは切り抜きは走らない）
+    """
+    source = shadow_cfg.get("source", "same")
+    if source == "same":
+        return color_done_mask
+    if source == "brush":
+        strokes = fz.get("strokes") or []
+        shape = resolve_brush_shape(fz.get("brush_shape"))
+        default_width = float(fz.get("brush_width", 0.12))
+        geo, total = build_stroke_geometry(strokes, W, H, default_width)
+        if total <= 0:
+            return np.zeros((H, W), np.uint8)
+        return draw_stroke_mask(geo, W, H, 0.0, total, shape)
+    # source == "auto"
+    return get_or_extract_alpha(frame, video_path, float(fz.get("time", 0.0)),
+                                 W, H, cache_dir, fz.get("mask_options"))
 
 
 def mask_and_paint_at(ctx, W, H, progress):
@@ -924,6 +1023,10 @@ def mask_and_paint_at(ctx, W, H, progress):
             paint = draw_stroke_mask(all_geo, W, H, max(head - tail, 0.0), head, shape)
         return mask, paint
 
+    if reveal == "none":
+        # 一瞬で色が付いた状態にして、reveal_sec秒のあいだ動かず静止して見せる
+        # （auto/auto+brushでreveal="none"のときのみ意味を持つ。progressは使わない）
+        return base_mask, None
     if reveal == "fade":
         return apply_reveal_fade(base_mask, progress), None
     return apply_reveal_wipe(base_mask, H, progress), None
@@ -1110,15 +1213,46 @@ def load_logo_image(path):
     return bgr, alpha
 
 
-def ease_out_quart(t):
-    """Ease-Out Quart：1 - (1-t)^4（t=0→0, t=1→1）。ロゴ着地アニメーションに使う"""
+def ease_in_cubic(t):
+    """Ease-In Cubic：t^3（t=0→0, t=1→1）。ゆっくり入って終盤に一気に加速する"""
     t = float(np.clip(t, 0.0, 1.0))
-    return 1.0 - (1.0 - t) ** 4
+    return t ** 3
 
 
-# ロゴ着地アニメーションのイージング。より重厚な着地に見せるため、
-# 以前のEase-Out Expo相当から素直なEase-Out Quartへ変更した。
-LOGO_LANDING_EASE = ease_out_quart
+def logo_landing_curve(t, scale_from):
+    """
+    ロゴ着地の「アンティシペーション＋セトル」イージング。
+    --preview / ダミーレンダリングで単純なEase-Out Quart（旧実装）と見比べた結果、
+    「ゆっくり入って途中から一気に落ち、100%をわずかに沈み込んでから戻る」動きの方が
+    重厚感・弾力が出て良かったため、こちらを採用した。
+
+    区間1（t: 0〜LOGO_LANDING_ANTICIPATION_RATIO）：Ease-In Cubicで、ゆっくり入って
+      終盤に一気にscale_fromから沈み込み目標（100%よりLOGO_LANDING_DIP_DEFAULTだけ下）へ落ちる
+    区間2（残り）：Ease-Out Cubicで、沈み込んだ位置から100%へ滑らかに戻る（セトル）
+    戻り値はスケール値そのもの（scale_from→一時的に1.0を下回る→1.0）。
+    """
+    t = float(np.clip(t, 0.0, 1.0))
+    span = scale_from - 1.0
+    overshoot = (LOGO_LANDING_DIP_DEFAULT / span) if span > 1e-6 else 0.0
+    p = LOGO_LANDING_ANTICIPATION_RATIO
+    if t < p:
+        local = t / p
+        eased = ease_in_cubic(local) * (1.0 + overshoot)
+    else:
+        local = (t - p) / (1.0 - p)
+        eased = (1.0 + overshoot) - overshoot * ease_out_cubic(local)
+    return scale_from + (1.0 - scale_from) * eased
+
+
+def logo_landing_opacity(t):
+    """
+    着地アニメーション中の不透明度カーブ。scaleのセトル(logo_landing_curve)による
+    わずかな行き過ぎに引っ張られて明滅しないよう、沈み込み区間の開始時点
+    （LOGO_LANDING_ANTICIPATION_RATIO）までにEase-Out Cubicで先に完全不透明へ到達させる。
+    """
+    p = LOGO_LANDING_ANTICIPATION_RATIO
+    local = float(np.clip(t, 0.0, 1.0)) / p if p > 0 else 1.0
+    return float(np.clip(ease_out_cubic(min(local, 1.0)), 0.0, 1.0))
 
 
 def logo_corner_avg_color(logo_bgr):
@@ -1129,6 +1263,53 @@ def logo_corner_avg_color(logo_bgr):
     ], dtype=np.float32)
     avg = corners.mean(axis=0)
     return tuple(int(round(c)) for c in avg)
+
+
+def detect_logo_content_bbox(bgr, alpha, margin_ratio=LOGO_CROP_MARGIN_RATIO,
+                              alpha_thresh=LOGO_CROP_ALPHA_THRESH, color_thresh=LOGO_CROP_COLOR_THRESH):
+    """
+    ロゴ画像の「内容部分」の外接矩形(x0, y0, x1, y1)を自動検出する。
+      - アルファに実際の透明部分があれば、そのアルファのしきい値で判定する
+      - 無ければ（背景まで完全に不透明なPNG）、四隅の平均背景色との画素差分の
+        しきい値で判定する
+    検出した外接矩形の辺の長さに対してmargin_ratio分の余白を残して広げ、
+    画像範囲内に収める。内容が検出できない・画像全体を占める場合は
+    クロップ不要として (0, 0, w, h) を返す。
+    """
+    h, w = bgr.shape[:2]
+    a = alpha[:, :, 0] if alpha.ndim == 3 else alpha
+    has_real_alpha = float(a.min()) < (1.0 - alpha_thresh)
+    if has_real_alpha:
+        content = a > alpha_thresh
+    else:
+        bg_color = np.array(logo_corner_avg_color(bgr), dtype=np.float32)
+        diff = np.abs(bgr.astype(np.float32) - bg_color).sum(axis=2)
+        content = diff > color_thresh
+
+    ys, xs = np.where(content)
+    if ys.size == 0 or xs.size == 0:
+        return 0, 0, w, h
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    if x0 <= 0 and y0 <= 0 and x1 >= w and y1 >= h:
+        return 0, 0, w, h   # 既に全面が内容 → クロップ不要
+
+    mw = int(round((x1 - x0) * margin_ratio))
+    mh = int(round((y1 - y0) * margin_ratio))
+    x0 = max(0, x0 - mw)
+    y0 = max(0, y0 - mh)
+    x1 = min(w, x1 + mw)
+    y1 = min(h, y1 + mh)
+    return x0, y0, x1, y1
+
+
+def crop_logo_content(logo_bgr, logo_alpha):
+    """detect_logo_content_bbox()の結果でロゴ画像をクロップする（不要ならそのまま返す）"""
+    h, w = logo_bgr.shape[:2]
+    x0, y0, x1, y1 = detect_logo_content_bbox(logo_bgr, logo_alpha)
+    if (x0, y0, x1, y1) == (0, 0, w, h):
+        return logo_bgr, logo_alpha
+    return logo_bgr[y0:y1, x0:x1].copy(), logo_alpha[y0:y1, x0:x1].copy()
 
 
 def resolve_logo_background_color(bg_spec, logo_bgr):
@@ -1169,6 +1350,7 @@ def resolve_logo_params(logo_cfg):
         "duration_sec": max(0.0, float(logo_cfg.get("duration_sec", LOGO_DURATION_SEC_DEFAULT))),
         "fade_sec": max(0.0, float(logo_cfg.get("fade_sec", LOGO_FADE_TO_BG_SEC_DEFAULT))),
         "sfx_tail": bool(logo_cfg.get("sfx_tail", True)),
+        "width_ratio": max(0.01, float(logo_cfg.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT))),
     }
 
 
@@ -1213,10 +1395,11 @@ def screen_blend_white(img_f32, amount):
     return img_f32 + amount * (255.0 - img_f32)
 
 
-def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0):
+def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_ratio=LOGO_WIDTH_RATIO_DEFAULT):
     """
-    frame の中央に、ロゴを「基準表示幅（LOGO_WIDTH_RATIO×W）× scale」のサイズで合成する。
+    frame の中央に、ロゴを「基準表示幅（width_ratio×W）× scale」のサイズで合成する。
     scale=1.0 が最終的な表示サイズ。opacity(0〜1)はロゴ全体の不透明度（着地時のフェードイン用）。
+    width_ratio は logo.width_ratio（既定LOGO_WIDTH_RATIO_DEFAULT）で上書きできる。
     """
     if logo_bgr is None or opacity <= 0:
         return frame
@@ -1224,7 +1407,7 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0):
     if lw <= 0 or lh <= 0:
         return frame
 
-    base_scale = (W * LOGO_WIDTH_RATIO) / lw
+    base_scale = (W * width_ratio) / lw
     final_scale = max(0.01, base_scale * scale)
     new_w = max(1, int(round(lw * final_scale)))
     new_h = max(1, int(round(lh * final_scale)))
@@ -1263,7 +1446,8 @@ def logo_animation_state(elapsed_sec, params):
       fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
     タイムライン（既定値の場合。より重厚でゆっくりした着地にするため、旧バージョンより
     全体的に間を長く取っている）:
-      0.00-0.45  着地（Scale 160%→100%・不透明度0→1、Ease-Out Quart）
+      0.00-0.45  着地（アンティシペーション＋セトル：ゆっくり入って一気に落ち、
+                 100%を2%だけ沈み込んでから戻る。scale 160%→100%・不透明度0→1）
       0.45-0.50  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
       0.45-0.70  画面全体のわずかな揺れ（振幅0.4%、0.25秒で減衰）
       0.80-1.50  光彩スイープ（着地から0.35秒後に開始、0.70秒かける）
@@ -1287,9 +1471,9 @@ def logo_animation_state(elapsed_sec, params):
     t = float(np.clip(elapsed_sec, 0.0, seg_end))
 
     if t < landing:
-        eased = LOGO_LANDING_EASE(t / landing)
-        scale = scale_from + (1.0 - scale_from) * eased
-        opacity = eased
+        tn = t / landing
+        scale = logo_landing_curve(tn, scale_from)
+        opacity = logo_landing_opacity(tn)
     elif t < hold_start:
         scale = 1.0
         opacity = 1.0
@@ -1360,7 +1544,8 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
         logo_layer = screen_blend_white(logo_layer, strength)
     logo_layer = np.clip(logo_layer, 0, 255).astype(np.uint8)
 
-    frame = composite_logo(backdrop, logo_layer, logo_alpha, W, H, state["scale"], opacity=state["opacity"])
+    frame = composite_logo(backdrop, logo_layer, logo_alpha, W, H, state["scale"], opacity=state["opacity"],
+                            width_ratio=params.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT))
 
     if state["shake_dx"] != 0.0 or state["shake_dy"] != 0.0:
         frame = shake_translate(frame, state["shake_dx"] * W, state["shake_dy"] * W)
@@ -1382,14 +1567,47 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
+def resolve_reveal_sec(fz, brush_driven):
+    """
+    ①塗り（reveal）にかける秒数を解決する。優先順位:
+      1. reveal_sec（新キー）が明示されていればそれを使う
+      2. brush駆動（mask_mode="brush"またはreveal="brush"）の場合のみ、
+         旧 brush_anim_sec が明示されていればそれを使う（後方互換）
+      3. REVEAL_SEC_DEFAULT（既定0.5秒）
+    """
+    if "reveal_sec" in fz:
+        return max(0.0, float(fz["reveal_sec"]))
+    if brush_driven and "brush_anim_sec" in fz:
+        return max(0.0, float(fz["brush_anim_sec"]))
+    return REVEAL_SEC_DEFAULT
+
+
+def resolve_hold_sec(fz):
+    """
+    ③静止（hold）にかける秒数を解決する。優先順位:
+      1. hold_sec（新キー）が明示されていればそれを使う
+      2. 旧 freeze_sec が明示されていればそれを読み替える（freeze_secを改名したもの。
+         旧JSONでは「フリーズ全体の長さ」だったが、新JSONでは「③静止の長さ」を表す）
+      3. HOLD_SEC_DEFAULT（既定2.0秒）
+    """
+    if "hold_sec" in fz:
+        return max(0.0, float(fz["hold_sec"]))
+    if "freeze_sec" in fz:
+        return max(0.0, float(fz["freeze_sec"]))
+    return HOLD_SEC_DEFAULT
+
+
 def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
                   logo_total_frames=0, logo_crossfade_frames=0):
     """
     各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
-    フェーズ順: hold(静止) → brush(出現) → slide_in(影スライドイン。shadow有効時のみ)
-      → rest(保持。テロップ・ロゴ) → slide_back(影を隠して元位置へ。shadow有効時のみ、
-      ただしこのフリーズでロゴを表示する場合は戻す意味が無いため行わない)。
-    logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの保持（rest）フェーズを、
+    フェーズ順: pre(出現前の静止・固定0.3秒) → reveal(①塗り) →
+      slide_in(②ズレ。影スライドイン、shadow有効時のみ) → hold(③静止。テロップ・ロゴ) →
+      slide_back(影を隠して元位置へ。shadow有効時のみ、ただしこのフリーズでロゴを
+      表示する場合は戻す意味が無いため行わない)。
+    reveal_sec/slide_sec/hold_secはそれぞれ独立に指定できる秒数で、
+    （旧freeze_secのような）全体予算による比例縮小は行わない。
+    logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの③静止（hold）フェーズを、
     （logo.backgroundが背景色を敷くモードなら）静止フレーム→背景色のクロスフェード分
     (logo_crossfade_frames) ＋ ロゴの着地〜表示終了分(logo_total_frames) を確保できるよう延長する。
     """
@@ -1400,32 +1618,19 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
             idx = min(idx, max(src_frames - 1, 0))
         idx = max(idx, 0)
 
-        mask_mode = resolve_mask_mode(fz.get("mask"))
+        mask_mode = resolve_color_source(fz)
         reveal = resolve_reveal(fz.get("reveal"), mask_mode)
-        if mask_mode == "brush" or reveal == "brush":
-            reveal_anim_sec = float(fz["brush_anim_sec"])
-        elif reveal == "fade":
-            reveal_anim_sec = AUTO_REVEAL_FADE_SEC
-        else:
-            reveal_anim_sec = AUTO_REVEAL_WIPE_SEC
+        brush_driven = mask_mode == "brush" or reveal == "brush"
+        reveal_anim_sec = resolve_reveal_sec(fz, brush_driven)
 
         shadow_cfg = resolve_shadow_config(fz)
+        hold_sec = resolve_hold_sec(fz)
 
-        n_total = max(1, int(round(float(fz["freeze_sec"]) * fps)))
-        n_hold = int(round(HOLD_BEFORE_BRUSH_SEC * fps))
-        n_brush = max(1, int(round(reveal_anim_sec * fps)))
+        n_pre = int(round(HOLD_BEFORE_BRUSH_SEC * fps))
+        n_reveal = max(1, int(round(reveal_anim_sec * fps)))
         n_slide_in = int(round(shadow_cfg["slide_sec"] * fps)) if shadow_cfg else 0
+        n_hold = max(0, int(round(hold_sec * fps)))
         n_slide_back = int(round(SHADOW_SLIDE_BACK_SEC * fps)) if shadow_cfg else 0
-
-        # freeze_sec が短すぎる場合は、hold/brush/slide_in/slide_backを比例縮小して収める
-        reserved = n_hold + n_brush + n_slide_in + n_slide_back
-        if reserved > n_total:
-            scale = n_total / float(reserved)
-            n_hold = int(n_hold * scale)
-            n_brush = max(1, int(n_brush * scale))
-            n_slide_in = int(n_slide_in * scale)
-            n_slide_back = int(n_slide_back * scale)
-        n_rest = max(0, n_total - n_hold - n_brush - n_slide_in - n_slide_back)
 
         sfx_path = None
         if fz.get("sfx"):
@@ -1440,12 +1645,12 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
         plans.append({
             "fz": fz,
             "frame_index": idx,
-            "n_hold": n_hold,
-            "n_brush": n_brush,
+            "n_pre": n_pre,
+            "n_reveal": n_reveal,
             "n_slide_in": n_slide_in,
-            "n_rest": n_rest,
+            "n_hold": n_hold,
             "n_slide_back": n_slide_back,
-            "n_total": n_hold + n_brush + n_slide_in + n_rest + n_slide_back,
+            "n_total": n_pre + n_reveal + n_slide_in + n_hold + n_slide_back,
             "sfx_path": sfx_path,
             "show_logo": False,
             "logo_crossfade_frames": 0,
@@ -1462,14 +1667,14 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
         last["logo_crossfade_frames"] = logo_crossfade_frames
         last["logo_total_frames"] = logo_total_frames
         # このフリーズはロゴへ移るため、影を隠す元位置へのスライドバックは不要
-        # （n_totalは変えず、reclaimしたぶんはrestへ回す）
+        # （n_totalは変えず、reclaimしたぶんはholdへ回す）
         if last["n_slide_back"] > 0:
-            last["n_rest"] += last["n_slide_back"]
+            last["n_hold"] += last["n_slide_back"]
             last["n_slide_back"] = 0
-        need_rest = max(1, logo_crossfade_frames + logo_total_frames)
-        if last["n_rest"] < need_rest:
-            extra = need_rest - last["n_rest"]
-            last["n_rest"] += extra
+        need_hold = max(1, logo_crossfade_frames + logo_total_frames)
+        if last["n_hold"] < need_hold:
+            extra = need_hold - last["n_hold"]
+            last["n_hold"] += extra
             last["n_total"] += extra
 
     return plans
@@ -1480,15 +1685,18 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
                         logo_params=None, logo_bg_color=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
-      1. 静止（背景処理のみ）
-      2. 人物が出現する（マスクの作り方はmask="brush"/"auto"/"auto+brush"で異なるが、
-         出現アニメ自体はreveal="wipe"/"fade"/"brush"で統一的に扱う。人物は「元の位置」に
-         出現するため、この間は影（あれば）が人物の真下に完全に隠れて見えない）
-      3. 影演出のスライドイン（shadowがあれば）：人物レイヤーだけを0→distanceまで
-         Ease-Out Cubicでずらし、元の位置に静止したままの影を覗かせる。着地の瞬間に
-         テロップ（バウンス可）と効果音が発火する
-      4. 保持（plan["show_logo"]がTrueなら、rest終盤で「静止フレーム→背景色のクロスフェード
-         （logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」を行う）
+      1. 静止（背景処理のみ、固定0.3秒）
+      2. ①塗り(reveal)：人物が出現する（マスクの作り方はcolor_source="brush"/"auto"/
+         旧mask="auto+brush"で異なるが、出現アニメ自体はreveal="wipe"/"fade"/"brush"/"none"で
+         統一的に扱う。人物は「元の位置」に出現するため、この間は影（あれば）が
+         人物の真下に完全に隠れて見えない）
+      3. ②ズレ(slide)：影演出のスライドイン（shadowがあれば）：人物レイヤーだけを
+         0→distanceまでEase-Out Cubicでずらし、元の位置に静止したままの影
+         （shadow.sourceに応じたマスク）を覗かせる。着地の瞬間にテロップ（バウンス可）と
+         効果音が発火する
+      4. ③静止(hold)（plan["show_logo"]がTrueなら、終盤で「静止フレーム→背景色の
+         クロスフェード（logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」
+         を行う）。テロップは着地の瞬間に出現し、この③静止の終わりまで表示し続ける
       5. 影演出のスライドバック（shadowがあり、かつこのフリーズでロゴを表示しない場合）：
          通常再生に戻る直前に人物を元の位置へ戻し、影を隠す（戻さないと再生再開時に
          人物が飛んで見えるため）
@@ -1497,8 +1705,9 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
     shadow_cfg = plan.get("shadow_cfg")
 
-    ctx = build_mask_context(fz, frame, W, H, cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME),
-                              video_path or "input")
+    cache_dir = cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME)
+    video_path = video_path or "input"
+    ctx = build_mask_context(fz, frame, W, H, cache_dir, video_path)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -1513,42 +1722,49 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     bounce = bool(fz.get("title_bounce"))
 
     # 1) 出現アニメ開始まで静止
-    for _ in range(plan["n_hold"]):
+    for _ in range(plan["n_pre"]):
         yield bg.copy()
 
-    # 2) 人物の出現（ブラシが伸びる／自動マスクをワイプ・フェード）。元の位置のまま＝影は隠れている
-    for i in range(plan["n_brush"]):
-        progress = (i + 1) / float(plan["n_brush"])
+    # 2) ①塗り(reveal)：人物の出現（ブラシが伸びる／自動マスクをワイプ・フェード／
+    #    reveal="none"なら即座に全体表示）。元の位置のまま＝影は隠れている
+    for i in range(plan["n_reveal"]):
+        progress = (i + 1) / float(plan["n_reveal"])
         mask, paint = mask_and_paint_at(ctx, W, H, progress)
         yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint)
 
     done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
+    shadow_done_mask = None
+    if shadow_cfg:
+        shadow_done_mask = build_shadow_mask(fz, frame, W, H, cache_dir, video_path, shadow_cfg, done_mask)
 
     # Actionsのログで各フリーズの影の状態を確認できるようにする（実機で影が出ない場合の
-    # 切り分け用：有効/無効・実際に使われる方向・人物マスクのX重心を毎回出力する）
-    mask_x_ratio = mask_x_center_ratio(done_mask, W)
+    # 切り分け用：有効/無効・実際に使われる方向・影マスクのX重心を毎回出力する）
     freeze_label = f"t={float(fz.get('time', 0.0)):.2f}s 「{fz.get('name', '')}」"
     if shadow_cfg:
+        mask_x_ratio = mask_x_center_ratio(shadow_done_mask, W)
         shadow_direction = shadow_cfg.get("direction", "auto")
         if shadow_direction not in ("left", "right"):
-            shadow_direction = resolve_shadow_auto_direction(done_mask, W)
-        log(f"  フリーズ {freeze_label}: 影=有効 方向={shadow_direction} マスクX中心={mask_x_ratio:.2f}")
+            shadow_direction = resolve_shadow_auto_direction(shadow_done_mask, W)
+        log(f"  フリーズ {freeze_label}: 影=有効 方向={shadow_direction} "
+            f"マスクX中心={mask_x_ratio:.2f} source={shadow_cfg.get('source', 'same')}")
     else:
+        mask_x_ratio = mask_x_center_ratio(done_mask, W)
         log(f"  フリーズ {freeze_label}: 影=無効 マスクX中心={mask_x_ratio:.2f}")
 
-    # 3) 影演出のスライドイン：Ease-Out Cubicで着地先ベクトルまでずらし、影を覗かせる
+    # 3) ②ズレ(slide)：影演出のスライドイン：Ease-Out Cubicで着地先ベクトルまでずらし、影を覗かせる
     slide_dx, slide_dy = 0.0, 0.0
     if shadow_cfg and plan["n_slide_in"] > 0:
-        slide_dx, slide_dy = compute_shadow_slide_vector(done_mask, W, shadow_cfg)
+        slide_dx, slide_dy = compute_shadow_slide_vector(shadow_done_mask, W, shadow_cfg)
         for i in range(plan["n_slide_in"]):
             t = (i + 1) / float(plan["n_slide_in"])
             eased = ease_out_cubic(t)
             yield composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
-                                    slide_dx=slide_dx * eased, slide_dy=slide_dy * eased)
+                                    slide_dx=slide_dx * eased, slide_dy=slide_dy * eased,
+                                    shadow_mask_u8=shadow_done_mask)
 
     # 「着地」した状態（スライド済み。影が無ければ元の位置のまま）を1回だけ作って使い回す
     landed = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
-                               slide_dx=slide_dx, slide_dy=slide_dy)
+                               slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_done_mask)
     fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
 
     # ブラシ（またはauto+brushのreveal="brush"）で描いた場合のみ、完了時点で先端に残っている
@@ -1569,13 +1785,14 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
 
     crossfade_frames = plan.get("logo_crossfade_frames", 0)
     logo_seg_frames = plan.get("logo_total_frames", 0)
-    logo_start_in_rest = plan["n_rest"] - crossfade_frames - logo_seg_frames
+    logo_start_in_hold = plan["n_hold"] - crossfade_frames - logo_seg_frames
     solid_bg_frame = None
     if plan["show_logo"] and logo_bg_color is not None:
         solid_bg_frame = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
 
-    # 4) 保持。着地の瞬間（=この保持区間の最初のフレーム）にテロップのフェードイン開始
-    for i in range(plan["n_rest"]):
+    # 4) ③静止(hold)。着地の瞬間（=このhold区間の最初のフレーム）にテロップのフェードイン開始し、
+    #    hold区間の終わりまで表示し続ける（hold_secに完全に連動）
+    for i in range(plan["n_hold"]):
         if tail_paint_alpha is not None and i < n_brush_fade:
             fade_out_t = (i + 1) / float(n_brush_fade)
             pm = tail_paint_alpha * (BRUSH_PAINT_ALPHA * (1.0 - fade_out_t))
@@ -1594,7 +1811,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         out = blend_telop(base, f_bgr, f_alpha, fade)
 
         if plan["show_logo"]:
-            rel = i - logo_start_in_rest
+            rel = i - logo_start_in_hold
             if rel >= 0:
                 if crossfade_frames > 0 and rel < crossfade_frames:
                     cf_t = (rel + 1) / float(crossfade_frames)
@@ -1614,7 +1831,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             t = (i + 1) / float(plan["n_slide_back"])
             remaining = 1.0 - ease_out_cubic(t)
             out = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
-                                    slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining)
+                                    slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining,
+                                    shadow_mask_u8=shadow_done_mask)
             out = blend_telop(out, telop_bgr, telop_alpha, 1.0)
             yield out
 
@@ -1630,17 +1848,20 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
     shadow_cfg = resolve_shadow_config(fz)
 
-    ctx = build_mask_context(fz, frame, W, H, cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME),
-                              video_path or "input")
+    cache_dir = cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME)
+    video_path = video_path or "input"
+    ctx = build_mask_context(fz, frame, W, H, cache_dir, video_path)
     mask, _paint = mask_and_paint_at(ctx, W, H, 1.0)
 
     slide_dx, slide_dy = 0.0, 0.0
+    shadow_mask = None
     if shadow_cfg:
-        slide_dx, slide_dy = compute_shadow_slide_vector(mask, W, shadow_cfg)
+        shadow_mask = build_shadow_mask(fz, frame, W, H, cache_dir, video_path, shadow_cfg, mask)
+        slide_dx, slide_dy = compute_shadow_slide_vector(shadow_mask, W, shadow_cfg)
 
-    before_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg)
+    before_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, shadow_mask_u8=shadow_mask)
     after_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
-                                  slide_dx=slide_dx, slide_dy=slide_dy)
+                                  slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -1709,6 +1930,54 @@ def mix_into(buf, snippet, start):
     n = min(len(snippet), len(buf) - start)
     if n > 0:
         buf[start:start + n] += snippet[:n]
+
+
+SFX_GAIN_OVER_SOURCE_DB = 3.0     # SEの音量は、元動画の音声（RMS基準）より約この分(dB)大きくする
+SFX_DEFAULT_RMS_WHEN_SILENT = 0.18  # 元動画に音声が無い/ほぼ無音の場合に使うSEの既定RMS目標値
+SOFT_LIMIT_THRESHOLD = 0.9        # このレベルを超えた分だけtanhで滑らかに丸める（ハードクリップ回避）
+
+
+def measure_rms(samples):
+    """音声(N, ch)のRMS（二乗平均平方根）を返す。空なら0.0"""
+    if samples.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(samples))))
+
+
+def normalize_sfx_gain(snippet, source_rms):
+    """
+    効果音snippetの音量を、元動画の音声(source_rms)よりSFX_GAIN_OVER_SOURCE_DB dBだけ
+    大きくなるよう調整する。元動画がほぼ無音（source_rmsが小さい）場合は、測定不能な
+    source_rmsに引きずられて過大なゲインをかけないよう、SFX_DEFAULT_RMS_WHEN_SILENTを
+    目標値として使う。ピークでの歪みは、最終ミックス後のsoft_limit()側で防ぐ
+    （ここでは音量バランスの調整のみを行う）。
+    """
+    if snippet.size == 0:
+        return snippet
+    snippet_rms = measure_rms(snippet)
+    if snippet_rms <= 1e-6:
+        return snippet
+    target_rms = (source_rms * (10.0 ** (SFX_GAIN_OVER_SOURCE_DB / 20.0))
+                  if source_rms > 1e-4 else SFX_DEFAULT_RMS_WHEN_SILENT)
+    gain = target_rms / snippet_rms
+    return snippet * gain
+
+
+def soft_limit(samples, threshold=SOFT_LIMIT_THRESHOLD):
+    """
+    最終ミックス後に使う簡易リミッター。thresholdを超えた部分だけtanhで滑らかに
+    丸め込み（それ以下はそのまま）、単純な np.clip によるハードクリップ（歪みっぽい
+    音割れ）を避ける。効果音を元動画より音量アップ（SFX_GAIN_OVER_SOURCE_DB）しても
+    ピークで歪まないようにするための仕上げ処理。
+    """
+    out = np.asarray(samples, dtype=np.float32).copy()
+    over = np.abs(out) > threshold
+    if np.any(over):
+        sign = np.sign(out[over])
+        span = max(1e-6, 1.0 - threshold)
+        excess = (np.abs(out[over]) - threshold) / span
+        out[over] = sign * (threshold + span * np.tanh(excess))
+    return np.clip(out, -1.0, 1.0)
 
 
 def apply_reverb_tail(samples, sr, tail_sec=LOGO_SFX_TAIL_SEC, num_taps=6, decay=0.55):
@@ -1782,7 +2051,7 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         pieces.append(seg)
 
         # 効果音は人物の出現が完了した瞬間（shadowがあれば、スライドインが着地した瞬間）
-        landed_frame_offset = plan["n_hold"] + plan["n_brush"] + plan.get("n_slide_in", 0)
+        landed_frame_offset = plan["n_pre"] + plan["n_reveal"] + plan.get("n_slide_in", 0)
         if plan["sfx_path"]:
             offset = frames_to_samples(landed_frame_offset, fps, sr)
             sfx_jobs.append((written + offset, plan["sfx_path"], False))
@@ -1808,13 +2077,17 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
 
+    # SEの音量バランス：元動画の音声(orig)のRMSを基準に、SFX_GAIN_OVER_SOURCE_DB分だけ
+    # 大きく聞こえるよう各SFXを正規化する（ピークの歪みはsoft_limit()側で防ぐ）
+    source_rms = measure_rms(orig)
     for start, path, apply_tail in sfx_jobs:
         snippet = decode_audio(path, sr, ch)
+        snippet = normalize_sfx_gain(snippet, source_rms)
         if apply_tail:
             snippet = apply_reverb_tail(snippet, sr)
         mix_into(out, snippet, start)
 
-    return np.clip(out, -1.0, 1.0)
+    return soft_limit(out)
 
 
 def write_wav(path, samples, sr=AUDIO_SR):
@@ -1883,6 +2156,9 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
                 logo_cfg, logo_at = None, None
             else:
+                # ロゴ画像の余白（透明部分、または不透明PNGの背景色部分）を自動検出してクロップし、
+                # 内容部分だけをwidth_ratio基準で配置する（見た目の「迫力」を上げるため）
+                logo_bgr, logo_alpha = crop_logo_content(logo_bgr, logo_alpha)
                 logo_luma = build_logo_luminance_mask(logo_bgr, logo_alpha)
                 logo_params = resolve_logo_params(logo_cfg)
                 logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)

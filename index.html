@@ -420,12 +420,16 @@
     <summary>全体設定</summary>
     <div class="body stack">
       <div class="field">
-        <label>freeze_sec（フリーズ全体の長さ・秒）</label>
-        <input type="number" id="freezeSecInput" min="0.5" max="10" step="0.1" value="1.2">
+        <label>①塗り reveal_sec（カラー化にかける時間・秒） <span class="brush-slider-value" id="revealSecValue">0.5秒</span></label>
+        <input type="range" id="revealSecSlider" min="0.1" max="3" step="0.1" value="0.5">
       </div>
       <div class="field">
-        <label>brush_anim_sec（ブラシが伸びる時間・秒）</label>
-        <input type="number" id="brushAnimSecInput" min="0.2" max="3" step="0.1" value="0.8">
+        <label>②ズレ slide_sec（人物がずれて影が現れる時間・秒） <span class="brush-slider-value" id="slideSecValue">0.5秒</span></label>
+        <input type="range" id="slideSecSlider" min="0.1" max="2" step="0.1" value="0.5">
+      </div>
+      <div class="field">
+        <label>③静止 hold_sec（ずれきった状態で保持する時間・秒） <span class="brush-slider-value" id="holdSecValue">2.0秒</span></label>
+        <input type="range" id="holdSecSlider" min="0.3" max="8" step="0.1" value="2">
       </div>
       <div class="field">
         <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
@@ -490,6 +494,14 @@
           <label>影 ぼかし <span class="brush-slider-value" id="shadowBlurValue">0.000</span></label>
           <input type="range" id="shadowBlurSlider" min="0" max="0.08" step="0.005" value="0">
         </div>
+        <div class="field">
+          <label>shadow.source（影の形に使うマスク）</label>
+          <select id="shadowSourceSelect">
+            <option value="same">same（カラー化と同じマスク）</option>
+            <option value="brush">brush（ブラシのストロークを使う）</option>
+            <option value="auto">auto（自動切り抜きを使う）</option>
+          </select>
+        </div>
       </div>
       <div class="field">
         <label>出力解像度</label>
@@ -535,6 +547,7 @@
       <div class="field">
         <label>効果音（着地の瞬間に発火）</label>
         <select id="logoSfxSelect">
+          <option value="impact">impact（低く重いインパクト。既定）</option>
           <option value="don">don（低音）</option>
           <option value="shakin">shakin（上昇音）</option>
           <option value="">なし</option>
@@ -623,8 +636,6 @@
 
 var DEFAULT_FONT_PATH = "assets/fonts/NotoSansJP-Bold.ttf";
 var DEFAULT_STYLE = {
-  freeze_sec: 1.2,
-  brush_anim_sec: 0.8,
   brush_width: 0.12,
   brush_shape: "round",
   mono_contrast: 1.0,
@@ -640,21 +651,30 @@ var DEFAULT_STYLE = {
   title_size: 0.06,
   title_align: "center",
   audio_during_freeze: "mute",
+  // mask は廃止（color_source/shadow.sourceに分離）。旧JSONを読み込んだときの後方互換変換に
+  // のみ使う（parseProjectJSON参照）。新しいJSONの書き出しにはcolor_sourceを使う。
   mask: "brush",
   mask_options: null,
   reveal: "wipe"
   // 影（フィルム色）演出はここに既定値を含めない（意図的。render.pyのDEFAULT_STYLEと同じ理由）。
   // JSON側に"shadow"キーが無ければ既定で有効（parseProjectJSON参照）。ここに既定値を
   // 持たせてしまうと「省略された」ことと「明示的にnullが指定された」ことを区別できなくなる。
+  // reveal_sec/slide_sec/hold_secも同じ理由でここに含めない（REVEAL_SEC_DEFAULT等を使う）。
 };
 var TITLE_ALIGNS = ["left", "center", "right"];
 var MASK_MODES = ["brush", "auto", "auto+brush"];
-var REVEALS = ["wipe", "fade", "brush"];
+var COLOR_SOURCES = ["brush", "auto"];
+var SHADOW_SOURCES = ["same", "brush", "auto"];
+var REVEALS = ["wipe", "fade", "brush", "none"];
 var SHADOW_DIRECTIONS = ["auto", "left", "right"];
+/** 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定秒数（render.pyのREVEAL_SEC_DEFAULT等と同じ値） */
+var REVEAL_SEC_DEFAULT = 0.5;
+var SLIDE_SEC_DEFAULT = 0.5;
+var HOLD_SEC_DEFAULT = 2.0;
 /** 影（フィルム色）のJSON契約上の既定値（render.pyのSHADOW_*_DEFAULTと同じ値） */
 var DEFAULT_SHADOW = {
   color: "#FF6432", alpha: 0.8, distance: 0.03, direction: "auto",
-  offsetY: 0.02, blur: 0.0, slideSec: 0.5
+  offsetY: 0.02, blur: 0.0, slideSec: 0.5, source: "same"
 };
 /** render.pyのSHADOW_SLIDE_BACK_SECと同じ値。保持終了→通常再生に戻る直前、人物を元位置へ戻す時間（固定） */
 var SHADOW_SLIDE_BACK_SEC = 0.25;
@@ -678,10 +698,12 @@ var OUTPUT_PRESETS = {
 };
 /** 影（フィルム色）の色プリセット（参考動画は人物ごとに色が違う場合があるため複数用意） */
 var FILM_COLOR_PRESETS = {
+  white: "#FFFFFF",
+  black: "#000000",
   orange: "#FF6432",
-  cyan: "#00C8FF",
-  magenta: "#FF32C8",
-  yellow: "#FFC832"
+  cyan: "#32C8FF",
+  magenta: "#FF32A0",
+  yellow: "#FFD232"
 };
 var DEFAULT_LOGO_AT = "end";
 var DEFAULT_LOGO_DURATION_SEC = 2.2;
@@ -859,14 +881,21 @@ function strokeToJSON(st) {
 }
 
 function freezeToJSON(fz) {
+  var maskMode = resolveMaskMode(fz.maskMode);
   var out = {
     time: round(numOr(fz.time, 0), 2),
     name: fz.name || "",
     background: fz.background === "dark" ? "dark" : "mono",
     brush_shape: resolveBrushShape(fz.brushShape),
-    mask: resolveMaskMode(fz.maskMode),
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
+  if (maskMode === "auto+brush") {
+    // color_sourceには存在しない旧ハイブリッドモード（自動切り抜き＋ブラシ修正）。
+    // 後方互換専用の"mask"キーのまま出力する
+    out.mask = "auto+brush";
+  } else {
+    out.color_source = maskMode;   // "brush" | "auto"
+  }
   if (fz.sfx) out.sfx = fz.sfx;
   // テロップ位置・サイズ・寄せ（未指定なら省略し、全体設定 style.title_* を使わせる）
   if (fz.titlePos) out.title_pos = [round(fz.titlePos[0], 4), round(fz.titlePos[1], 4)];
@@ -882,8 +911,9 @@ function buildProjectJSON(state) {
     version: 1,
     video: state.videoFileName || "",
     style: {
-      freeze_sec: round(numOr(state.freezeSec, DEFAULT_STYLE.freeze_sec), 2),
-      brush_anim_sec: round(numOr(state.brushAnimSec, DEFAULT_STYLE.brush_anim_sec), 2),
+      reveal_sec: round(numOr(state.revealSec, REVEAL_SEC_DEFAULT), 2),
+      slide_sec: round(numOr(state.slideSec, SLIDE_SEC_DEFAULT), 2),
+      hold_sec: round(numOr(state.holdSec, HOLD_SEC_DEFAULT), 2),
       brush_width: DEFAULT_STYLE.brush_width,
       mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
       background: DEFAULT_STYLE.background,
@@ -914,7 +944,7 @@ function buildProjectJSON(state) {
         direction: resolveShadowDirection(state.shadowDirection),
         offset_y: DEFAULT_SHADOW.offsetY,
         blur: round(numOr(state.shadowBlurRatio, DEFAULT_SHADOW.blur), 4),
-        slide_sec: DEFAULT_SHADOW.slideSec
+        source: resolveShadowSource(state.shadowSource)
       }
     : { enabled: false };
   if (state.logo && state.logo.imageName) {
@@ -954,7 +984,7 @@ function parseProjectJSON(json) {
       sfx: fz.sfx || "",
       background: fz.background === "dark" ? "dark" : "mono",
       brushShape: resolveBrushShape(fz.brush_shape),
-      maskMode: resolveMaskMode(fz.mask),
+      maskMode: resolveColorSourceForFreeze(fz),
       brushEditMode: "add",
       titlePos: Array.isArray(fz.title_pos)
         ? [numOr(fz.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(fz.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -982,7 +1012,8 @@ function parseProjectJSON(json) {
   // ではなく）で"shadow" in rawStyleを判定する必要がある（"省略"と"明示的なnull"を
   // 区別するため）。
   var rawStyle = json.style || {};
-  var shadowEnabled, shadowColor, shadowAlpha, shadowDistanceRatio, shadowDirection, shadowBlurRatio;
+  var shadowEnabled, shadowColor, shadowAlpha, shadowDistanceRatio, shadowDirection, shadowBlurRatio, shadowSource;
+  var legacyShadowSlideSec = null;
   function shadowCfgFromDict(shadow) {
     shadow = (shadow && typeof shadow === "object") ? shadow : {};
     return {
@@ -990,7 +1021,8 @@ function parseProjectJSON(json) {
       alpha: numOr(shadow.alpha, DEFAULT_SHADOW.alpha),
       distanceRatio: numOr(shadow.distance, DEFAULT_SHADOW.distance),
       direction: resolveShadowDirection(shadow.direction),
-      blurRatio: numOr(shadow.blur, DEFAULT_SHADOW.blur)
+      blurRatio: numOr(shadow.blur, DEFAULT_SHADOW.blur),
+      source: resolveShadowSource(shadow.source)
     };
   }
   if (Object.prototype.hasOwnProperty.call(rawStyle, "shadow")) {
@@ -1002,6 +1034,7 @@ function parseProjectJSON(json) {
       shadowDistanceRatio = DEFAULT_SHADOW.distance;
       shadowDirection = DEFAULT_SHADOW.direction;
       shadowBlurRatio = DEFAULT_SHADOW.blur;
+      shadowSource = "same";
     } else {
       shadowEnabled = true;
       var resolved = shadowCfgFromDict(shadowRaw);
@@ -1010,6 +1043,10 @@ function parseProjectJSON(json) {
       shadowDistanceRatio = resolved.distanceRatio;
       shadowDirection = resolved.direction;
       shadowBlurRatio = resolved.blurRatio;
+      shadowSource = resolved.source;
+      if (shadowRaw && typeof shadowRaw === "object" && shadowRaw.slide_sec !== undefined) {
+        legacyShadowSlideSec = numOr(shadowRaw.slide_sec, SLIDE_SEC_DEFAULT);
+      }
     }
   } else {
     var filmOffsetArr = Array.isArray(rawStyle.film_offset) ? rawStyle.film_offset : null;
@@ -1022,6 +1059,7 @@ function parseProjectJSON(json) {
       shadowDistanceRatio = Math.abs(legacyFx);
       shadowDirection = legacyFx >= 0 ? "right" : "left";
       shadowBlurRatio = 0;
+      shadowSource = "same";
     } else {
       // "shadow"キーも旧film_offsetも無い → 既定で影を有効にする
       shadowEnabled = true;
@@ -1030,6 +1068,7 @@ function parseProjectJSON(json) {
       shadowDistanceRatio = DEFAULT_SHADOW.distance;
       shadowDirection = DEFAULT_SHADOW.direction;
       shadowBlurRatio = DEFAULT_SHADOW.blur;
+      shadowSource = "same";
     }
   }
   var logo = null;
@@ -1044,11 +1083,20 @@ function parseProjectJSON(json) {
       autoColorHex: ""
     };
   }
+  // reveal_sec/hold_sec（新）は、無ければ旧brush_anim_sec/freeze_secを読み替える（後方互換）。
+  // slide_secは、shadow.slide_sec（旧・最優先）→style.slide_sec（新）→既定値の順で解決する
+  // （render.pyのresolve_slide_secと同じ優先順位）。
+  var revealSec = style.reveal_sec !== undefined ? numOr(style.reveal_sec, REVEAL_SEC_DEFAULT)
+    : (style.brush_anim_sec !== undefined ? numOr(style.brush_anim_sec, REVEAL_SEC_DEFAULT) : REVEAL_SEC_DEFAULT);
+  var holdSec = style.hold_sec !== undefined ? numOr(style.hold_sec, HOLD_SEC_DEFAULT)
+    : (style.freeze_sec !== undefined ? numOr(style.freeze_sec, HOLD_SEC_DEFAULT) : HOLD_SEC_DEFAULT);
+  var slideSec = legacyShadowSlideSec !== null ? legacyShadowSlideSec : numOr(style.slide_sec, SLIDE_SEC_DEFAULT);
   return {
     videoFileName: json.video || "",
     outputMode: matchOutputPreset(json.output),
-    freezeSec: numOr(style.freeze_sec, DEFAULT_STYLE.freeze_sec),
-    brushAnimSec: numOr(style.brush_anim_sec, DEFAULT_STYLE.brush_anim_sec),
+    revealSec: revealSec,
+    slideSec: slideSec,
+    holdSec: holdSec,
     monoContrast: numOr(style.mono_contrast, DEFAULT_STYLE.mono_contrast),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
@@ -1064,6 +1112,7 @@ function parseProjectJSON(json) {
     shadowDistanceRatio: shadowDistanceRatio,
     shadowDirection: shadowDirection,
     shadowBlurRatio: shadowBlurRatio,
+    shadowSource: shadowSource,
     freezes: sortFreezesByTime(freezes),
     logo: logo
   };
@@ -1223,6 +1272,29 @@ function resolveTitleAlign(align) {
 /** 未知の値は brush（従来どおり完全後方互換）にフォールバックする（render.py の resolve_mask_mode と同じ方針） */
 function resolveMaskMode(mode) {
   return MASK_MODES.indexOf(mode) >= 0 ? mode : "brush";
+}
+
+/** 未知の値は brush にフォールバックする（render.py の resolve_color_source と同じ方針） */
+function resolveColorSource(source) {
+  return COLOR_SOURCES.indexOf(source) >= 0 ? source : "brush";
+}
+
+/** 未知の値は same にフォールバックする（render.py の resolve_shadow_source と同じ方針） */
+function resolveShadowSource(source) {
+  return SHADOW_SOURCES.indexOf(source) >= 0 ? source : "same";
+}
+
+/**
+ * フリーズJSON(fz)から、色付けに使うマスクの種類を解決する（render.pyのresolve_color_sourceと
+ * 同じ方針）。戻り値は"brush"|"auto"|"auto+brush"（内部的にはmaskModeとして扱う。
+ * auto+brushはcolor_sourceには存在しない旧ハイブリッドモードの後方互換専用）。
+ * "color_source"キーがあればそれを優先し、無ければ旧"mask"キーを読み替える。
+ */
+function resolveColorSourceForFreeze(fz) {
+  if (fz && Object.prototype.hasOwnProperty.call(fz, "color_source")) {
+    return resolveColorSource(fz.color_source);
+  }
+  return resolveMaskMode(fz && fz.mask);
 }
 
 /** 未知の値は wipe にフォールバックする（render.py の resolve_reveal と同じ方針） */
@@ -1509,7 +1581,12 @@ if (typeof module !== "undefined" && module.exports) {
     TITLE_ALIGNS: TITLE_ALIGNS,
     resolveTitleAlign: resolveTitleAlign,
     MASK_MODES: MASK_MODES,
+    COLOR_SOURCES: COLOR_SOURCES,
+    SHADOW_SOURCES: SHADOW_SOURCES,
     REVEALS: REVEALS,
+    REVEAL_SEC_DEFAULT: REVEAL_SEC_DEFAULT,
+    SLIDE_SEC_DEFAULT: SLIDE_SEC_DEFAULT,
+    HOLD_SEC_DEFAULT: HOLD_SEC_DEFAULT,
     DEFAULT_SHADOW: DEFAULT_SHADOW,
     SHADOW_SLIDE_BACK_SEC: SHADOW_SLIDE_BACK_SEC,
     SHADOW_DIRECTIONS: SHADOW_DIRECTIONS,
@@ -1519,6 +1596,9 @@ if (typeof module !== "undefined" && module.exports) {
     AUTO_REVEAL_WIPE_SEC: AUTO_REVEAL_WIPE_SEC,
     AUTO_REVEAL_FADE_SEC: AUTO_REVEAL_FADE_SEC,
     resolveMaskMode: resolveMaskMode,
+    resolveColorSource: resolveColorSource,
+    resolveColorSourceForFreeze: resolveColorSourceForFreeze,
+    resolveShadowSource: resolveShadowSource,
     resolveReveal: resolveReveal,
     resolveTitleField: resolveTitleField,
     telopBoxFromAnchor: telopBoxFromAnchor,
@@ -1576,8 +1656,9 @@ var appState = {
   videoFileName: "",
   videoFile: null,
   outputMode: "original",
-  freezeSec: DEFAULT_STYLE.freeze_sec,
-  brushAnimSec: DEFAULT_STYLE.brush_anim_sec,
+  revealSec: REVEAL_SEC_DEFAULT,
+  slideSec: SLIDE_SEC_DEFAULT,
+  holdSec: HOLD_SEC_DEFAULT,
   monoContrast: DEFAULT_STYLE.mono_contrast,
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
@@ -1591,10 +1672,11 @@ var appState = {
   shadowDistanceRatio: DEFAULT_SHADOW.distance,
   shadowDirection: DEFAULT_SHADOW.direction,
   shadowBlurRatio: DEFAULT_SHADOW.blur,
+  shadowSource: DEFAULT_SHADOW.source,
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" }
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" }
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -1635,12 +1717,13 @@ function init() {
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
-    "freezeSecInput", "brushAnimSecInput", "monoContrastSlider", "monoContrastValue",
+    "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
+    "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect",
     "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
-    "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue",
+    "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
     "outputModeSelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
@@ -1747,12 +1830,19 @@ function init() {
     redrawTelopOverlay();
   });
 
-  els.freezeSecInput.addEventListener("change", function () {
-    appState.freezeSec = numOr(els.freezeSecInput.value, DEFAULT_STYLE.freeze_sec);
+  els.revealSecSlider.addEventListener("input", function () {
+    appState.revealSec = numOr(els.revealSecSlider.value, REVEAL_SEC_DEFAULT);
+    els.revealSecValue.textContent = appState.revealSec.toFixed(1) + "秒";
     saveToLocalStorage();
   });
-  els.brushAnimSecInput.addEventListener("change", function () {
-    appState.brushAnimSec = numOr(els.brushAnimSecInput.value, DEFAULT_STYLE.brush_anim_sec);
+  els.slideSecSlider.addEventListener("input", function () {
+    appState.slideSec = numOr(els.slideSecSlider.value, SLIDE_SEC_DEFAULT);
+    els.slideSecValue.textContent = appState.slideSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+  });
+  els.holdSecSlider.addEventListener("input", function () {
+    appState.holdSec = numOr(els.holdSecSlider.value, HOLD_SEC_DEFAULT);
+    els.holdSecValue.textContent = appState.holdSec.toFixed(1) + "秒";
     saveToLocalStorage();
   });
   els.monoContrastSlider.addEventListener("input", function () {
@@ -1803,6 +1893,10 @@ function init() {
   els.shadowBlurSlider.addEventListener("input", function () {
     appState.shadowBlurRatio = Number(els.shadowBlurSlider.value);
     els.shadowBlurValue.textContent = appState.shadowBlurRatio.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.shadowSourceSelect.addEventListener("change", function () {
+    appState.shadowSource = resolveShadowSource(els.shadowSourceSelect.value);
     saveToLocalStorage();
   });
   els.outputModeSelect.addEventListener("change", function () {
@@ -2999,12 +3093,11 @@ function startPreviewPlayback() {
     distanceRatio: appState.shadowDistanceRatio,
     offsetYRatio: DEFAULT_SHADOW.offsetY
   };
-  // mask="brush"はbrush_anim_sec（ユーザー設定）、それ以外は固定のreveal時間
-  // （render.pyのAUTO_REVEAL_WIPE_SEC/AUTO_REVEAL_FADE_SECと同じ考え方）
+  // ①塗り(reveal)は、mask="brush"かどうかによらずrevealSec（ユーザー設定）を使う
+  // （render.pyのresolve_reveal_secと同じく、新しいreveal_secはbrush/auto共通の秒数）
   var HOLD = 0.3,
-      BRUSH = maskMode === "brush" ? appState.brushAnimSec
-        : (revealMode === "fade" ? AUTO_REVEAL_FADE_SEC : AUTO_REVEAL_WIPE_SEC),
-      REST = 1.0;
+      BRUSH = appState.revealSec,
+      REST = appState.holdSec;
   var start = performance.now();
 
   // mask="auto"/"auto+brush"の代用マスクは、フリーズ中は変化しない静的な形状なので、
@@ -3054,7 +3147,7 @@ function startPreviewPlayback() {
   // 影のスライドイン（着地）と、保持終了→通常再生に戻る前のスライドバック。
   // render.pyと同じく、このフリーズでラストロゴを表示する場合はスライドバックを行わない
   // （＝通常再生に戻る演出そのものが無いため、人物を戻す必要がない）。
-  var SLIDE_IN = shadowCfg.enabled ? DEFAULT_SHADOW.slideSec : 0;
+  var SLIDE_IN = shadowCfg.enabled ? appState.slideSec : 0;
   var SLIDE_BACK = (shadowCfg.enabled && !logoImgEl) ? SHADOW_SLIDE_BACK_SEC : 0;
 
   document.fonts && document.fonts.load && document.fonts.load('700 20px "SpotlightJP"').catch(function () {});
@@ -3382,7 +3475,10 @@ function drawTelop(ctx, name, W, H, fade, scale, posRatio, sizeRatio, align) {
 
 /* ---------------- フィルム縁取り色（全体設定のプリセット・フリーズ単位の上書き選択） ---------------- */
 
-var FILM_COLOR_LABELS = { orange: "オレンジ", cyan: "シアン", magenta: "マゼンタ", yellow: "イエロー" };
+var FILM_COLOR_LABELS = {
+  white: "白", black: "黒", orange: "フィルムオレンジ",
+  cyan: "シアン", magenta: "マゼンタ", yellow: "イエロー"
+};
 
 function buildFilmColorControls() {
   els.filmColorPresetRow.innerHTML = "";
@@ -3465,7 +3561,7 @@ function cornerAverageColorHex(imgEl) {
 }
 
 function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
   els.logoFileInput.value = "";
   applyLogoSettingsToInputs();
   saveToLocalStorage();
@@ -3521,8 +3617,12 @@ function applyLogoSettingsToInputs() {
 /* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
 
 function applySettingsToInputs() {
-  els.freezeSecInput.value = appState.freezeSec;
-  els.brushAnimSecInput.value = appState.brushAnimSec;
+  els.revealSecSlider.value = appState.revealSec;
+  els.revealSecValue.textContent = Number(appState.revealSec).toFixed(1) + "秒";
+  els.slideSecSlider.value = appState.slideSec;
+  els.slideSecValue.textContent = Number(appState.slideSec).toFixed(1) + "秒";
+  els.holdSecSlider.value = appState.holdSec;
+  els.holdSecValue.textContent = Number(appState.holdSec).toFixed(1) + "秒";
   els.monoContrastSlider.value = appState.monoContrast;
   els.monoContrastValue.textContent = Number(appState.monoContrast).toFixed(2);
   els.titleBounceCheckbox.checked = !!appState.titleBounce;
@@ -3541,25 +3641,27 @@ function applySettingsToInputs() {
   els.shadowDirectionSelect.value = resolveShadowDirection(appState.shadowDirection);
   els.shadowBlurSlider.value = appState.shadowBlurRatio;
   els.shadowBlurValue.textContent = Number(appState.shadowBlurRatio).toFixed(3);
+  els.shadowSourceSelect.value = resolveShadowSource(appState.shadowSource);
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
 
 /* ---------------- localStorage ---------------- */
 
-// v1→v2：影（フィルム色）の既定値をOFF→ONに変更したことに伴うバージョンアップ。
-// 同じ動画ファイル名で以前保存された v1 のデータ（旧既定＝影OFF）が、動画を
-// 選び直すたびに自動復元されて新しい既定値（影ON）を静かに上書きしてしまう
-// 不具合があったため、キーのバージョンを上げて古い保存データを読み込まないようにする
-// （実機のレンダリングで人物が全く動かず影も出ない不具合の原因の1つだった）。
-function storageKey(name) { return "spotlightReel:v2:" + name; }
+// v2→v3：演出の3段構成（reveal_sec/slide_sec/hold_sec）への刷新に伴うバージョンアップ。
+// 旧v2データはfreezeSec/brushAnimSecという別概念のフィールドで保存されており、
+// そのまま読み込むと新しいrevealSec/slideSec/holdSecの既定値（0.5/0.5/2.0）を
+// 静かに上書きしてしまう（v1→v2のときと同じ理由）。キーのバージョンを上げて、
+// 古い保存データは読み込まず新しい既定値で始まるようにする。
+function storageKey(name) { return "spotlightReel:v3:" + name; }
 
 function saveToLocalStorage() {
   if (!appState.videoFileName) return;
   try {
     var payload = {
-      freezeSec: appState.freezeSec,
-      brushAnimSec: appState.brushAnimSec,
+      revealSec: appState.revealSec,
+      slideSec: appState.slideSec,
+      holdSec: appState.holdSec,
       monoContrast: appState.monoContrast,
       titleBounce: appState.titleBounce,
       audioDuringFreeze: appState.audioDuringFreeze,
@@ -3570,6 +3672,7 @@ function saveToLocalStorage() {
       shadowDistanceRatio: appState.shadowDistanceRatio,
       shadowDirection: appState.shadowDirection,
       shadowBlurRatio: appState.shadowBlurRatio,
+      shadowSource: appState.shadowSource,
       outputMode: appState.outputMode,
       freezes: appState.freezes,
       // logo画像本体(File)は保存できないため、ファイル名等の設定だけ保存する
@@ -3592,8 +3695,9 @@ function loadFromLocalStorage(videoFileName) {
     var raw = localStorage.getItem(storageKey(videoFileName));
     if (!raw) return false;
     var data = JSON.parse(raw);
-    appState.freezeSec = numOr(data.freezeSec, DEFAULT_STYLE.freeze_sec);
-    appState.brushAnimSec = numOr(data.brushAnimSec, DEFAULT_STYLE.brush_anim_sec);
+    appState.revealSec = numOr(data.revealSec, REVEAL_SEC_DEFAULT);
+    appState.slideSec = numOr(data.slideSec, SLIDE_SEC_DEFAULT);
+    appState.holdSec = numOr(data.holdSec, HOLD_SEC_DEFAULT);
     appState.monoContrast = numOr(data.monoContrast, DEFAULT_STYLE.mono_contrast);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
@@ -3604,6 +3708,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.shadowDistanceRatio = numOr(data.shadowDistanceRatio, DEFAULT_SHADOW.distance);
     appState.shadowDirection = resolveShadowDirection(data.shadowDirection);
     appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blur);
+    appState.shadowSource = resolveShadowSource(data.shadowSource);
     appState.outputMode = data.outputMode || "original";
     appState.freezes = data.freezes || [];
     appState.logo = (data.logo && data.logo.imageName) ? {
@@ -3614,7 +3719,7 @@ function loadFromLocalStorage(videoFileName) {
       durationSec: numOr(data.logo.durationSec, DEFAULT_LOGO_DURATION_SEC),
       sfx: data.logo.sfx || "",
       autoColorHex: ""
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
     return true;
   } catch (e) {
     return false;
@@ -4138,8 +4243,9 @@ function handleJsonFileChange(e) {
     try {
       var json = JSON.parse(String(reader.result));
       var loaded = parseProjectJSON(json);
-      appState.freezeSec = loaded.freezeSec;
-      appState.brushAnimSec = loaded.brushAnimSec;
+      appState.revealSec = loaded.revealSec;
+      appState.slideSec = loaded.slideSec;
+      appState.holdSec = loaded.holdSec;
       appState.monoContrast = loaded.monoContrast;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
@@ -4150,9 +4256,10 @@ function handleJsonFileChange(e) {
       appState.shadowDistanceRatio = loaded.shadowDistanceRatio;
       appState.shadowDirection = loaded.shadowDirection;
       appState.shadowBlurRatio = loaded.shadowBlurRatio;
+      appState.shadowSource = loaded.shadowSource;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "don", autoColorHex: "" };
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();

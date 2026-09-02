@@ -6,8 +6,9 @@
 生成物:
     examples/dummy_input.mp4   1080x1920 30fps 8秒のテスト動画
     examples/sample.json       render.py にそのまま渡せるプロジェクトJSON
-    assets/sfx/shakin.wav      効果音（短い上昇音）
-    assets/sfx/don.wav         効果音（短い低音）
+    assets/sfx/shakin.wav      効果音（金属的な高域シマー）
+    assets/sfx/don.wav         効果音（サブベースのインパクト）
+    assets/sfx/impact.wav      効果音（donより低く重い、ラストロゴ着地の既定SE）
     assets/fonts/NotoSansJP-Bold.ttf  日本語フォント（取得できれば）
 
 実行:
@@ -212,28 +213,100 @@ def mux_audio_into_video(video_path, audio_samples, sr=SR):
 # 効果音（shakin.wav / don.wav）
 # ---------------------------------------------------------------------------
 
-def synth_shakin(sr=SR, dur=0.5):
-    """「シャキーン」風：素早く上昇するサイン波＋簡易キラキラ"""
-    t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
-    freq = 600 + 3000 * (t / dur)
-    env = np.exp(-3.0 * t) * (1 - np.exp(-40 * t))
-    tone = np.sin(2 * np.pi * np.cumsum(freq) / sr) * env
-    sparkle = 0.0
-    for h in (2, 3, 4):
-        sparkle = sparkle + 0.15 * np.sin(2 * np.pi * freq * h * t) * env
-    sig = 0.6 * tone + 0.2 * sparkle
+def _delay_tail(sig, sr, taps):
+    """(delay_sec, amp)のリストぶん、sigを遅らせて減衰コピーを重ねる簡易リバーブ/ディレイ"""
+    out = sig.copy()
+    n = len(sig)
+    for delay_sec, amp in taps:
+        d = int(round(delay_sec * sr))
+        if d >= n:
+            continue
+        out[d:] += sig[:n - d] * amp
+    return out
+
+
+def _limiter_normalize(sig, peak_target=0.95):
+    """ピークがpeak_targetになるよう正規化する（リミッター的な仕上げ。クリッピング防止）"""
+    peak = float(np.max(np.abs(sig))) if sig.size else 0.0
+    if peak <= 1e-9:
+        return sig
+    return sig * (peak_target / peak)
+
+
+def synth_shakin(sr=SR, dur=0.9):
+    """
+    「シャキーン」風（映画予告編ふうに刷新）：金属的な高域シマー
+    （複数の非整数倍音を重ねたベル/シンバル風合成）＋アタック直後の上昇スイープ＋短い残響。
+    """
+    n = int(sr * dur)
+    t = np.linspace(0, dur, n, endpoint=False, dtype=np.float32)
+
+    base = 1400.0
+    # (倍音比, 振幅, 減衰の速さ)。非整数比にすることで金属的な「シャキーン」感を出す
+    partials = [(1.00, 1.00, 6.0), (2.03, 0.60, 9.0), (3.29, 0.42, 13.0),
+                (4.77, 0.28, 18.0), (5.88, 0.18, 24.0), (7.16, 0.12, 30.0)]
+    sig = np.zeros(n, np.float32)
+    for ratio, amp, decay in partials:
+        env = np.exp(-decay * t)
+        sig += (amp * np.sin(2 * np.pi * base * ratio * t) * env).astype(np.float32)
+
+    # アタック直後の「キラッ」とした上昇スイープ
+    sweep_freq = 2200.0 + 2600.0 * np.exp(-t / 0.05)
+    sweep_env = np.exp(-14.0 * t).astype(np.float32)
+    sweep = np.sin(2 * np.pi * np.cumsum(sweep_freq) / sr).astype(np.float32) * sweep_env * 0.35
+    sig = sig + sweep
+
+    sig = _delay_tail(sig, sr, [(0.03, 0.30), (0.07, 0.18), (0.13, 0.10), (0.22, 0.05)])
+    sig = _limiter_normalize(sig)
     return np.stack([sig, sig], axis=1).astype(np.float32)
 
 
-def synth_don(sr=SR, dur=0.4):
-    """「ドン」風：低音のサイン波バースト＋軽いノイズ"""
-    t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
-    freq = 120 * np.exp(-4.0 * t) + 55
-    env = np.exp(-9.0 * t)
-    tone = np.sin(2 * np.pi * np.cumsum(freq) / sr) * env
-    noise = (np.random.default_rng(0).standard_normal(len(t)).astype(np.float32)
-             * env * 0.08)
-    sig = 0.8 * tone + noise
+def synth_don(sr=SR, dur=1.6):
+    """
+    「ドン」風（映画予告編ふうに刷新）：40〜60Hzのサブベース（アタックでピッチが
+    半音ほど下がる）＋アタックの打撃ノイズ＋1.2秒以上の減衰リバーブ尾。
+    ピークで歪まないようリミッター的に正規化して仕上げる。
+    """
+    n = int(sr * dur)
+    t = np.linspace(0, dur, n, endpoint=False, dtype=np.float32)
+
+    base_freq = 50.0  # 40〜60Hzのサブベース帯域
+    semitone = 2.0 ** (1.0 / 12.0) - 1.0
+    freq = base_freq + base_freq * semitone * np.exp(-t / 0.06)  # 半音ほど高い所から素早く落ち着く
+    phase = 2 * np.pi * np.cumsum(freq) / sr
+    sub = np.sin(phase).astype(np.float32) * np.exp(-t / 0.55).astype(np.float32)
+
+    noise = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+    transient = noise * np.exp(-t / 0.02).astype(np.float32) * 0.5   # アタックの打撃ノイズ
+
+    sig = sub * 0.85 + transient
+    sig = _delay_tail(sig, sr, [(0.05, 0.50), (0.12, 0.32), (0.22, 0.20),
+                                 (0.38, 0.12), (0.60, 0.07), (0.95, 0.04)])
+    sig = _limiter_normalize(sig)
+    return np.stack([sig, sig], axis=1).astype(np.float32)
+
+
+def synth_impact(sr=SR, dur=2.2):
+    """
+    「impact」：ラストロゴの着地用に、donよりも低く・重く・尾を長くしたインパクト音。
+    logo.sfxの既定値として使う（donはフリーズのSE用途に残す）。
+    """
+    n = int(sr * dur)
+    t = np.linspace(0, dur, n, endpoint=False, dtype=np.float32)
+
+    base_freq = 42.0
+    semitone = 2.0 ** (1.0 / 12.0) - 1.0
+    freq = base_freq + base_freq * semitone * np.exp(-t / 0.08)
+    phase = 2 * np.pi * np.cumsum(freq) / sr
+    sub = np.sin(phase).astype(np.float32) * np.exp(-t / 0.8).astype(np.float32)
+
+    noise = np.random.default_rng(1).standard_normal(n).astype(np.float32)
+    transient = noise * np.exp(-t / 0.025).astype(np.float32) * 0.6
+
+    sig = sub * 0.9 + transient
+    sig = _delay_tail(sig, sr, [(0.06, 0.55), (0.14, 0.38), (0.26, 0.26), (0.44, 0.18),
+                                 (0.70, 0.12), (1.05, 0.08), (1.45, 0.05)])
+    sig = _limiter_normalize(sig)
     return np.stack([sig, sig], axis=1).astype(np.float32)
 
 
@@ -333,7 +406,11 @@ def make_sample_json(video_filename):
             "sfx": "don",
             "brush_shape": "hake",
             # circle_positions(5.5)の2人目は画面中心より右寄りに描かれるため、
-            # style.shadow.direction="auto" により影は右へスライドして現れる見本になる
+            # style.shadow.direction="auto" により影は右へスライドして現れる見本になる。
+            # このフリーズだけ shadow.source="auto" にして、カラー化はブラシ（color_source既定）、
+            # 影の形だけ自動切り抜きのアルファを使う「混在」パターンの見本にする
+            # （自動切り抜きはこのフリーズだけ実行される）
+            "shadow": {"source": "auto"},
             "strokes": [{"width": 0.09, "points": stroke_over_circle(5.5, 1)}],
         },
     ]
@@ -343,8 +420,11 @@ def make_sample_json(video_filename):
         "video": video_filename,
         "output": {"width": W, "height": H, "fps": FPS},
         "style": {
-            "freeze_sec": 1.8,             # 既定値(1.2)より少し長めに取り、バウンス/ロゴが映える余裕を持たせる
-            "brush_anim_sec": 0.8,
+            # 1フリーズの流れ「①塗り(reveal_sec)→②ズレ(slide_sec)→③静止(hold_sec)」。
+            # hold_secは既定値(2.0)より少し長めに取り、バウンス/ロゴが映える余裕を持たせる
+            "reveal_sec": 0.6,
+            "slide_sec": 0.4,
+            "hold_sec": 2.2,
             "brush_width": 0.12,
             "brush_shape": "round",
             "mono_contrast": 1.3,
@@ -357,10 +437,12 @@ def make_sample_json(video_filename):
             # 影（フィルム色）演出：人物出現完了後、人物だけをdistanceぶんスライドさせ、
             # 元の位置に残る影(color/alpha)を覗かせる。direction="auto"は人物マスクの
             # X重心が画面中心より右か左かで自動的に左右を切り替える（後述のfreezesの
-            # コメント参照。2つのフリーズでそれぞれ左・右にスライドする見本になっている）
+            # コメント参照。2つのフリーズでそれぞれ左・右にスライドする見本になっている）。
+            # sourceは既定"same"（color_sourceと同じマスク）。2つめのフリーズだけ
+            # freeze側で"auto"に上書きしている（上のfreezesのコメント参照）
             "shadow": {
                 "color": "#1A1A2E", "alpha": 0.8, "distance": 0.03,
-                "direction": "auto", "offset_y": 0.02, "blur": 0.0, "slide_sec": 0.2,
+                "direction": "auto", "offset_y": 0.02, "blur": 0.0,
             },
         },
         "freezes": freezes,
@@ -368,9 +450,9 @@ def make_sample_json(video_filename):
             "image": "store_logo.png",
             "at": "last_freeze",
             "background": "auto",          # ロゴの四隅平均色（このダミーロゴは黒背景なので画面が黒くなる）
-            "sfx": "don",
-            # duration_sec / scale_from / landing_sec / sweep_sec / flash_strength は
-            # 省略時の既定値（着地からの表示1.2秒・200%→100%・0.15秒・0.30秒・0.6）のまま使う
+            "sfx": "impact",               # donより低く重い、ラストロゴ着地の既定SE
+            # duration_sec / scale_from / landing_sec / sweep_sec / flash_strength / width_ratio は
+            # 省略時の既定値のまま使う
         },
     }
     return project
@@ -381,11 +463,15 @@ def make_sample_json(video_filename):
 # ---------------------------------------------------------------------------
 
 def gen_dummy_logo(out_path):
-    """テスト用のダミーロゴPNG（透過、丸角バッジに白文字の「STORE」）を生成する"""
+    """
+    テスト用のダミーロゴPNG（透過、丸角バッジに白文字の「STORE」）を生成する。
+    render.pyのロゴ自動クロップ（crop_logo_content）の効果を確認しやすいよう、
+    意図的に周囲に大きめの透明な余白（画像幅の16%）を持たせている。
+    """
     w, h, ss = 640, 360, 2
     img = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad = 10 * ss
+    pad = int(w * ss * 0.16)
     draw.rounded_rectangle(
         [pad, pad, w * ss - pad, h * ss - pad],
         radius=40 * ss, fill=(30, 30, 40, 235), outline=(255, 255, 255, 255), width=6 * ss)
@@ -619,6 +705,7 @@ def main():
     log("=== 効果音を確認（無ければ仮の合成音を生成） ===")
     ensure_sfx(os.path.join(SFX_DIR, "shakin.wav"), synth_shakin, "shakin.wav")
     ensure_sfx(os.path.join(SFX_DIR, "don.wav"), synth_don, "don.wav")
+    ensure_sfx(os.path.join(SFX_DIR, "impact.wav"), synth_impact, "impact.wav")
 
     log("=== ブラシ筆先画像を生成 ===")
     generate_brush_tips()

@@ -71,9 +71,13 @@ async function main() {
     document.getElementById("logoSection").open = true;
   });
 
-  console.log("=== 全体設定：freeze_secの既定値・title_bounce ===");
-  check(await page.inputValue("#freezeSecInput") === "1.2",
-    "freeze_secの入力欄の既定値が1.2になっている: " + (await page.inputValue("#freezeSecInput")));
+  console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec）の既定値・title_bounce ===");
+  check(await page.inputValue("#revealSecSlider") === "0.5",
+    "reveal_secの既定値が0.5になっている: " + (await page.inputValue("#revealSecSlider")));
+  check(await page.inputValue("#slideSecSlider") === "0.5",
+    "slide_secの既定値が0.5になっている: " + (await page.inputValue("#slideSecSlider")));
+  check(await page.inputValue("#holdSecSlider") === "2",
+    "hold_secの既定値が2.0になっている: " + (await page.inputValue("#holdSecSlider")));
 
   check(await page.$("#filmColorOverrideSelect") === null,
     "フリーズ単位のフィルム色上書きセレクトは廃止され存在しない（影は全体設定に一本化）");

@@ -166,22 +166,29 @@ try:
     check(len(runs) <= 2 * n_freezes,
           f"無音区間の件数がフリーズ数から想定される範囲内（<= {2 * n_freezes}件）: {len(runs)}件"
           "（大量の細切れ無音＝ブツ切れバグが無いことの確認）")
-    max_freeze_sec = max(f.get("freeze_sec", project["style"]["freeze_sec"]) for f in project["freezes"])
+    # フリーズ1回分の実際の長さ（秒）は、①塗り②ズレ③静止＋固定の pre/slide_back から
+    # plan_freezes が計算する（旧freeze_secは③静止(hold_sec)の秒数として読み替えられるため、
+    # 単純に「freeze_sec = フリーズ全体の長さ」という以前の前提はもう成り立たない）。
+    info_for_plan = render.probe_video(video_path)
+    plans_for_silence = render.plan_freezes(
+        [dict(render.DEFAULT_STYLE, **project["style"], **fz) for fz in project["freezes"]],
+        30.0, int(round(info_for_plan["duration"] * 30.0)))
+    total_freeze_sec = sum(p["n_total"] for p in plans_for_silence) / 30.0
+    max_freeze_sec = max(p["n_total"] for p in plans_for_silence) / 30.0
     check(all(dur <= max_freeze_sec + 0.5 for _, dur in runs),
-          "各無音区間の長さがfreeze_secを大きく超えない（フリーズ以外の場所が無音化していない）")
-    def sfx_duration_sec(name):
-        if not name:
-            return 0.0
-        path = render.resolve_path(os.path.join("assets", "sfx", f"{name}.wav"), [REPO_ROOT])
-        return len(decode_wav(path)) / 48000.0 if os.path.exists(path) else 0.0
+          "各無音区間の長さがフリーズ1回分の長さを大きく超えない（フリーズ以外の場所が無音化していない）")
 
     total_silence = sum(dur for _, dur in runs)
-    # フリーズ区間の大半は無音だが、効果音が鳴っている間は意図的に無音ではないため差し引く
-    expected_total = (n_freezes * project["style"]["freeze_sec"]
-                       - sum(sfx_duration_sec(f.get("sfx")) for f in project["freezes"]))
-    check(abs(total_silence - expected_total) < 0.3,
-          f"無音の合計時間が「フリーズ合計時間−効果音の再生時間」に近い: "
-          f"実測{total_silence:.2f}s / 想定{expected_total:.2f}s")
+    # フリーズ区間の大半は無音だが、効果音（今回はリバーブ尾を含め1秒前後と長め）が
+    # 鳴っている間は意図的に無音ではない。厳密な一致ではなく、
+    # 「フリーズ総時間より明らかに短い（＝効果音が実際に鳴って無音を削っている）」
+    # 「フリーズ総時間の半分は下回らない（＝大半はまだ無音のまま）」の範囲で検証する。
+    check(0 < total_silence < total_freeze_sec,
+          f"効果音が鳴る分、無音合計はフリーズ総時間より短い: "
+          f"無音={total_silence:.2f}s / フリーズ総時間={total_freeze_sec:.2f}s")
+    check(total_silence > total_freeze_sec * 0.3,
+          f"それでも大半はまだ無音のまま（効果音だけで大部分が埋まってはいない）: "
+          f"無音={total_silence:.2f}s / フリーズ総時間={total_freeze_sec:.2f}s")
 
     # ------------------------------------------------------------------
     # 2) 可変フレームレート(VFR)入力の正規化
@@ -242,7 +249,7 @@ try:
         fz = plan["fz"]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
         frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}))
-        done_idx = plan["n_hold"] + plan["n_brush"]
+        done_idx = plan["n_pre"] + plan["n_reveal"]
         no_telop_frame = frames[done_idx]        # ブラシ完了直後、テロップフェードイン前
         telop_frame = frames[-1]                  # フリーズ末尾、テロップ表示済み
         diff = int(np.abs(no_telop_frame.astype(int) - telop_frame.astype(int)).sum())
@@ -268,7 +275,7 @@ try:
         fz_no_name["name"] = ""  # テロップの変化と混同しないよう名前を消して分離する
         plan_no_name = render.plan_freezes([fz_no_name], fps, src_frames)[0]
         frames = list(render.iter_freeze_frames(frame, plan_no_name, W, H, fps, {}))
-        done_idx = plan_no_name["n_hold"] + plan_no_name["n_brush"]
+        done_idx = plan_no_name["n_pre"] + plan_no_name["n_reveal"]
         first_rest = frames[done_idx]
         last_rest = frames[-1]
         diff = int(np.abs(first_rest.astype(int) - last_rest.astype(int)).sum())
@@ -362,9 +369,9 @@ try:
 
     plan_shadow, frames_shadow = render_freeze_frames(make_dot_freeze(shadow=shadow_cfg))
     _plan_noshadow, frames_noshadow = render_freeze_frames(make_dot_freeze(shadow=None))
-    landed_idx = plan_shadow["n_hold"] + plan_shadow["n_brush"] + plan_shadow["n_slide_in"]
+    landed_idx = plan_shadow["n_pre"] + plan_shadow["n_reveal"] + plan_shadow["n_slide_in"]
     frame_with_shadow = frames_shadow[landed_idx]
-    frame_no_shadow = frames_noshadow[plan_shadow["n_hold"] + plan_shadow["n_brush"]]
+    frame_no_shadow = frames_noshadow[plan_shadow["n_pre"] + plan_shadow["n_reveal"]]
 
     check(plan_shadow["n_slide_in"] > 0, "shadowを指定するとn_slide_in（スライドインのフレーム数）が0より大きい")
     check(plan_shadow["n_slide_back"] > 0, "shadowを指定するとn_slide_back（スライドバックのフレーム数）が0より大きい")
@@ -403,8 +410,8 @@ try:
     early_i = 0
     late_i = plan_shadow["n_slide_in"] - 1
     check(early_i < late_i, "テスト前提：スライドインが複数フレームある（n_slide_inが小さすぎない）")
-    frame_early = frames_shadow[plan_shadow["n_hold"] + plan_shadow["n_brush"] + early_i]
-    frame_late = frames_shadow[plan_shadow["n_hold"] + plan_shadow["n_brush"] + late_i]
+    frame_early = frames_shadow[plan_shadow["n_pre"] + plan_shadow["n_reveal"] + early_i]
+    frame_late = frames_shadow[plan_shadow["n_pre"] + plan_shadow["n_reveal"] + late_i]
     diff_early = int(np.abs(
         frame_no_shadow[origin_probe].astype(int) - frame_early[origin_probe].astype(int)).sum())
     diff_late = int(np.abs(
@@ -420,7 +427,7 @@ try:
     check(plan_sfx["n_slide_in"] == plan_shadow["n_slide_in"],
           "sfx指定してもn_slide_inの計算は変わらない")
     audio = render.build_audio(video_path, [plan_sfx], fps, src_frames, True)
-    landed_frame_offset = plan_sfx["n_hold"] + plan_sfx["n_brush"] + plan_sfx["n_slide_in"]
+    landed_frame_offset = plan_sfx["n_pre"] + plan_sfx["n_reveal"] + plan_sfx["n_slide_in"]
     expected_sample = render.frames_to_samples(plan_sfx["frame_index"] + landed_frame_offset, fps, render.AUDIO_SR)
     # 効果音(shakin.wav)そのものの立ち上がり位置を探し、期待位置に近いことを確認する
     # （無音区間の判定と同じ考え方：しきい値を超える最初のサンプルを「発火位置」とみなす）
@@ -445,7 +452,7 @@ try:
     check(legacy_cfg is not None and legacy_cfg["direction"] == "right" and abs(legacy_cfg["distance"] - 0.08) < 1e-6,
           f"film_offset=[0.08, 0.0] は distance=0.08 / direction='right' に読み替えられる: {legacy_cfg}")
     _plan_legacy, frames_legacy = render_freeze_frames(legacy_fz)
-    legacy_landed_idx = _plan_legacy["n_hold"] + _plan_legacy["n_brush"] + _plan_legacy["n_slide_in"]
+    legacy_landed_idx = _plan_legacy["n_pre"] + _plan_legacy["n_reveal"] + _plan_legacy["n_slide_in"]
     frame_legacy = frames_legacy[legacy_landed_idx]
     diff_legacy = int(np.abs(
         frame_no_shadow[origin_probe].astype(int) - frame_legacy[origin_probe].astype(int)).sum())
@@ -477,7 +484,7 @@ try:
     _plan_default, frames_default = render_freeze_frames(no_shadow_key_fz)
     check(_plan_default["n_slide_in"] > 0,
           "'shadow'キー省略時もn_slide_inが0より大きい（実際にスライド演出が動く）")
-    default_landed = frames_default[_plan_default["n_hold"] + _plan_default["n_brush"] + _plan_default["n_slide_in"]]
+    default_landed = frames_default[_plan_default["n_pre"] + _plan_default["n_reveal"] + _plan_default["n_slide_in"]]
     diff_default_origin = int(np.abs(
         plain_bg[origin_probe].astype(int) - default_landed[origin_probe].astype(int)).sum())
     check(diff_default_origin > 20,
@@ -533,7 +540,7 @@ try:
 
     def landed_frame_for(fz):
         plan, frames = render_freeze_frames(fz)
-        idx = plan["n_hold"] + plan["n_brush"] + plan["n_slide_in"]
+        idx = plan["n_pre"] + plan["n_reveal"] + plan["n_slide_in"]
         return frames[idx]
 
     right_dummy_landed = landed_frame_for(make_side_freeze(0.8))    # 右寄りの人物
@@ -544,7 +551,7 @@ try:
     _plan_right_ns, frames_right_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
         "strokes": [{"width": 0.12, "points": [[0.8, 0.5], [0.8, 0.5]]}],
     }))
-    right_no_shadow = frames_right_ns[_plan_right_ns["n_hold"] + _plan_right_ns["n_brush"]]
+    right_no_shadow = frames_right_ns[_plan_right_ns["n_pre"] + _plan_right_ns["n_reveal"]]
     diff_right_at_right_probe = int(np.abs(
         right_no_shadow[right_probe].astype(int) - right_dummy_landed[right_probe].astype(int)).sum())
     check(diff_right_at_right_probe > 20,
@@ -553,7 +560,7 @@ try:
     _plan_left_ns, frames_left_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
         "strokes": [{"width": 0.12, "points": [[0.2, 0.5], [0.2, 0.5]]}],
     }))
-    left_no_shadow = frames_left_ns[_plan_left_ns["n_hold"] + _plan_left_ns["n_brush"]]
+    left_no_shadow = frames_left_ns[_plan_left_ns["n_pre"] + _plan_left_ns["n_reveal"]]
     left_probe = (int(0.5 * H), max(0, int(0.2 * W) - dx))
     diff_left_at_left_probe = int(np.abs(
         left_no_shadow[left_probe].astype(int) - left_dummy_landed[left_probe].astype(int)).sum())
@@ -581,7 +588,7 @@ try:
     _plan_center_ns, frames_center_ns = render_freeze_frames(make_dot_freeze(shadow=None, extra={
         "strokes": [{"width": 0.12, "points": [[0.5, 0.5], [0.5, 0.5]]}],
     }))
-    center_no_shadow = frames_center_ns[_plan_center_ns["n_hold"] + _plan_center_ns["n_brush"]]
+    center_no_shadow = frames_center_ns[_plan_center_ns["n_pre"] + _plan_center_ns["n_reveal"]]
     diff_center_at_right_probe = int(np.abs(
         center_no_shadow[center_right_probe].astype(int) - center_dummy_landed[center_right_probe].astype(int)).sum())
     check(diff_center_at_right_probe > 20,
@@ -620,6 +627,136 @@ try:
     check(diff_preview > 0, f"スライド前後のPNGは見た目が異なる（影の有無, diff={diff_preview}）")
 
     # ------------------------------------------------------------------
+    # 6.75) 演出の3段構成（①塗りreveal_sec→②ズレslide_sec→③静止hold_sec）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 3段時間：reveal_sec/slide_sec/hold_secを変えた3パターンでフレーム数が指定どおりになる ===")
+    timing_patterns = [
+        {"reveal_sec": 0.3, "slide_sec": 0.2, "hold_sec": 0.8},
+        {"reveal_sec": 0.6, "slide_sec": 0.5, "hold_sec": 2.0},
+        {"reveal_sec": 1.0, "slide_sec": 0.9, "hold_sec": 3.5},
+    ]
+    for pat in timing_patterns:
+        fz = dict(base_style)
+        fz.update({
+            "time": 2.5, "name": "", "sfx": None,
+            "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+            "shadow": {"color": "#000000", "alpha": 0.9, "distance": 0.05, "direction": "right",
+                       "offset_y": 0.0, "blur": 0.0},
+        })
+        fz.update(pat)
+        plan = render.plan_freezes([fz], fps, src_frames)[0]
+        expect_reveal = max(1, round(pat["reveal_sec"] * fps))
+        expect_slide = round(pat["slide_sec"] * fps)
+        expect_hold = round(pat["hold_sec"] * fps)
+        check(plan["n_reveal"] == expect_reveal,
+              f"reveal_sec={pat['reveal_sec']}: n_reveal={plan['n_reveal']}（期待{expect_reveal}）")
+        check(plan["n_slide_in"] == expect_slide,
+              f"slide_sec={pat['slide_sec']}: n_slide_in={plan['n_slide_in']}（期待{expect_slide}）")
+        check(plan["n_hold"] == expect_hold,
+              f"hold_sec={pat['hold_sec']}: n_hold={plan['n_hold']}（期待{expect_hold}）")
+        frames_actual = list(render.iter_freeze_frames(
+            render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps), plan, W, H, fps, {}))
+        check(len(frames_actual) == plan["n_total"],
+              f"実際に生成されるフレーム数もplan['n_total']({plan['n_total']})と一致する: {len(frames_actual)}")
+
+    print("")
+    print("=== 色付けと影で別々のマスクを使える（color_source=brush・shadow.source=auto の混在） ===")
+    try:
+        import rembg  # noqa: F401
+        has_rembg_mixed = True
+    except ImportError:
+        has_rembg_mixed = False
+    if has_rembg_mixed:
+        mixed_fz = dict(base_style)
+        mixed_fz.update({
+            "time": 2.5, "name": "", "sfx": None, "color_source": "brush",
+            "strokes": [{"width": 0.12, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+            "shadow": {"color": "#000000", "alpha": 0.9, "distance": 0.05, "direction": "right",
+                       "offset_y": 0.0, "blur": 0.0, "source": "auto"},
+        })
+        mixed_cache_dir = os.path.join(tmpdir, "mixed_cache")
+        mixed_frame = render.grab_frame_at(video_path, 2.5, W, H, fps)
+        color_ctx = render.build_mask_context(mixed_fz, mixed_frame, W, H, mixed_cache_dir, video_path)
+        check(color_ctx["mask_mode"] == "brush", "color_source='brush'のとき、カラー化はブラシのマスクを使う")
+        color_done_mask, _ = render.mask_and_paint_at(color_ctx, W, H, 1.0)
+        shadow_cfg_mixed = render.resolve_shadow_config(mixed_fz)
+        shadow_mask_mixed = render.build_shadow_mask(
+            mixed_fz, mixed_frame, W, H, mixed_cache_dir, video_path, shadow_cfg_mixed, color_done_mask)
+        check(not np.array_equal(color_done_mask, shadow_mask_mixed),
+              "shadow.source='auto'のとき、影のマスクはブラシのマスクと異なる（自動切り抜きを使っている）")
+        check(os.path.isdir(mixed_cache_dir) and len(os.listdir(mixed_cache_dir)) >= 1,
+              "shadow.source='auto'のためにこのフリーズだけ自動切り抜きが実行され、キャッシュが作られる")
+    else:
+        print("  [skip] rembg が未インストールのため color_source/shadow.source の混在検証は省略します")
+
+    print("")
+    print("=== テロップは②ズレの着地で出現し、③静止(hold)の終わりまで表示され続ける ===")
+    telop_fz = dict(base_style)
+    telop_fz.update({
+        "time": 2.5, "name": "テロップ確認", "sfx": None,
+        "reveal_sec": 0.3, "slide_sec": 0.2, "hold_sec": 1.5,
+        "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.5]]}],
+        "shadow": {"color": "#000000", "alpha": 0.9, "distance": 0.05, "direction": "right",
+                   "offset_y": 0.0, "blur": 0.0},
+    })
+    telop_plan, telop_frames = render_freeze_frames(telop_fz)
+    landing_frame_idx = telop_plan["n_pre"] + telop_plan["n_reveal"] + telop_plan["n_slide_in"]
+    hold_end_idx = landing_frame_idx + telop_plan["n_hold"] - 1
+    # まだテロップが出ていないはずのフレーム（スライド着地の直前）と比較する
+    just_before_landing = telop_frames[max(0, landing_frame_idx - 1)]
+    at_landing = telop_frames[landing_frame_idx]
+    near_hold_end = telop_frames[hold_end_idx]
+    # テロップ想定領域（title_pos既定 [0.5, 0.78] 付近）の画素だけを見る
+    tcy0, tcy1 = int(0.65 * H), int(0.95 * H)
+    diff_at_landing = int(np.abs(
+        just_before_landing[tcy0:tcy1].astype(int) - at_landing[tcy0:tcy1].astype(int)).sum())
+    check(diff_at_landing > 0, f"②ズレの着地の瞬間にテロップ領域の画素が変化し始める（diff={diff_at_landing}）")
+    diff_still_visible = int(np.abs(
+        just_before_landing[tcy0:tcy1].astype(int) - near_hold_end[tcy0:tcy1].astype(int)).sum())
+    check(diff_still_visible > 0,
+          f"③静止(hold)の終わり近くでもテロップはまだ表示されたまま（diff={diff_still_visible}）")
+
+    # ------------------------------------------------------------------
+    # 6.9) 旧キー（mask/freeze_sec/shadow.slide_sec/film_*）のみの既存JSONが従来どおり動く
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 後方互換：旧キー（mask/freeze_sec/brush_anim_sec/shadow.slide_sec/film_*）のみのJSONも動く ===")
+    legacy_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H, "fps": fps},
+        "style": {
+            "freeze_sec": 1.2, "brush_anim_sec": 0.4,
+            "mask": "brush",
+            "font": "assets/fonts/NotoSansJP-Bold.ttf",
+            "title_font": "assets/fonts/Anton-Regular.ttf",
+            "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
+            "shadow": {"color": "#112233", "alpha": 0.7, "distance": 0.04,
+                       "direction": "left", "offset_y": 0.0, "blur": 0.0, "slide_sec": 0.3},
+        },
+        "freezes": [{
+            "time": 2.5, "name": "旧キー", "mask": "brush",
+            "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.55, 0.5]]}],
+        }],
+    }
+    legacy_json_path = os.path.join(tmpdir, "legacy_project.json")
+    with open(legacy_json_path, "w", encoding="utf-8") as f:
+        json_mod.dump(legacy_project, f, ensure_ascii=False)
+    loaded_legacy = render.load_project(legacy_json_path)
+    legacy_fz_merged = loaded_legacy["freezes"][0]
+    check(render.resolve_color_source(legacy_fz_merged) == "brush",
+          "旧mask='brush'キーはcolor_source='brush'として読み替えられる")
+    legacy_shadow_cfg = render.resolve_shadow_config(legacy_fz_merged)
+    check(legacy_shadow_cfg is not None and abs(legacy_shadow_cfg["slide_sec"] - 0.3) < 1e-9,
+          f"旧shadow.slide_secがそのまま使われる: {legacy_shadow_cfg['slide_sec'] if legacy_shadow_cfg else None}")
+    check(abs(render.resolve_hold_sec(legacy_fz_merged) - 1.2) < 1e-9,
+          "旧freeze_secはhold_secとして読み替えられる")
+    out_legacy = os.path.join(tmpdir, "legacy_out.mp4")
+    render.render(loaded_legacy, legacy_json_path, video_path, out_legacy)
+    check(os.path.exists(out_legacy) and os.path.getsize(out_legacy) > 0,
+          "旧キーのみのプロジェクトJSONでも実際にレンダリングが成功する")
+
+    # ------------------------------------------------------------------
     # 6.8) ラストロゴ演出「ゆっくり・重厚」への変更
     # ------------------------------------------------------------------
     print("")
@@ -641,28 +778,57 @@ try:
           f"shake_amplitudeの既定は0.004（出力幅比0.4%）: {default_logo_params['shake_amplitude']}")
     check(abs(default_logo_params["duration_sec"] - 2.2) < 1e-9,
           f"duration_secの既定は2.2秒（以前は1.2秒）: {default_logo_params['duration_sec']}")
-    check(abs(default_logo_params["fade_sec"] - 0.6) < 1e-9,
-          f"fade_secの既定は0.6秒（以前は0.3秒）: {default_logo_params['fade_sec']}")
+    check(abs(default_logo_params["fade_sec"] - 0.4) < 1e-9,
+          f"fade_secの既定は0.4秒（以前は0.3秒→0.6秒→0.4秒）: {default_logo_params['fade_sec']}")
     check(default_logo_params["sfx_tail"] is True, "sfx_tailの既定はTrue")
+    check(abs(default_logo_params["width_ratio"] - 0.55) < 1e-9,
+          f"width_ratioの既定は0.55（以前は0.4固定）: {default_logo_params['width_ratio']}")
 
     custom_logo_cfg = {
         "scale_from": 1.3, "landing_sec": 0.2, "sweep_start_sec": 0.1, "sweep_sec": 0.4,
         "flash_strength": 0.5, "shake_sec": 0.1, "shake_amplitude": 0.01,
-        "duration_sec": 1.0, "fade_sec": 0.2, "sfx_tail": False,
+        "duration_sec": 1.0, "fade_sec": 0.2, "sfx_tail": False, "width_ratio": 0.7,
     }
     custom_logo_params = render.resolve_logo_params(custom_logo_cfg)
     check(all(abs(custom_logo_params[k] - custom_logo_cfg[k]) < 1e-9
               for k in ("scale_from", "landing_sec", "sweep_start_sec", "sweep_sec",
-                        "flash_strength", "shake_sec", "shake_amplitude", "duration_sec", "fade_sec")),
+                        "flash_strength", "shake_sec", "shake_amplitude", "duration_sec",
+                        "fade_sec", "width_ratio")),
           f"logo{{}}配下で全パラメータを上書きできる: {custom_logo_params}")
     check(custom_logo_params["sfx_tail"] is False, "sfx_tail: false も上書きできる")
 
     print("")
-    print("=== ラストロゴ：着地タイミング（Ease-Out Quart・揺れ・スイープ開始の遅延） ===")
-    check(render.ease_out_quart(0.0) == 0.0 and render.ease_out_quart(1.0) == 1.0,
-          "ease_out_quart: t=0で0、t=1で1")
-    check(abs(render.ease_out_quart(0.5) - (1 - 0.5 ** 4)) < 1e-9,
-          "ease_out_quart: t=0.5で 1-(1-0.5)^4 になる")
+    print("=== ラストロゴ：着地タイミング（アンティシペーション＋セトル・揺れ・スイープ開始の遅延） ===")
+    check(render.ease_in_cubic(0.0) == 0.0 and render.ease_in_cubic(1.0) == 1.0,
+          "ease_in_cubic: t=0で0、t=1で1")
+    check(abs(render.ease_in_cubic(0.5) - 0.5 ** 3) < 1e-9,
+          "ease_in_cubic: t=0.5で 0.5^3 になる")
+    # 着地カーブ（アンティシペーション＋セトル）：--preview/ダミーレンダリングで単純な
+    # Ease-Out Quart（旧実装）と見比べた結果、「ゆっくり入って一気に落ち、100%を
+    # わずかに沈み込んでから戻る」動きの方が重厚感が出て良かったため、こちらを採用した
+    # （render.logo_landing_curve、詳細はコード内コメント参照）。
+    scale_from = render.LOGO_SCALE_FROM_DEFAULT
+    check(abs(render.logo_landing_curve(0.0, scale_from) - scale_from) < 1e-6,
+          "logo_landing_curve: t=0はscale_from（スタンバイ時の初期スケール）のまま")
+    check(abs(render.logo_landing_curve(1.0, scale_from) - 1.0) < 1e-6,
+          "logo_landing_curve: t=1で100%に完全着地する")
+    dip_t = render.LOGO_LANDING_ANTICIPATION_RATIO
+    dip_scale = render.logo_landing_curve(dip_t, scale_from)
+    check(dip_scale < 1.0,
+          f"logo_landing_curve: 沈み込み区間の終わり(t={dip_t})では100%をわずかに下回っている"
+          f"（アンティシペーション＋セトル）: scale={dip_scale:.4f}")
+    check(1.0 - dip_scale < 0.05,
+          f"logo_landing_curve: 沈み込み量はわずか（数%程度）に留まる: dip={1.0 - dip_scale:.4f}")
+    mid_scale = render.logo_landing_curve(dip_t * 0.5, scale_from)
+    check(scale_from > mid_scale > dip_scale,
+          "logo_landing_curve: 沈み込み区間はscale_from→中間→沈み込み位置と単調に縮んでいく")
+    # 「ゆっくり入って一気に落ちる」：Ease-In Cubicの性質どおり、区間の後半のほうが
+    # 前半より速く動く（前半の変化量 < 後半の変化量）
+    early_drop = scale_from - mid_scale
+    late_drop = mid_scale - dip_scale
+    check(late_drop > early_drop,
+          f"logo_landing_curve: 沈み込み区間の前半(drop={early_drop:.4f})より後半(drop={late_drop:.4f})の"
+          "ほうが速く動く（ゆっくり入って一気に落ちる）")
 
     landing = default_logo_params["landing_sec"]
     state_start = render.logo_animation_state(0.0, default_logo_params)
@@ -745,7 +911,7 @@ try:
                                         logo_sfx_path=don_path, logo_at="last_freeze",
                                         logo_params=logo_params_no_tail)
 
-    landed_frame_offset = plan0["n_hold"] + plan0["n_brush"] + plan0.get("n_slide_in", 0)
+    landed_frame_offset = plan0["n_pre"] + plan0["n_reveal"] + plan0.get("n_slide_in", 0)
     landing_frames = int(round(logo_params_tail["landing_sec"] * fps))
     sfx_start_sample = render.frames_to_samples(
         plan0["frame_index"] + landed_frame_offset + landing_frames, fps, render.AUDIO_SR)

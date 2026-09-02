@@ -7,8 +7,9 @@
     "fps": 30
   },
   "style": {
-    "freeze_sec": 1.8,
-    "brush_anim_sec": 0.8,
+    "reveal_sec": 0.6,
+    "slide_sec": 0.4,
+    "hold_sec": 2.2,
     "brush_width": 0.12,
     "brush_shape": "round",
     "mono_contrast": 1.3,
@@ -24,8 +25,7 @@
       "distance": 0.03,
       "direction": "auto",
       "offset_y": 0.02,
-      "blur": 0.0,
-      "slide_sec": 0.2
+      "blur": 0.0
     }
   },
   "freezes": [
@@ -83,6 +83,9 @@
       "name": "BLUE GUY",
       "sfx": "don",
       "brush_shape": "hake",
+      "shadow": {
+        "source": "auto"
+      },
       "strokes": [
         {
           "width": 0.09,
@@ -132,6 +135,6 @@
     "image": "store_logo.png",
     "at": "last_freeze",
     "background": "auto",
-    "sfx": "don"
+    "sfx": "impact"
   }
 }
