@@ -462,15 +462,19 @@
     <div class="mask-preview-modal" id="maskPreviewModal" hidden>
       <button type="button" class="mask-preview-close-fixed" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
       <div class="mask-preview-card">
-        <strong>切り抜き結果プレビュー（簡易）</strong>
-        <div class="mask-preview-badge">⚠️ 参考値です。本番の自動切り抜きはこれよりずっと高精度です</div>
-        <div class="muted" id="maskPreviewStatus">解析中…</div>
+        <strong>切り抜き結果プレビュー（サーバー確認）</strong>
+        <div class="mask-preview-badge">本番と同じモデルで実際に切り抜いた結果です（所要1〜2分）</div>
+        <div class="muted" id="maskPreviewStatus">準備中…</div>
+        <div id="maskPreviewProgressWrap" hidden>
+          <div class="progress-track"><div class="progress-fill" id="maskPreviewProgressFill"></div></div>
+        </div>
         <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
+        <button type="button" class="ghost small" id="maskPreviewSkipBtn" hidden>確認せずに進む</button>
         <p class="muted mask-preview-note">
-          端末上・低解像度で行うGrabCut風の簡易推定（中央矩形を前景の手がかり、外周を
-          確実な背景として初期化し、CIE Lab色空間での近さで前景／背景を分類、
-          輪郭のはっきりした境目ではノイズ均しを止める、という簡略版）による目安です。
-          大まかな範囲の確認用としてご利用ください。
+          静止フレーム（長辺1280px程度のJPEG）をサーバーへ送り、本番と同じモデルで
+          自動切り抜きを行った結果をチェッカー柄に重ねて表示します。この確認で使った
+          アルファは保存され、「動画を作る」実行時に同じものをそのまま使います
+          （モデルの再実行によるブレを防ぎます）。
         </p>
       </div>
     </div>
@@ -1866,7 +1870,8 @@ function isFrameInvalid(samples) {
  * ======================================================================== */
 
 /** "job-YYYYMMDD-HHMMSS" 形式のタグ名を作る（UTC基準。端末のタイムゾーンに依存させない） */
-function makeJobTag(date) {
+/** YYYYMMDD-HHMMSS（UTC基準）の部分だけを作る。job-<tag>/job-confirm-<tag>で共通して使う */
+function formatJobTimestamp(date) {
   function pad(n) { return String(n).padStart(2, "0"); }
   var y = date.getUTCFullYear();
   var mo = pad(date.getUTCMonth() + 1);
@@ -1874,7 +1879,21 @@ function makeJobTag(date) {
   var h = pad(date.getUTCHours());
   var mi = pad(date.getUTCMinutes());
   var s = pad(date.getUTCSeconds());
-  return "job-" + y + mo + d + "-" + h + mi + s;
+  return y + mo + d + "-" + h + mi + s;
+}
+
+function makeJobTag(date) {
+  return "job-" + formatJobTimestamp(date);
+}
+
+/**
+ * サーバー確認（extract.yml）用のジョブタグ。cleanup.ymlの"job-*"削除対象に含めるため
+ * 同じprefixにする。短時間に複数のフリーズを続けて確認しても衝突しないよう、
+ * 秒単位のタイムスタンプに加えて短いランダム文字列を付ける。
+ */
+function makeConfirmTag(date, randomSuffix) {
+  var rand = randomSuffix || Math.random().toString(36).slice(2, 6);
+  return "job-confirm-" + formatJobTimestamp(date) + "-" + rand;
 }
 
 /** 元動画のファイル名から、Releaseアセット名 "video.<拡張子>" を作る（無ければ.mp4扱い） */
@@ -1889,6 +1908,62 @@ function logoAssetName(originalFileName) {
   var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
   var ext = m ? m[1].toLowerCase() : "png";
   return "logo." + ext;
+}
+
+/* ---------------- サーバー確認（extract.yml）：静止画1枚だけの軽量な自動切り抜き確認 ---------------- */
+
+/** サーバー確認で送る静止フレームJPEGの長辺（px）。所要時間短縮のため本番出力より小さくする */
+var MASK_PREVIEW_LONG_EDGE_PX = 1280;
+
+/** extract.yml（.github/scripts/extract_and_cache.py）が読むparams.jsonの中身を作る */
+function buildConfirmParams(model, refine, decontaminate, time, outputWidth, outputHeight) {
+  return {
+    model: model,
+    refine: refine || null,
+    decontaminate: !!decontaminate,
+    time: round(numOr(time, 0), 3),
+    output_width: Math.max(2, Math.round(outputWidth)),
+    output_height: Math.max(2, Math.round(outputHeight))
+  };
+}
+
+/**
+ * サーバー確認の結果（render.pyのcache_path_for_alphaと同じ命名規則のアルファキャッシュ）の
+ * Releaseアセット名。render.yml内では動画は常に"video.<拡張子>"という固定名で扱われるため、
+ * 動画名部分は常に"video"になる（extract_and_cache.py参照）。
+ */
+function confirmedAlphaAssetName(time) {
+  return "video_" + Number(time).toFixed(3) + ".npz";
+}
+
+/** 本番jobブランチへコミットする際のパス（render.pyのcache_dir="cache"配下） */
+function confirmedAlphaCachePath(time) {
+  return "cache/" + confirmedAlphaAssetName(time);
+}
+
+/**
+ * フリーズに保存された確認結果（confirmedAlpha）が、現在の状況
+ * （動画ファイル名・フリーズ時刻・自動切り抜きモデル）でもまだ再利用できるかを判定する。
+ * どれか一つでもズレていれば、モデルの再実行に頼らず安全側（false＝再利用しない）にする。
+ */
+function isConfirmedAlphaValid(confirmedAlpha, videoFileName, time, model) {
+  if (!confirmedAlpha) return false;
+  return confirmedAlpha.videoFileName === videoFileName &&
+    Math.abs(numOr(confirmedAlpha.time, NaN) - numOr(time, NaN)) < 1e-6 &&
+    confirmedAlpha.model === model;
+}
+
+/** 出力解像度を、OUTPUT_PRESETS優先／無指定("original")なら動画の実効解像度を偶数に丸めて解決する */
+function resolveTargetOutputDims(outputMode, videoW, videoH) {
+  var preset = OUTPUT_PRESETS[outputMode] || null;
+  if (preset) return { width: preset.width, height: preset.height };
+  return { width: evenDown(videoW), height: evenDown(videoH) };
+}
+
+/** render.pyのeven()と同じ（yuv420pは偶数サイズが必要なため切り捨てて偶数にする） */
+function evenDown(n) {
+  n = Math.floor(numOr(n, 0));
+  return Math.max(0, n - (n % 2));
 }
 
 /**
@@ -1916,6 +1991,46 @@ function buildReleasePayload(tag) {
 /** workflow_dispatch APIに送るボディを組み立てる */
 function buildDispatchPayload(ref, tag) {
   return { ref: ref, inputs: { tag: tag } };
+}
+
+/**
+ * サーバー確認（extract.yml）で切り抜き済みのアルファがあるフリーズについて、確認時の
+ * Releaseから該当アセット（video_<time>.npz）を取得し、本番jobブランチへ
+ * cache/video_<time>.npz としてコミットするためのtreeエントリを作る。
+ * render.pyのget_or_extract_alphaは、このファイルが本番の出力解像度と一致していれば
+ * そのまま再利用しモデルを再実行しない（render.py側の変更は不要）。
+ * 確認結果が既にReleaseから無くなっている場合（cleanup.ymlによる7日後の自動削除等）は、
+ * そのフリーズだけ静かにスキップする（本番レンダリングはモデルの再実行にフォールバックする）。
+ */
+function reuseConfirmedAlphaForFreezes(user, repo, token, freezes, videoFileName, model, onProgress) {
+  var targets = (freezes || []).filter(function (fz) {
+    return isConfirmedAlphaValid(fz.confirmedAlpha, videoFileName, fz.time, model);
+  });
+  var entries = [];
+  var chain = Promise.resolve();
+  targets.forEach(function (fz, i) {
+    chain = chain
+      .then(function () { return ghGetReleaseByTag(user, repo, token, fz.confirmedAlpha.tag); })
+      .catch(function () { return null; })
+      .then(function (rel) {
+        var asset = rel && findReleaseAsset(rel.assets, confirmedAlphaAssetName(fz.time));
+        if (!asset) return null;
+        return ghDownloadReleaseAsset(user, repo, token, asset.id);
+      })
+      .then(function (arrayBuffer) {
+        if (!arrayBuffer) return null;
+        return blobToBase64(new Blob([arrayBuffer]));
+      })
+      .then(function (base64) {
+        if (!base64) return null;
+        return ghCreateBlob(user, repo, token, base64);
+      })
+      .then(function (blob) {
+        if (blob) entries.push({ path: confirmedAlphaCachePath(fz.time), sha: blob.sha });
+        if (onProgress) onProgress(i + 1, targets.length);
+      });
+  });
+  return chain.then(function () { return entries; });
 }
 
 /** Git Data API の blob 作成に送るボディを組み立てる（contentは生のbase64文字列、data:プレフィックス無し） */
@@ -1952,8 +2067,8 @@ function buildGitRefPayload(branchName, commitSha) {
  * workflow_dispatch はrun idを直接返さないAPI仕様のための埋め合わせ。
  * 複数一致した場合は最も新しい(created_atが新しい)ものを返す。
  */
-function findMatchingRun(runs, tag) {
-  var expectedName = "render " + tag;
+function findMatchingRun(runs, tag, namePrefix) {
+  var expectedName = (namePrefix || "render") + " " + tag;
   var matches = (runs || []).filter(function (r) { return r && r.name === expectedName; });
   if (matches.length === 0) return null;
   matches.sort(function (a, b) {
@@ -2070,6 +2185,15 @@ if (typeof module !== "undefined" && module.exports) {
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
+    makeConfirmTag: makeConfirmTag,
+    formatJobTimestamp: formatJobTimestamp,
+    buildConfirmParams: buildConfirmParams,
+    confirmedAlphaAssetName: confirmedAlphaAssetName,
+    confirmedAlphaCachePath: confirmedAlphaCachePath,
+    isConfirmedAlphaValid: isConfirmedAlphaValid,
+    resolveTargetOutputDims: resolveTargetOutputDims,
+    evenDown: evenDown,
+    MASK_PREVIEW_LONG_EDGE_PX: MASK_PREVIEW_LONG_EDGE_PX,
     videoAssetName: videoAssetName,
     MAX_BLOB_BYTES: MAX_BLOB_BYTES,
     exceedsBlobLimit: exceedsBlobLimit,
@@ -2369,6 +2493,7 @@ function init() {
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
     "maskModeSelect", "autoMaskHint", "brushEditModeRow", "brushModeAddBtn", "brushModeEraseBtn",
     "maskPreviewBtn", "maskPreviewModal", "maskPreviewCanvas", "maskPreviewStatus", "maskPreviewCloseBtn",
+    "maskPreviewProgressWrap", "maskPreviewProgressFill", "maskPreviewSkipBtn",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
     "nameInput", "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
@@ -2458,6 +2583,7 @@ function init() {
   els.previewBtn.addEventListener("click", togglePreviewPlayback);
   els.maskPreviewBtn.addEventListener("click", showMaskPreview);
   els.maskPreviewCloseBtn.addEventListener("click", closeMaskPreview);
+  els.maskPreviewSkipBtn.addEventListener("click", closeMaskPreview);
   // モーダル背景（カードの外側）をタップしても閉じられるようにする
   els.maskPreviewModal.addEventListener("click", function (e) {
     if (e.target === els.maskPreviewModal) closeMaskPreview();
@@ -3774,110 +3900,270 @@ function escapeHtml(s) {
   });
 }
 
-/* ---------------- 切り抜き結果の簡易プレビュー ---------------- */
-/* 自動切り抜き（rembg）はサーバー側でしか実行できず、編集中は結果が全く見えない
- * という問題への対策。端末上・低解像度でGrabCut風の簡易推定（estimateForegroundMaskCoarse、
- * core-logic参照）を行い、「本番はこれより高精度」と明示した上で目安として表示する。 */
+/* ---------------- 切り抜き結果のサーバー確認 ---------------- */
+/* 自動切り抜き（rembg）はサーバー側でしか実行できず、編集中は結果が全く見えないという
+ * 問題への対策。静止フレームをJPEG（長辺1280px程度）にしてjobブランチへコミットし、
+ * 本番と同じモデルだけを動かす軽量ワークフロー（extract.yml）をdispatch、結果の
+ * preview.png（チェッカー合成）を取得して画面に重ねて表示する。確認で得たアルファは
+ * Releaseに保持され、「動画を作る」実行時に同じものを再利用する（モデルの再実行を防ぐ）。 */
 
 // このモーダルを開いた時点のdraft（フリーズ）を覚えておき、閉じずに別フリーズの
-// 編集へ移ってしまった場合でも古い結果を表示し続けないようにする（下のcloseMaskPreview参照）。
+// 編集へ移ってしまった場合でも古い結果を反映し続けないようにする（下のcloseMaskPreview参照）。
 var maskPreviewOpenedForDraft = null;
+// 表示中のpreview.png用blob URL（closeMaskPreview/releaseMaskPreviewCanvasで確実に解放する）。
+var maskPreviewObjectURL = null;
+// モーダルを開く・閉じるたびに変わるトークン。非同期処理の各ステップはこれを見て、
+// 既に閉じられた／別フリーズに切り替わった確認結果を古いまま反映しないようにする。
+var maskPreviewAbortToken = 0;
 
 function showMaskPreview() {
   if (!frozenFrameCanvas) {
     showError("静止フレームがまだ用意できていません。少し待ってからもう一度お試しください。");
     return;
   }
-  maskPreviewOpenedForDraft = draft;
-  els.maskPreviewModal.hidden = false;
-  els.maskPreviewStatus.textContent = "解析中…";
-  els.maskPreviewCanvas.width = 1;
-  els.maskPreviewCanvas.height = 1;
+  var user = els.ghUserInput.value.trim();
+  var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
+  var token = els.ghTokenInput.value.trim();
+  if (!user || !token) {
+    showError("GitHub連携の設定（ユーザー名・トークン）を入力してください");
+    els.ghSettingsDetails.open = true;
+    return;
+  }
 
-  // 「解析中…」が実際に画面に描画されてから重い処理に入れるよう、
-  // 2回のrequestAnimationFrameでレイアウト/ペイントを待ってから計算する
-  // （数秒かかる端末でも、進捗表示が固まって見えないようにするため）。
-  requestAnimationFrame(function () {
-    requestAnimationFrame(function () {
-      try {
-        runMaskPreviewAnalysis();
-      } catch (err) {
-        els.maskPreviewStatus.textContent = "解析に失敗しました: " + (err && err.message ? err.message : err);
-      }
-    });
+  maskPreviewOpenedForDraft = draft;
+  maskPreviewAbortToken += 1;
+  var myToken = maskPreviewAbortToken;
+
+  els.maskPreviewModal.hidden = false;
+  releaseMaskPreviewCanvas();
+  els.maskPreviewStatus.textContent = "準備中…";
+  els.maskPreviewProgressWrap.hidden = false;
+  setMaskPreviewProgress(1);
+  els.maskPreviewSkipBtn.hidden = false;
+
+  runServerMaskPreview(myToken, user, repo, token, draft).catch(function (err) {
+    if (myToken !== maskPreviewAbortToken) return;
+    if (err && err.message === "__aborted__") return;
+    els.maskPreviewProgressWrap.hidden = true;
+    els.maskPreviewStatus.textContent = "確認に失敗しました: " + (err && err.message ? err.message : err) +
+      "（「確認せずに進む」でこのまま編集を続けられます）";
+  });
+}
+
+function setMaskPreviewProgress(pct) {
+  els.maskPreviewProgressFill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+}
+
+/**
+ * プレビューcanvasのバッキングストアとpreview.png用blob URLを解放する。
+ * iOS Safariはcanvasの裏画像メモリをGCまかせにすると解放が遅れがちで、繰り返し開閉すると
+ * メモリ不足でページごと落ちることがあるため、参照を外すだけでなくwidth/heightを0にして
+ * 即座に解放する。
+ */
+function releaseMaskPreviewCanvas() {
+  els.maskPreviewCanvas.width = 0;
+  els.maskPreviewCanvas.height = 0;
+  if (maskPreviewObjectURL) { URL.revokeObjectURL(maskPreviewObjectURL); maskPreviewObjectURL = null; }
+}
+
+/** モーダルを閉じ、進行中の確認処理を無効化する（✕ボタン・Esc・モーダル外タップ・フリーズの切り替え、すべてここを通る） */
+function closeMaskPreview() {
+  els.maskPreviewModal.hidden = true;
+  releaseMaskPreviewCanvas();
+  els.maskPreviewProgressWrap.hidden = true;
+  els.maskPreviewSkipBtn.hidden = true;
+  maskPreviewOpenedForDraft = null;
+  maskPreviewAbortToken += 1; // 進行中のポーリング等を打ち切る（GitHub Actions側の実行自体は止めない）
+}
+
+/** frozenFrameCanvasを、長辺maxLongEdge px程度に縮小したJPEG Blobにする */
+function frozenFrameToJpegBlob(maxLongEdge) {
+  var srcW = frozenFrameCanvas.width, srcH = frozenFrameCanvas.height;
+  if (!srcW || !srcH) return Promise.reject(new Error("静止フレームの画像サイズが取得できませんでした。"));
+  var scale = Math.min(1, maxLongEdge / Math.max(srcW, srcH));
+  var w = Math.max(1, Math.round(srcW * scale));
+  var h = Math.max(1, Math.round(srcH * scale));
+  var tmp = document.createElement("canvas");
+  tmp.width = w; tmp.height = h;
+  tmp.getContext("2d").drawImage(frozenFrameCanvas, 0, 0, w, h);
+  return new Promise(function (resolve, reject) {
+    tmp.toBlob(function (blob) {
+      tmp.width = 0; tmp.height = 0;
+      if (blob) resolve(blob); else reject(new Error("静止フレームのJPEG変換に失敗しました。"));
+    }, "image/jpeg", 0.88);
+  });
+}
+
+/** 画像URLを読み込み、幅最大720pxに収めてmaskPreviewCanvasへ描画する */
+function drawMaskPreviewImage(url) {
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    img.onload = function () {
+      var dispW = Math.min(720, img.naturalWidth || 720);
+      var scale = img.naturalWidth ? dispW / img.naturalWidth : 1;
+      var dispH = Math.round((img.naturalHeight || dispW) * scale);
+      els.maskPreviewCanvas.width = dispW;
+      els.maskPreviewCanvas.height = dispH;
+      els.maskPreviewCanvas.getContext("2d").drawImage(img, 0, 0, dispW, dispH);
+      resolve();
+    };
+    img.onerror = function () { reject(new Error("プレビュー画像の表示に失敗しました。")); };
+    img.src = url;
   });
 }
 
 /**
- * プレビューモーダルを閉じ、確保していたcanvasのバッキングストアを明示的に解放する。
- * iOS Safariはcanvasの裏画像メモリをGCまかせにすると解放が遅れがちで、繰り返し開閉すると
- * メモリ不足でページごと落ちることがあるため、参照を外すだけでなくwidth/heightを0にして
- * 即座に解放する（✕ボタン・Esc・モーダル外タップ・フリーズの切り替え、すべてここを通る）。
+ * サーバー確認の本体。静止フレームJPEG＋paramsをjob-confirm-<tag>ブランチへコミットし、
+ * extract.yml をdispatch、完了を待ってpreview.pngを取得・表示する。成功時は
+ * draft.confirmedAlpha に確認結果（動画名・時刻・モデル・タグ・アセット名）を記録し、
+ * 「動画を作る」実行時に同じアルファを再利用できるようにする（reuseConfirmedAlphaForFreezes参照）。
  */
-function closeMaskPreview() {
-  els.maskPreviewModal.hidden = true;
-  els.maskPreviewCanvas.width = 0;
-  els.maskPreviewCanvas.height = 0;
-  maskPreviewOpenedForDraft = null;
-}
+function runServerMaskPreview(myToken, user, repo, token, targetDraft) {
+  var model = resolveMaskModel(appState.maskModel);
+  var videoDims = getEffectiveVideoDims();
+  var dims = resolveTargetOutputDims(appState.outputMode, videoDims.width, videoDims.height);
+  var tag = makeConfirmTag(new Date());
+  var freezeTime = targetDraft.time;
 
-function runMaskPreviewAnalysis() {
-  // モーダルが閉じられていたり、開いた後に別フリーズの編集へ切り替わっていたりしたら、
-  // 古い（または今はもう存在しない）静止フレームを解析・表示しない
-  if (els.maskPreviewModal.hidden || draft !== maskPreviewOpenedForDraft) return;
+  var baseCommitSha = null;
+  var frameBlobSha = null;
+  var paramsBlobSha = null;
 
-  var srcW = frozenFrameCanvas.width, srcH = frozenFrameCanvas.height;
-  if (!srcW || !srcH) {
-    els.maskPreviewStatus.textContent = "静止フレームの画像サイズが取得できませんでした。";
-    return;
+  function checkAbort() {
+    if (myToken !== maskPreviewAbortToken) throw new Error("__aborted__");
   }
 
-  // 低解像度に縮小して解析する（長辺を最大260pxに。フル解像度のImageDataは
-  // 一度も保持しない＝常にこの縮小後のサイズだけを扱う）
-  var MAX_DIM = 260;
-  var scale = Math.min(1, MAX_DIM / Math.max(srcW, srcH));
-  var W = Math.max(2, Math.round(srcW * scale));
-  var H = Math.max(2, Math.round(srcH * scale));
-
-  // 解析用の一時canvasは使い終わったら即座にwidth=0で解放する（下記のwork/overlayとも）
-  var work = document.createElement("canvas");
-  work.width = W; work.height = H;
-  var wctx = work.getContext("2d");
-  wctx.drawImage(frozenFrameCanvas, 0, 0, W, H);
-  var imageData = wctx.getImageData(0, 0, W, H);
-  work.width = 0; work.height = 0;
-
-  var mask = estimateForegroundMaskCoarse(imageData.data, W, H);
-  imageData = null;
-
-  // 表示：静止フレームをそのまま描き、推定した前景マスクをシアン半透明で重ねる
-  // （表示側も常に縮小解像度＝最大720px幅に留める。frozenFrameCanvas自体のコピーは作らない）
-  var dispW = Math.min(720, srcW);
-  var dispScale = dispW / srcW;
-  var dispH = Math.round(srcH * dispScale);
-  els.maskPreviewCanvas.width = dispW;
-  els.maskPreviewCanvas.height = dispH;
-  var dctx = els.maskPreviewCanvas.getContext("2d");
-  dctx.drawImage(frozenFrameCanvas, 0, 0, dispW, dispH);
-
-  var overlay = document.createElement("canvas");
-  overlay.width = W; overlay.height = H;
-  var octx = overlay.getContext("2d");
-  var overlayData = octx.createImageData(W, H);
-  for (var i = 0; i < mask.length; i++) {
-    var o = i * 4;
-    if (mask[i]) {
-      overlayData.data[o] = 0; overlayData.data[o + 1] = 220; overlayData.data[o + 2] = 255; overlayData.data[o + 3] = 130;
-    } else {
-      overlayData.data[o + 3] = 0;
-    }
-  }
-  octx.putImageData(overlayData, 0, 0);
-  dctx.imageSmoothingEnabled = false;
-  dctx.drawImage(overlay, 0, 0, dispW, dispH);
-  overlay.width = 0; overlay.height = 0;
-
-  els.maskPreviewStatus.textContent = "解析完了（" + W + "x" + H + "px・簡易推定。シアン色の部分が推定した被写体の範囲）";
+  return frozenFrameToJpegBlob(MASK_PREVIEW_LONG_EDGE_PX)
+    .then(function (jpegBlob) {
+      checkAbort();
+      els.maskPreviewStatus.textContent = "リリースを作成中…";
+      setMaskPreviewProgress(4);
+      return ghCreateRelease(user, repo, token, tag).then(function () { return jpegBlob; });
+    })
+    .then(function (jpegBlob) {
+      checkAbort();
+      els.maskPreviewStatus.textContent = "コミット先ブランチの情報を取得中…";
+      setMaskPreviewProgress(8);
+      return ghGetRef(user, repo, token, "heads/main").then(function (refInfo) {
+        baseCommitSha = refInfo.object.sha;
+        return jpegBlob;
+      });
+    })
+    .then(function (jpegBlob) {
+      checkAbort();
+      els.maskPreviewStatus.textContent = "静止フレームをアップロード中…";
+      setMaskPreviewProgress(12);
+      return blobToBase64(jpegBlob);
+    })
+    .then(function (base64) {
+      checkAbort();
+      return ghCreateBlob(user, repo, token, base64);
+    })
+    .then(function (blob) {
+      checkAbort();
+      frameBlobSha = blob.sha;
+      els.maskPreviewStatus.textContent = "パラメータをアップロード中…";
+      setMaskPreviewProgress(16);
+      var params = buildConfirmParams(model, null, false, freezeTime, dims.width, dims.height);
+      var paramsBlob = new Blob([JSON.stringify(params)], { type: "application/json" });
+      return blobToBase64(paramsBlob);
+    })
+    .then(function (base64) {
+      checkAbort();
+      return ghCreateBlob(user, repo, token, base64);
+    })
+    .then(function (blob) {
+      checkAbort();
+      paramsBlobSha = blob.sha;
+      setMaskPreviewProgress(20);
+      return ghGetCommit(user, repo, token, baseCommitSha);
+    })
+    .then(function (baseCommit) {
+      checkAbort();
+      var entries = [
+        { path: "frame.jpg", sha: frameBlobSha },
+        { path: "params.json", sha: paramsBlobSha }
+      ];
+      return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
+    })
+    .then(function (tree) {
+      checkAbort();
+      return ghCreateCommit(user, repo, token, "spotlight-reel editor (confirm): " + tag, tree.sha, baseCommitSha);
+    })
+    .then(function (commit) {
+      checkAbort();
+      return ghCreateBranchRef(user, repo, token, tag, commit.sha);
+    })
+    .then(function () {
+      checkAbort();
+      els.maskPreviewStatus.textContent = "確認を開始しています…";
+      setMaskPreviewProgress(24);
+      return ghDispatchWorkflow(user, repo, token, tag, "extract.yml");
+    })
+    .then(function () {
+      checkAbort();
+      els.maskPreviewStatus.textContent = "起動を待っています…";
+      return pollForRun(user, repo, token, tag, function (n, max) {
+        if (myToken !== maskPreviewAbortToken) return;
+        setMaskPreviewProgress(24 + (n / max) * 10);
+        els.maskPreviewStatus.textContent = "起動を待っています…（" + n + "/" + max + "）";
+      }, "extract.yml", "extract");
+    })
+    .then(function (run) {
+      checkAbort();
+      if (!run) {
+        throw new Error("確認ジョブの起動を確認できませんでした。GitHub Actions側では実行されている可能性があります。");
+      }
+      els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（1〜2分程度）";
+      return pollRunUntilDone(user, repo, token, run.id, function (n, max) {
+        if (myToken !== maskPreviewAbortToken) return;
+        setMaskPreviewProgress(34 + (n / max) * 55);
+        els.maskPreviewStatus.textContent = "サーバーで切り抜き中…（経過約" + (n * 5) + "秒）";
+      });
+    })
+    .then(function (finalRun) {
+      checkAbort();
+      var status = interpretRunStatus(finalRun);
+      if (status !== "success") {
+        var logsUrl = finalRun.html_url || ("https://github.com/" + user + "/" + repo + "/actions");
+        throw new Error("確認に失敗しました。ログを確認してください: " + logsUrl);
+      }
+      setMaskPreviewProgress(92);
+      els.maskPreviewStatus.textContent = "結果を取得しています…";
+      return ghGetReleaseByTag(user, repo, token, tag);
+    })
+    .then(function (rel) {
+      checkAbort();
+      var previewAsset = findReleaseAsset(rel.assets, "preview.png");
+      if (!previewAsset) {
+        throw new Error("preview.pngが見つかりませんでした。Releaseページで確認してください: " + rel.html_url);
+      }
+      var cacheAsset = findReleaseAsset(rel.assets, confirmedAlphaAssetName(freezeTime));
+      setMaskPreviewProgress(96);
+      return ghDownloadReleaseAsset(user, repo, token, previewAsset.id).then(function (arrayBuffer) {
+        return { arrayBuffer: arrayBuffer, cacheAsset: cacheAsset };
+      });
+    })
+    .then(function (result) {
+      checkAbort();
+      var blob = new Blob([result.arrayBuffer], { type: "image/png" });
+      maskPreviewObjectURL = URL.createObjectURL(blob);
+      return drawMaskPreviewImage(maskPreviewObjectURL).then(function () {
+        setMaskPreviewProgress(100);
+        els.maskPreviewProgressWrap.hidden = true;
+        els.maskPreviewSkipBtn.hidden = true;
+        els.maskPreviewStatus.textContent = "確認完了（本番と同じモデルでの切り抜き結果です。チェッカー柄の部分が透明＝背景です）";
+        if (targetDraft && result.cacheAsset) {
+          targetDraft.confirmedAlpha = {
+            videoFileName: appState.videoFileName,
+            time: freezeTime,
+            model: model,
+            tag: tag
+          };
+          saveToLocalStorage();
+        }
+      });
+    });
 }
 
 /* ---------------- 簡易プレビュー再生 ---------------- */
@@ -4791,8 +5077,9 @@ function ghCreateRelease(user, repo, token, tag) {
   });
 }
 
-function ghDispatchWorkflow(user, repo, token, tag) {
-  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/render.yml/dispatches", token, {
+function ghDispatchWorkflow(user, repo, token, tag, workflowFile) {
+  workflowFile = workflowFile || "render.yml";
+  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/" + workflowFile + "/dispatches", token, {
     method: "POST",
     body: JSON.stringify(buildDispatchPayload("main", tag))
   });
@@ -4802,8 +5089,34 @@ function ghGetReleaseByTag(user, repo, token, tag) {
   return ghFetchJson(ghApiBase(user, repo) + "/releases/tags/" + encodeURIComponent(tag), token, {});
 }
 
-function ghListWorkflowRuns(user, repo, token) {
-  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/render.yml/runs?event=workflow_dispatch&per_page=15", token, {})
+/**
+ * 非公開リポジトリのReleaseアセットの中身（バイナリ）を取得する。
+ * browser_download_urlへの直接ナビゲーションはユーザーの通常ブラウズ用（ログイン済み
+ * ブラウザ前提でCORS対象外）なので、ページ内で内容を取り込んで表示する（プレビュー画像の
+ * 重ね合わせ等）には、認証ヘッダ付きでAPIのアセットエンドポイントをAccept:application/
+ * octet-streamで叩く必要がある。
+ */
+function ghDownloadReleaseAsset(user, repo, token, assetId) {
+  var url = ghApiBase(user, repo) + "/releases/assets/" + assetId;
+  return fetch(url, {
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Accept": "application/octet-stream",
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  }).then(function (res) {
+    if (!res.ok) {
+      return res.text().then(function (text) {
+        throw new Error("Releaseアセットの取得に失敗しました (" + res.status + "): " + (text || res.status));
+      });
+    }
+    return res.arrayBuffer();
+  });
+}
+
+function ghListWorkflowRuns(user, repo, token, workflowFile) {
+  workflowFile = workflowFile || "render.yml";
+  return ghFetchJson(ghApiBase(user, repo) + "/actions/workflows/" + workflowFile + "/runs?event=workflow_dispatch&per_page=15", token, {})
     .then(function (data) { return (data && data.workflow_runs) || []; });
 }
 
@@ -4916,13 +5229,13 @@ function ghCreateBlob(user, repo, token, base64Content, onProgress) {
  * それでも見つからない場合はエラーにはせず null を返す（GitHub側では実行されている
  * 可能性が高いため、失敗扱いにしてしまうと誤解を招く）。
  */
-function pollForRun(user, repo, token, tag, onAttempt) {
+function pollForRun(user, repo, token, tag, onAttempt, workflowFile, namePrefix) {
   var maxAttempts = 19; // 5秒間隔 x 19 = 最低90秒待つ
   var intervalMs = 5000;
   function attempt(n) {
     if (onAttempt) onAttempt(n, maxAttempts);
-    return ghListWorkflowRuns(user, repo, token).then(function (runs) {
-      var match = findMatchingRun(runs, tag);
+    return ghListWorkflowRuns(user, repo, token, workflowFile).then(function (runs) {
+      var match = findMatchingRun(runs, tag, namePrefix);
       if (match) return match;
       if (n >= maxAttempts) return null;
       return wait(intervalMs).then(function () { return attempt(n + 1); });
@@ -5067,6 +5380,7 @@ function runMakeVideoJobUpload() {
   var releaseInfo = null;
   var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
   var sfxTreeEntries = [];
+  var confirmedAlphaTreeEntries = [];
 
   setJobButtonBusy(true);
   showJobProgress(2, "リリースを作成中…");
@@ -5132,6 +5446,18 @@ function runMakeVideoJobUpload() {
       return chain;
     })
     .then(function () {
+      // サーバー確認済みのフリーズがあれば、そのアルファキャッシュを本番jobブランチへ
+      // 同梱する（モデルの再実行を防ぐ）。無ければ即座に空配列で解決する。
+      showJobProgress(87.5, "確認済みの切り抜き結果を引き継いでいます…");
+      return reuseConfirmedAlphaForFreezes(
+        user, repo, token, appState.freezes, appState.videoFileName, resolveMaskModel(appState.maskModel),
+        function (n, max) {
+          showJobProgress(87.5, "確認済みの切り抜き結果を引き継いでいます…（" + n + "/" + max + "）");
+        }
+      );
+    })
+    .then(function (entries) {
+      confirmedAlphaTreeEntries = entries;
       showJobProgress(88, "コミットを作成中…");
       return ghGetCommit(user, repo, token, baseCommitSha);
     })
@@ -5143,7 +5469,7 @@ function runMakeVideoJobUpload() {
       if (logoFile && logoBlobSha) {
         entries.push({ path: logoAssetName(logoFile.name), sha: logoBlobSha });
       }
-      entries = entries.concat(sfxTreeEntries);
+      entries = entries.concat(sfxTreeEntries).concat(confirmedAlphaTreeEntries);
       return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
     })
     .then(function (tree) {

@@ -21,6 +21,7 @@ import path from "node:path";
 import os from "node:os";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +77,240 @@ function check(cond, label) {
   else { failed++; console.log("  NG - " + label); }
 }
 
+/* ---------------- サーバー確認（extract.yml）用の api.github.com モック ----------------
+ * 「切り抜き結果を確認」は、静止フレームJPEG＋params.jsonをjob-confirm-<tag>ブランチへ
+ * コミットし、extract.ymlをdispatch・ポーリングし、完了したらpreview.pngを取得して
+ * 画面に表示する（実装はrunServerMaskPreview、index.html参照）。ここではapi.github.comへの
+ * 通信を全てモックし、実際のGitHub Actionsを起動せずにこのフロー全体を検証する。 */
+
+const CONFIRM_OWNER = "Digital-twin-creator";
+const CONFIRM_REPO = "spotlight-jobs";
+const CONFIRM_TOKEN = "github_pat_test_dummy_token";
+
+const CONFIRM_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+};
+
+/** テスト用に、width x height の単色RGB PNGバイナリを組み立てる（preview.pngダウンロード検証用。画素の中身は無関係）。 */
+function makeTestPng(width, height) {
+  function chunk(type, data) {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const typeData = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeInt32BE(crc32(typeData), 0);
+    return Buffer.concat([len, typeData, crc]);
+  }
+  function crc32(buf) {
+    const table = crc32.table || (crc32.table = (() => {
+      const t = new Int32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        t[n] = c;
+      }
+      return t;
+    })());
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) c = table[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) | 0;
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0; // 8bit, RGB, no interlace
+  const rowBytes = 1 + width * 3;
+  const raw = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * rowBytes] = 0; // フィルタなし
+    for (let x = 0; x < width; x++) {
+      const off = y * rowBytes + 1 + x * 3;
+      raw[off] = 200; raw[off + 1] = 200; raw[off + 2] = 200;
+    }
+  }
+  const idat = zlib.deflateSync(raw);
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  return Buffer.concat([signature, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
+}
+
+const TEST_PREVIEW_PNG = makeTestPng(16, 16);
+
+function makeConfirmMock(overrides) {
+  return Object.assign({
+    tag: null, runId: 777001,
+    createReleaseCalls: 0, getRefCalls: 0, getCommitCalls: 0,
+    blobCalls: 0, createTreeCalls: 0, createCommitCalls: 0, createRefCalls: 0,
+    dispatchCalls: 0, listRunsCalls: 0, getRunCalls: 0, getReleaseByTagCalls: 0,
+    downloadAssetCalls: 0,
+    matchRunAfterCalls: 1,
+    runStatusSequence: [{ status: "completed", conclusion: "success" }],
+    includeCacheAsset: true,
+    cacheAssetTimeLabel: null, // 例: "1.500"（省略時はリクエストされたparams.jsonのtimeから自動決定）
+  }, overrides);
+}
+
+/** api.github.com 宛のリクエストを全て、extract.yml確認フローに沿ってモックで返すルートハンドラを作る */
+function makeConfirmMockRouter(mock) {
+  return async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    const pathname = url.pathname;
+
+    if (method === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CONFIRM_CORS_HEADERS, body: "" });
+      return;
+    }
+
+    const m = /^\/repos\/([^/]+)\/([^/]+)\//.exec(pathname);
+    const owner = m ? m[1] : CONFIRM_OWNER;
+    const repo = m ? m[2] : CONFIRM_REPO;
+    const json = (status, obj) => route.fulfill({
+      status, headers: { ...CONFIRM_CORS_HEADERS, "content-type": "application/json" }, body: JSON.stringify(obj),
+    });
+
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/releases`) {
+      mock.createReleaseCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      // 1回のテストファイル内で複数回「確認」する（＝複数回Releaseを作る）ため、
+      // 常に最新のtagで上書きする（以降のrun一覧/Release取得はこのtagで一致判定する）。
+      mock.tag = body.tag_name;
+      return json(201, {
+        id: 1, tag_name: body.tag_name,
+        html_url: `https://github.com/${owner}/${repo}/releases/tag/${body.tag_name}`,
+      });
+    }
+
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/git/ref/heads/main`) {
+      mock.getRefCalls++;
+      return json(200, { ref: "refs/heads/main", object: { sha: "base-commit-sha", type: "commit" } });
+    }
+
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/git/commits/base-commit-sha`) {
+      mock.getCommitCalls++;
+      return json(200, { sha: "base-commit-sha", tree: { sha: "base-tree-sha" } });
+    }
+
+    // POST .../git/blobs … frame.jpg（1回目）・params.json（2回目）
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/blobs`) {
+      mock.blobCalls++;
+      if (mock.blobCalls === 2) {
+        // params.json のblob。中身からtime（フリーズのtime）を読み取り、
+        // アルファキャッシュのアセット名（video_<time>.npz）を決めるのに使う。
+        let body = {};
+        try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+        try {
+          const params = JSON.parse(Buffer.from(body.content || "", "base64").toString("utf-8"));
+          mock.lastParamsTime = params.time;
+        } catch (e) { /* 無視 */ }
+      }
+      return json(201, { sha: "blob-sha-" + mock.blobCalls });
+    }
+
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/trees`) {
+      mock.createTreeCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      mock.treePayload = body;
+      return json(201, { sha: "new-tree-sha" });
+    }
+
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/commits`) {
+      mock.createCommitCalls++;
+      return json(201, { sha: "new-commit-sha" });
+    }
+
+    if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/refs`) {
+      mock.createRefCalls++;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      mock.refPayload = body;
+      return json(201, { ref: body.ref, object: { sha: body.sha } });
+    }
+
+    if (method === "POST" && /\/actions\/workflows\/extract\.yml\/dispatches$/.test(pathname)) {
+      mock.dispatchCalls++;
+      await route.fulfill({ status: 204, headers: CONFIRM_CORS_HEADERS, body: "" });
+      return;
+    }
+
+    if (method === "GET" && /\/actions\/workflows\/extract\.yml\/runs$/.test(pathname)) {
+      mock.listRunsCalls++;
+      const runs = mock.listRunsCalls >= mock.matchRunAfterCalls
+        ? [{
+            id: mock.runId,
+            name: "extract " + mock.tag,
+            status: mock.runStatusSequence[0].status,
+            conclusion: mock.runStatusSequence[0].conclusion,
+            created_at: new Date().toISOString(),
+            html_url: `https://github.com/${owner}/${repo}/actions/runs/${mock.runId}`,
+          }]
+        : [];
+      return json(200, { workflow_runs: runs });
+    }
+
+    const runStatusMatch = /\/actions\/runs\/(\d+)$/.exec(pathname);
+    if (method === "GET" && runStatusMatch) {
+      mock.getRunCalls++;
+      const idx = Math.min(mock.getRunCalls - 1, mock.runStatusSequence.length - 1);
+      const state = mock.runStatusSequence[idx];
+      return json(200, {
+        id: mock.runId, status: state.status, conclusion: state.conclusion,
+        html_url: `https://github.com/${owner}/${repo}/actions/runs/${mock.runId}`,
+      });
+    }
+
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/tags/${mock.tag}`) {
+      mock.getReleaseByTagCalls++;
+      const timeLabel = mock.cacheAssetTimeLabel || Number(mock.lastParamsTime || 0).toFixed(3);
+      const assets = [{ name: "preview.png", id: 501 }];
+      if (mock.includeCacheAsset) assets.push({ name: `video_${timeLabel}.npz`, id: 502 });
+      return json(200, {
+        tag_name: mock.tag,
+        html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
+        assets,
+      });
+    }
+
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/501`) {
+      mock.downloadAssetCalls++;
+      await route.fulfill({
+        status: 200,
+        headers: { ...CONFIRM_CORS_HEADERS, "content-type": "image/png" },
+        body: TEST_PREVIEW_PNG,
+      });
+      return;
+    }
+
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/502`) {
+      mock.downloadAssetCalls++;
+      await route.fulfill({
+        status: 200,
+        headers: { ...CONFIRM_CORS_HEADERS, "content-type": "application/octet-stream" },
+        body: Buffer.from([0, 1, 2, 3]), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+      });
+      return;
+    }
+
+    console.log("  [警告] モックされていない確認フローAPIリクエスト: " + method + " " + pathname);
+    await route.fulfill({ status: 404, headers: CONFIRM_CORS_HEADERS, body: "{}" });
+  };
+}
+
+async function routeConfirmApiGithub(page, mock) {
+  await page.route("https://api.github.com/**", makeConfirmMockRouter(mock));
+}
+
+async function fillConfirmGhSettings(page) {
+  await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
+  await page.fill("#ghUserInput", CONFIRM_OWNER);
+  await page.fill("#ghRepoInput", CONFIRM_REPO);
+  await page.fill("#ghTokenInput", CONFIRM_TOKEN);
+}
+
 /** drawCanvas上でマウスドラッグして1本ストロークを描く（x0/y0〜x1/y1は矩形に対する比率） */
 async function dragStroke(page, box, rx0, ry0, rx1, ry1) {
   const x0 = box.x + box.width * rx0, y0 = box.y + box.height * ry0;
@@ -123,6 +358,13 @@ async function main() {
   // 両方の試行タイミングにぶつかり、静止フレーム取得に失敗することがある。
   await page.waitForTimeout(300);
 
+  // 「切り抜き結果を確認」は本番と同じモデルでのサーバー確認（extract.ymlのdispatch）に
+  // 置き換わっているため、このファイル全体を通してGitHub連携設定を入力し、
+  // api.github.comへの通信をモックしておく（実際のGitHub Actionsは起動しない）。
+  const confirmMock = makeConfirmMock();
+  await routeConfirmApiGithub(page, confirmMock);
+  await fillConfirmGhSettings(page);
+
   console.log("=== 影：旧v1形式のlocalStorageデータ(影OFF)は無視され、新しい既定値(影ON)が使われる ===");
   check((await page.evaluate(() => appState.shadowEnabled)) === true,
     "同名動画で保存されていた旧v1データ(影OFF)があっても、appState.shadowEnabledは新しい既定値trueのまま");
@@ -146,23 +388,39 @@ async function main() {
   check(await page.isHidden("#brushEditModeRow"), "auto選択時はbrushEditModeRowが隠れたまま");
 
   console.log("");
-  console.log("=== 「切り抜き結果を確認」ボタン：自動系モードでのみ表示され、押すと簡易プレビューが出る ===");
+  console.log("=== 「切り抜き結果を確認」ボタン：自動系モードでのみ表示され、押すとサーバー確認（extract.yml）が走る ===");
   check(await page.isVisible("#maskPreviewBtn"), "mask='auto'のときは「切り抜き結果を確認」ボタンが表示される");
   check(await page.isHidden("#maskPreviewModal"), "押す前はモーダルが隠れている");
   await page.click("#maskPreviewBtn");
+  check(await page.isVisible("#maskPreviewModal"), "ボタンを押すと（結果を待たず）すぐにモーダルが表示される");
+  check(await page.isVisible("#maskPreviewProgressWrap"), "進捗バーが表示される");
+  check(await page.isVisible("#maskPreviewSkipBtn"), "「確認せずに進む」の選択肢が表示される");
   await page.waitForFunction(() => {
     var status = document.getElementById("maskPreviewStatus");
-    return status && status.textContent.indexOf("解析完了") >= 0;
-  }, null, { timeout: 5000 });
-  check(await page.isVisible("#maskPreviewModal"), "ボタンを押すとモーダルが表示される");
+    return status && status.textContent.indexOf("確認完了") >= 0;
+  }, null, { timeout: 15000 });
   const previewCanvasSize = await page.evaluate(() => {
     var c = document.getElementById("maskPreviewCanvas");
     return { w: c.width, h: c.height };
   });
   check(previewCanvasSize.w > 1 && previewCanvasSize.h > 1,
-    "簡易プレビューのcanvasに実際のサイズで描画されている: " + JSON.stringify(previewCanvasSize));
-  check((await page.textContent("#maskPreviewStatus")).indexOf("解析完了") >= 0,
-    "解析完了のステータス文言が表示される");
+    "サーバーから取得したpreview.pngがcanvasに実際のサイズで描画されている: " + JSON.stringify(previewCanvasSize));
+  check((await page.textContent("#maskPreviewStatus")).indexOf("確認完了") >= 0,
+    "確認完了のステータス文言が表示される");
+  check(await page.isHidden("#maskPreviewProgressWrap"), "完了すると進捗バーが隠れる");
+  check(await page.isHidden("#maskPreviewSkipBtn"), "完了すると「確認せずに進む」も隠れる（もう待つものが無いため）");
+  check(confirmMock.createReleaseCalls === 1, "確認用のReleaseが作成される");
+  check(confirmMock.blobCalls === 2, "静止フレーム(frame.jpg)とparams.jsonの2つのblobが作成される: " + confirmMock.blobCalls);
+  check(confirmMock.treePayload && confirmMock.treePayload.tree.some((e) => e.path === "frame.jpg")
+    && confirmMock.treePayload.tree.some((e) => e.path === "params.json"),
+    "treeにframe.jpgとparams.jsonが含まれる: " + JSON.stringify(confirmMock.treePayload && confirmMock.treePayload.tree));
+  check(confirmMock.dispatchCalls === 1, "render.ymlではなくextract.ymlがdispatchされる（モックのURLパターンが一致）: " + confirmMock.dispatchCalls);
+  check(confirmMock.downloadAssetCalls >= 1, "Releaseアセット（preview.png）を認証付きでダウンロードする");
+  const confirmedAlphaOnDraft = await page.evaluate(() => draft.confirmedAlpha);
+  check(!!confirmedAlphaOnDraft && confirmedAlphaOnDraft.tag === confirmMock.tag,
+    "確認完了後、draft.confirmedAlphaに確認結果（タグ等）が記録される（本番レンダリング時の再利用用）: " +
+    JSON.stringify(confirmedAlphaOnDraft));
+
   await page.click("#maskPreviewCloseBtn");
   check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが隠れる");
   const canvasSizeAfterCloseBtn = await page.evaluate(() => {
@@ -173,19 +431,37 @@ async function main() {
     "✕で閉じるとプレビューcanvasのバッキングストアを即座に解放する（width/height=0）: " + JSON.stringify(canvasSizeAfterCloseBtn));
 
   console.log("");
+  console.log("=== 「確認せずに進む」：結果を待たずにモーダルを閉じられ、confirmedAlphaは記録されない ===");
+  const skipMock = makeConfirmMock({ runId: 777010 });
+  await routeConfirmApiGithub(page, skipMock);
+  await page.evaluate(() => { draft.confirmedAlpha = null; });
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => !document.getElementById("maskPreviewSkipBtn").hidden, null, { timeout: 3000 });
+  await page.click("#maskPreviewSkipBtn");
+  check(await page.isHidden("#maskPreviewModal"), "「確認せずに進む」ですぐにモーダルが閉じる（結果を待たない）");
+  await page.waitForTimeout(500); // 打ち切り後もバックグラウンドの非同期処理が例外を投げないことを確認する猶予
+  const confirmedAlphaAfterSkip = await page.evaluate(() => draft.confirmedAlpha);
+  check(!confirmedAlphaAfterSkip, "「確認せずに進む」を選ぶと確認結果は記録されない（そのままdraft.confirmedAlphaはnullのまま）");
+  check(pageErrors.length === 0, "スキップ後もページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+  console.log("");
   console.log("=== 簡易プレビュー：Esc・モーダル外タップでも閉じ、閉じた後は編集操作が復帰する ===");
   const drawBox = await page.locator("#drawCanvas").boundingBox();
+  const escTapMock = makeConfirmMock({ runId: 777011 });
+  await routeConfirmApiGithub(page, escTapMock);
 
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
-    null, { timeout: 5000 });
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    null, { timeout: 15000 });
   check(await page.isVisible("#maskPreviewModal"), "再度開くとモーダルが表示される");
   await page.keyboard.press("Escape");
   check(await page.isHidden("#maskPreviewModal"), "Escキーでもモーダルが閉じる");
 
+  const tapOutMock = makeConfirmMock({ runId: 777012 });
+  await routeConfirmApiGithub(page, tapOutMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
-    null, { timeout: 5000 });
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    null, { timeout: 15000 });
   await page.mouse.click(8, 8); // カード外（背景）の左上をタップ
   check(await page.isHidden("#maskPreviewModal"), "モーダル外（背景）をタップしても閉じる");
 
@@ -199,6 +475,35 @@ async function main() {
   // 上の確認用に描いたストロークは、後続のauto+brushテスト（drawn順の検証）に
   // 影響しないようここで消しておく
   await page.click("#clearStrokesBtn");
+
+  console.log("");
+  console.log("=== サーバー確認：GitHub連携の設定が未入力だと通信せずエラー表示になる ===");
+  {
+    let calledUnexpectedly = false;
+    await page.route("https://api.github.com/**", (route) => { calledUnexpectedly = true; route.abort(); });
+    // ghSettingsDetailsはフリーズ編集中は隠れた領域(mainSection側)にあるため、
+    // page.fillではなく直接値を書き換える（showMaskPreview側は表示状態に関わらず
+    // .value.trim()を読むだけなので、これで「未入力状態」を正しく再現できる）。
+    await page.evaluate(() => {
+      document.getElementById("ghUserInput").value = "";
+      document.getElementById("ghTokenInput").value = "";
+    });
+    await page.click("#maskPreviewBtn");
+    await page.waitForTimeout(300);
+    check(await page.isHidden("#maskPreviewModal"), "設定未入力の場合、モーダルは開かない");
+    const errStatus = await page.evaluate(() => document.getElementById("errorBannerText").textContent);
+    check(errStatus.indexOf("設定") >= 0, "GitHub連携設定の入力を促すエラーが表示される: " + errStatus);
+    check(calledUnexpectedly === false, "設定未入力の場合、GitHub APIへは一切通信しない");
+    const settingsOpenedAfterError = await page.evaluate(() => document.getElementById("ghSettingsDetails").open);
+    check(settingsOpenedAfterError === true, "エラー時、GitHub連携の設定パネルが自動的に開く（次に見た時にすぐ入力できる）");
+    // 後続のテストのため、設定を元に戻しモックを張り直す
+    await page.evaluate(({ u, r, t }) => {
+      document.getElementById("ghUserInput").value = u;
+      document.getElementById("ghRepoInput").value = r;
+      document.getElementById("ghTokenInput").value = t;
+    }, { u: CONFIRM_OWNER, r: CONFIRM_REPO, t: CONFIRM_TOKEN });
+    await routeConfirmApiGithub(page, makeConfirmMock({ runId: 777020 }));
+  }
 
   await page.selectOption("#maskModeSelect", "brush");
   check(await page.isHidden("#maskPreviewBtn"), "mask='brush'に戻すと「切り抜き結果を確認」ボタンは隠れる");
@@ -274,9 +579,11 @@ async function main() {
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.selectOption("#maskModeSelect", "auto");
+  const commitWhileOpenMock = makeConfirmMock({ runId: 777013 });
+  await routeConfirmApiGithub(page, commitWhileOpenMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
-    null, { timeout: 5000 });
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    null, { timeout: 15000 });
   check(await page.isVisible("#maskPreviewModal"), "「完了」を押す前提として、プレビューを開いたままにしておく");
   await page.evaluate(() => { draft.name = "プレビュー開いたまま完了テスト"; commitFreezeEdit(); });
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
@@ -289,11 +596,13 @@ async function main() {
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.selectOption("#maskModeSelect", "auto");
   check(await page.isHidden("#maskPreviewModal"), "別フリーズの編集を開始した時点でもモーダルは閉じたまま");
+  const followMock = makeConfirmMock({ runId: 777014 });
+  await routeConfirmApiGithub(page, followMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
-    null, { timeout: 5000 });
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    null, { timeout: 15000 });
   check(await page.isVisible("#maskPreviewModal"),
-    "別フリーズの編集でも「切り抜き結果を確認」は改めて開いて解析できる（追従する）");
+    "別フリーズの編集でも「切り抜き結果を確認」は改めて開いてサーバー確認できる（追従する）");
   const followCanvasSize = await page.evaluate(() => {
     var c = document.getElementById("maskPreviewCanvas");
     return { w: c.width, h: c.height };

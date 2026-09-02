@@ -1275,6 +1275,93 @@ test("makeJobTag: 各要素が2桁ゼロ埋めされる", () => {
   assert.strictEqual(core.makeJobTag(d), "job-20260105-030409");
 });
 
+/* ---- formatJobTimestamp / makeConfirmTag ---- */
+test("formatJobTimestamp: YYYYMMDD-HHMMSS 形式（UTC基準）になる", () => {
+  const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5));
+  assert.strictEqual(core.formatJobTimestamp(d), "20260829-153005");
+});
+test("makeConfirmTag: job-confirm-<timestamp>-<suffix> 形式になり、cleanup.ymlのjob-*対象prefixを持つ", () => {
+  const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5));
+  assert.strictEqual(core.makeConfirmTag(d, "ab12"), "job-confirm-20260829-153005-ab12");
+});
+test("makeConfirmTag: サフィックス省略時はランダムな短い文字列が付く（毎回変わる）", () => {
+  const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5));
+  const a = core.makeConfirmTag(d);
+  const b = core.makeConfirmTag(d);
+  assert.match(a, /^job-confirm-20260829-153005-[a-z0-9]+$/);
+  assert.notStrictEqual(a, b);
+});
+
+/* ---- buildConfirmParams / confirmedAlphaAssetName / confirmedAlphaCachePath ---- */
+test("buildConfirmParams: extract_and_cache.pyが読むparams.jsonの形にする", () => {
+  const p = core.buildConfirmParams("birefnet-portrait", null, false, 3.4, 540.4, 960.6);
+  assert.deepStrictEqual(p, {
+    model: "birefnet-portrait",
+    refine: null,
+    decontaminate: false,
+    time: 3.4,
+    output_width: 540,
+    output_height: 961
+  });
+});
+test("confirmedAlphaAssetName: render.pyのcache_path_for_alphaと同じ命名規則（video_<time:.3f>.npz）", () => {
+  assert.strictEqual(core.confirmedAlphaAssetName(3.4), "video_3.400.npz");
+  assert.strictEqual(core.confirmedAlphaAssetName(0), "video_0.000.npz");
+});
+test("confirmedAlphaCachePath: cache/<アセット名> になる（render.pyのcache_dir='cache'配下）", () => {
+  assert.strictEqual(core.confirmedAlphaCachePath(3.4), "cache/video_3.400.npz");
+});
+
+/* ---- isConfirmedAlphaValid ---- */
+test("isConfirmedAlphaValid: 動画名・時刻・モデルがすべて一致すればtrue", () => {
+  const confirmed = { videoFileName: "a.mp4", time: 3.4, model: "birefnet-portrait", tag: "job-confirm-x" };
+  assert.strictEqual(core.isConfirmedAlphaValid(confirmed, "a.mp4", 3.4, "birefnet-portrait"), true);
+});
+test("isConfirmedAlphaValid: confirmedAlphaが無ければfalse", () => {
+  assert.strictEqual(core.isConfirmedAlphaValid(null, "a.mp4", 3.4, "birefnet-portrait"), false);
+});
+test("isConfirmedAlphaValid: 動画名がズレていればfalse", () => {
+  const confirmed = { videoFileName: "a.mp4", time: 3.4, model: "birefnet-portrait" };
+  assert.strictEqual(core.isConfirmedAlphaValid(confirmed, "b.mp4", 3.4, "birefnet-portrait"), false);
+});
+test("isConfirmedAlphaValid: モデルがズレていればfalse", () => {
+  const confirmed = { videoFileName: "a.mp4", time: 3.4, model: "birefnet-portrait" };
+  assert.strictEqual(core.isConfirmedAlphaValid(confirmed, "a.mp4", 3.4, "isnet-general-use"), false);
+});
+test("isConfirmedAlphaValid: 時刻がズレていればfalse", () => {
+  const confirmed = { videoFileName: "a.mp4", time: 3.4, model: "birefnet-portrait" };
+  assert.strictEqual(core.isConfirmedAlphaValid(confirmed, "a.mp4", 3.5, "birefnet-portrait"), false);
+});
+test("isConfirmedAlphaValid: 浮動小数点誤差程度の時刻差は一致扱いにする", () => {
+  const confirmed = { videoFileName: "a.mp4", time: 3.4, model: "birefnet-portrait" };
+  assert.strictEqual(core.isConfirmedAlphaValid(confirmed, "a.mp4", 3.4000001, "birefnet-portrait"), true);
+});
+
+/* ---- resolveTargetOutputDims / evenDown ---- */
+test("evenDown: 偶数はそのまま、奇数は切り捨てて偶数にする", () => {
+  assert.strictEqual(core.evenDown(540), 540);
+  assert.strictEqual(core.evenDown(541), 540);
+  assert.strictEqual(core.evenDown(1.9), 0);
+});
+test("resolveTargetOutputDims: プリセット指定時はそのプリセットの解像度を返す", () => {
+  const dims = core.resolveTargetOutputDims("1080x1920", 999, 999);
+  assert.deepStrictEqual(dims, core.OUTPUT_PRESETS["1080x1920"]);
+});
+test("resolveTargetOutputDims: 'original'等プリセット無しの場合は動画の実効解像度を偶数に丸める", () => {
+  const dims = core.resolveTargetOutputDims("original", 541, 961);
+  assert.deepStrictEqual(dims, { width: 540, height: 960 });
+});
+
+/* ---- findMatchingRun（namePrefix指定） ---- */
+test("findMatchingRun: namePrefixを指定すると\"<prefix> \"+tagで一致判定する", () => {
+  const runs = [
+    { name: "render job-confirm-xxx", created_at: "2026-01-01T00:00:00Z", id: 1 },
+    { name: "extract job-confirm-xxx", created_at: "2026-01-02T00:00:00Z", id: 2 }
+  ];
+  const found = core.findMatchingRun(runs, "job-confirm-xxx", "extract");
+  assert.strictEqual(found.id, 2);
+});
+
 /* ---- videoAssetName ---- */
 test("videoAssetName: 拡張子を保ったまま video.<ext> にする", () => {
   assert.strictEqual(core.videoAssetName("IMG_1234.MOV"), "video.mov");

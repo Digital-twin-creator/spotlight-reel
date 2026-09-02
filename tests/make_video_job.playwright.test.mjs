@@ -189,8 +189,11 @@ function makeGithubMockRouter(mock) {
       });
     }
 
-    // GET /repos/{owner}/{repo}/releases/tags/{tag}  … 完成確認
-    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/tags/${mock.tag}`) {
+    // GET /repos/{owner}/{repo}/releases/tags/{tag}  … 完成確認（本番タグ）／
+    // サーバー確認済みアルファの再利用時は、フリーズが覚えている確認タグ(mock.confirmTag)への
+    // 問い合わせも同じエンドポイントで発生する（reuseConfirmedAlphaForFreezes参照）。
+    const releaseTagsMatch = /^\/repos\/[^/]+\/[^/]+\/releases\/tags\/(.+)$/.exec(pathname);
+    if (method === "GET" && releaseTagsMatch && decodeURIComponent(releaseTagsMatch[1]) === mock.tag) {
       mock.getReleaseByTagCalls++;
       const assets = mock.includeOutputAsset
         ? [{
@@ -203,6 +206,26 @@ function makeGithubMockRouter(mock) {
         html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.tag}`,
         assets,
       });
+    }
+    if (method === "GET" && releaseTagsMatch && mock.confirmTag && decodeURIComponent(releaseTagsMatch[1]) === mock.confirmTag) {
+      mock.getConfirmReleaseCalls = (mock.getConfirmReleaseCalls || 0) + 1;
+      const assets = mock.confirmNpzAssetName ? [{ name: mock.confirmNpzAssetName, id: 9001 }] : [];
+      return json(200, {
+        tag_name: mock.confirmTag,
+        html_url: `https://github.com/${owner}/${repo}/releases/tag/${mock.confirmTag}`,
+        assets,
+      });
+    }
+
+    // GET /repos/{owner}/{repo}/releases/assets/9001  … サーバー確認済みアルファ(.npz)のダウンロード
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/9001`) {
+      mock.downloadConfirmedAlphaCalls = (mock.downloadConfirmedAlphaCalls || 0) + 1;
+      await route.fulfill({
+        status: 200,
+        headers: { ...CORS_HEADERS, "content-type": "application/octet-stream" },
+        body: Buffer.from([1, 2, 3, 4]), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+      });
+      return;
     }
 
     console.log("  [警告] モックされていないGitHub APIリクエスト: " + method + " " + pathname);
@@ -222,6 +245,11 @@ function makeMock(overrides) {
     matchRunAfterCalls: 1,
     runStatusSequence: [{ status: "completed", conclusion: "success" }],
     includeOutputAsset: true,
+    // サーバー確認済みアルファの再利用（reuseConfirmedAlphaForFreezes）検証用。
+    // confirmTagを指定すると、そのタグへの/releases/tags問い合わせにconfirmNpzAssetNameの
+    // アセットを返すようになる（未指定なら通常どおり本番タグのみ応答する）。
+    confirmTag: null, confirmNpzAssetName: null,
+    getConfirmReleaseCalls: 0, downloadConfirmedAlphaCalls: 0,
   }, overrides);
 }
 
@@ -656,6 +684,129 @@ async function main() {
       "同上：トークンも自動的に引き継がれる");
     check(migrationResult.migratedSaved === true,
       "引き継いだ設定は新しいキーの下にも保存され、以後は移行処理なしで読み込める");
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ9: サーバー確認済みのアルファがあるフリーズは、本番ジョブブランチへcache/video_<time>.npzとして同梱される ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    const mock = makeMock({
+      runId: 555009,
+      confirmTag: "job-confirm-20260901-120000-ab12",
+      confirmNpzAssetName: "video_1.500.npz",
+    });
+    await routeApiGithub(page, mock);
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+
+    // フリーズを1つ作り（mask=auto）、あらかじめ「確認完了」したことにする
+    // （実際のサーバー確認フローはmask_shadow_ui.playwright.test.mjs側で別途検証済みのため、
+    // ここではconfirmedAlphaが記録された状態を直接再現し、本番アップロード側の再利用だけを見る）。
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModeSelect", "auto");
+    await page.fill("#nameInput", "確認済みフリーズ");
+    await page.evaluate((confirmTag) => {
+      draft.time = 1.5;
+      draft.confirmedAlpha = {
+        videoFileName: appState.videoFileName,
+        time: 1.5,
+        model: resolveMaskModel(appState.maskModel),
+        tag: confirmTag,
+      };
+    }, mock.confirmTag);
+    await page.click("#commitFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+    // 比較対象として、確認していない（confirmedAlphaが無い）フリーズも1つ追加する。
+    // こちらは再利用の対象にならず、treeにcache/video_*.npzが追加されないことを確認する。
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModeSelect", "auto");
+    await page.fill("#nameInput", "未確認フリーズ");
+    await page.evaluate(() => { draft.time = 2.5; });
+    await page.click("#commitFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+    await page.click("#makeVideoBtn");
+    await page.waitForFunction(
+      () => !document.getElementById("jobResultLink").hidden,
+      null, { timeout: 30000 }
+    );
+
+    check(mock.getConfirmReleaseCalls >= 1, "確認時のReleaseを再取得する（サーバー確認済みアルファの所在確認）: " + mock.getConfirmReleaseCalls);
+    check(mock.downloadConfirmedAlphaCalls === 1, "確認済みアルファ(.npz)を1件だけ認証付きでダウンロードする: " + mock.downloadConfirmedAlphaCalls);
+    check(mock.treePayload && mock.treePayload.tree.some((e) => e.path === "cache/video_1.500.npz"),
+      "本番ジョブブランチのtreeに、確認済みフリーズのcache/video_1.500.npzが同梱される: " +
+      JSON.stringify(mock.treePayload && mock.treePayload.tree.map((e) => e.path)));
+    check(!mock.treePayload.tree.some((e) => e.path === "cache/video_2.500.npz"),
+      "確認していないフリーズ（confirmedAlpha無し）については、cache/*.npzが追加されない");
+    check(mock.treePayload.tree.some((e) => e.path === "project.json") && mock.treePayload.tree.some((e) => e.path.indexOf("video.") === 0),
+      "project.json・動画本体も引き続き通常どおりtreeに含まれる");
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ10: サーバー確認済みでも、動画名/時刻/モデルがズレていれば再利用しない（モデル再実行にフォールバック） ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    let confirmReleaseCalledUnexpectedly = false;
+    const mock = makeMock({ runId: 555010 });
+    await page.route("https://api.github.com/**", (route) => {
+      const u = new URL(route.request().url());
+      if (/^\/repos\/[^/]+\/[^/]+\/releases\/tags\/job-confirm-/.test(u.pathname)) {
+        confirmReleaseCalledUnexpectedly = true;
+      }
+      const isReleaseCreate = /^\/repos\/[^/]+\/[^/]+\/releases$/.test(u.pathname);
+      if (isReleaseCreate && route.request().method() === "POST" && !mock.tag) {
+        try {
+          const body = JSON.parse(route.request().postData() || "{}");
+          mock.tag = body.tag_name;
+        } catch (e) { /* 無視 */ }
+      }
+      return makeGithubMockRouter(mock)(route);
+    });
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModeSelect", "auto");
+    await page.fill("#nameInput", "モデル違いフリーズ");
+    await page.evaluate(() => {
+      draft.time = 1.5;
+      // モデルが現在の設定(isnet-general-use)と異なる確認結果 → isConfirmedAlphaValidがfalseになるはず
+      draft.confirmedAlpha = {
+        videoFileName: appState.videoFileName, time: 1.5, model: "birefnet-portrait", tag: "job-confirm-mismatch",
+      };
+    });
+    await page.click("#commitFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+    await page.click("#makeVideoBtn");
+    await page.waitForFunction(
+      () => !document.getElementById("jobResultLink").hidden,
+      null, { timeout: 30000 }
+    );
+
+    check(confirmReleaseCalledUnexpectedly === false, "モデルが一致しない確認結果は再利用対象にせず、確認用Releaseへ問い合わせすらしない");
+    check(mock.treePayload && !mock.treePayload.tree.some((e) => e.path.indexOf("cache/") === 0),
+      "treeにcache/配下のエントリが含まれない（フォールバックして通常どおりrender.py側で自動切り抜きされる）");
 
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
     await context.close();
