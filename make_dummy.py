@@ -641,6 +641,90 @@ def gen_extract_test_silhouette(out_path, w=W, h=H):
 
 
 # ---------------------------------------------------------------------------
+# extract.py モデル比較用の「実写フレームに近い、破綻しやすい構図」の画像
+# （examples/extract_test_white_on_white.png）
+#
+# 実機で自動切り抜きが全面マスク（画面のほぼ全体が前景と誤判定）になった失敗の
+# 再現用。被写体（白い服）と背景（白い壁）の明度差がほとんど無く、さらに
+# 画面中央付近に強い照明のハイライト（白飛び気味の光）を重ねることで、
+# 輪郭のコントラストをさらに削っている。標準モデル(isnet-general-use)と
+# 高精度モデル(birefnet-portrait)のアルファを比較する材料として使う。
+# ---------------------------------------------------------------------------
+
+def gen_extract_test_white_on_white(out_path, w=W, h=H):
+    """extract.py のモデル比較用：白い服・白い壁・強い照明の低コントラスト画像を作る"""
+    ss = 4  # スーパーサンプリングで縁を滑らかにする
+    W2, H2 = w * ss, h * ss
+    img = Image.new("RGB", (W2, H2), (238, 236, 232))
+    draw = ImageDraw.Draw(img)
+
+    # 白い壁：わずかな明度ムラ（完全な単色だと逆にrembgが検出しやすくなってしまうため）
+    band_h = H2 // 24
+    for yband in range(0, H2, band_h):
+        shade = 242 - int(14 * yband / H2)
+        draw.rectangle([0, yband, W2, yband + band_h], fill=(shade, shade - 1, shade - 4))
+
+    skin = (232, 200, 176)
+    shirt = (231, 228, 222)   # 壁とほぼ同じ明度の白い服（意図的に低コントラスト）
+    hair = (90, 70, 55)
+
+    cx, cy = W2 * 0.5, H2 * 0.28
+    head_r = W2 * 0.11
+    draw.ellipse([cx - head_r, cy - head_r, cx + head_r, cy + head_r], fill=skin)
+
+    rng = np.random.default_rng(7)
+    n_strands = 40
+    for i in range(n_strands):
+        ang = math.pi * 1.15 + math.pi * 0.7 * (i / (n_strands - 1))
+        length = head_r * (1.0 + 0.4 * rng.random())
+        x0 = cx + math.cos(ang) * head_r * 0.95
+        y0 = cy + math.sin(ang) * head_r * 0.95
+        x1 = cx + math.cos(ang) * length
+        y1 = cy + math.sin(ang) * length
+        draw.line([(x0, y0), (x1, y1)], fill=hair, width=max(1, int(W2 * 0.001)))
+
+    body_top = cy + head_r * 0.85
+    body_w = W2 * 0.30
+    body_bottom = H2 * 0.62
+    draw.rounded_rectangle([cx - body_w / 2, body_top, cx + body_w / 2, body_bottom],
+                            radius=W2 * 0.03, fill=shirt)
+    # 服のわずかな陰影（皺）。壁との明度差をわずかに残しつつ、境界の一部をさらに曖昧にする
+    for i in range(6):
+        fx = cx - body_w * 0.35 + body_w * 0.7 * (i / 5.0)
+        draw.line([(fx, body_top + W2 * 0.02), (fx + W2 * 0.01, body_bottom - W2 * 0.02)],
+                   fill=(shirt[0] - 10, shirt[1] - 10, shirt[2] - 10), width=max(1, int(W2 * 0.0015)))
+
+    hand_y0, hand_y1 = H2 * 0.60, H2 * 0.71
+    hand_x0 = cx - body_w * 0.80
+    n_fingers = 4
+    finger_w = W2 * 0.026
+    gap_w = W2 * 0.006
+    for f in range(n_fingers):
+        fx0 = hand_x0 + f * (finger_w + gap_w)
+        draw.rounded_rectangle([fx0, hand_y0, fx0 + finger_w, hand_y1],
+                                radius=finger_w * 0.35, fill=skin)
+    palm_x1 = hand_x0 + n_fingers * (finger_w + gap_w)
+    draw.rounded_rectangle([hand_x0 - W2 * 0.01, hand_y1 - W2 * 0.015, palm_x1, hand_y1 + W2 * 0.05],
+                            radius=W2 * 0.02, fill=skin)
+
+    # 強い照明のハイライト：被写体と壁の両方にまたがる白飛び気味の円形グラデーション。
+    # これが被写体輪郭のコントラストをさらに削り、実写の「強い照明」条件に近づける。
+    glare = Image.new("L", (W2, H2), 0)
+    gdraw = ImageDraw.Draw(glare)
+    glare_cx, glare_cy = cx + W2 * 0.12, cy + H2 * 0.05
+    for r_ratio, alpha in [(0.42, 60), (0.30, 110), (0.18, 170), (0.08, 220)]:
+        r = W2 * r_ratio
+        gdraw.ellipse([glare_cx - r, glare_cy - r, glare_cx + r, glare_cy + r], fill=alpha)
+    glare = glare.filter(ImageFilter.GaussianBlur(W2 * 0.03))
+    white_layer = Image.new("RGB", (W2, H2), (255, 255, 255))
+    img = Image.composite(white_layer, img, glare)
+
+    img = img.resize((w, h), Image.LANCZOS)
+    img.save(out_path)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # ブラシ筆先画像（assets/brushes/<shape>.png）
 #
 # render.py / index.html の両方が同じPNG（白RGB＋アルファ）を「筆先スタンプ」として使う。
@@ -821,6 +905,11 @@ def main():
     log("=== extract.py 検証用シルエット画像を生成 ===")
     silhouette_path = gen_extract_test_silhouette(os.path.join(EXAMPLES_DIR, "extract_test_silhouette.png"))
     log(f"  {silhouette_path} を生成しました")
+
+    log("=== extract.py モデル比較用：白い服・白い壁・強い照明の低コントラスト画像を生成 ===")
+    white_on_white_path = gen_extract_test_white_on_white(
+        os.path.join(EXAMPLES_DIR, "extract_test_white_on_white.png"))
+    log(f"  {white_on_white_path} を生成しました")
 
     log("=== サンプルJSONを生成 ===")
     project = make_sample_json("dummy_input.mp4")
