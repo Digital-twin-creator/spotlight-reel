@@ -103,20 +103,32 @@ TELOP_BOUNCE_FROM = 1.3       # title_bounce=true のときの初期スケール
 BRUSH_PAINT_ALPHA = 0.85      # 描いている最中の白い絵の具の不透明度
 DARK_GAIN = 0.30              # background="dark" のときの明るさ倍率
 
-LOGO_WIDTH_RATIO_DEFAULT = 0.55   # ロゴの基準表示幅（出力幅に対する比率、等倍=100%のとき。以前は0.4固定）
+LOGO_WIDTH_RATIO_DEFAULT = 0.62   # ロゴの着地後の基準表示幅（出力幅に対する比率。以前は0.55、その前は0.4固定）
 DEFAULT_LOGO_AT = "end"       # logo.at の既定値・不明値のフォールバック先
 DEFAULT_LOGO_BACKGROUND = "auto"  # logo.background の既定値・不明値のフォールバック先
 LOGO_CROP_MARGIN_RATIO = 0.06     # ロゴ自動クロップ時に残す余白（検出した外接矩形の辺の長さに対する比率）
 LOGO_CROP_ALPHA_THRESH = 0.02     # クロップ判定：これを超えるアルファを「内容」とみなす
-LOGO_CROP_COLOR_THRESH = 18.0     # クロップ判定（不透明PNG用）：四隅平均色とのBGR差分合計がこれを超えれば「内容」
+LOGO_CROP_COLOR_THRESH = 30.0     # クロップ判定（不透明PNG用）：四隅平均色とのBGR差分合計がこれを超えれば「内容」
+                                  # （以前は18.0。JPEG保存されたロゴ画像の圧縮ノイズで四隅付近が
+                                  #   誤って「内容」と判定される事例があったため、
+                                  #   下記のLOGO_CROP_CORNER_PATCH_PXでのパッチ平均化と合わせて調整）
+LOGO_CROP_CORNER_PATCH_PX = 6     # 四隅の背景色を推定する際、1点だけでなくこの半径のパッチ（正方形）を
+                                  # 平均する。JPEGノイズで四隅の1画素だけがたまたま外れ値になり、
+                                  # 背景色の推定自体がズレる事態を避けるため。
+LOGO_CROP_DENOISE_KERNEL_PX = 5   # 「内容」判定マスクにかけるモルフォロジー・オープニングのカーネルサイズ。
+                                  # 背景側にノイズで紛れ込んだ孤立画素を、外接矩形を求める前に除去する。
 
 # ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
 # scale_from/landing_sec/sweep_start_sec/sweep_sec/flash_strength/shake_sec/shake_amplitude/
 # duration_sec/fade_sec/sfx_tail は logo{} 配下でJSON上書き可能（resolve_logo_paramsで読み取る）。
 # それ以外（フラッシュの長さ・スイープ帯の幅比率・保持中に拡大する先・
 # last_freezeのクロスフェード時間・SFXテールの長さ）は固定値。
-LOGO_SCALE_FROM_DEFAULT = 1.6     # スタンバイ時の初期スケール（160%。以前は200%）
-LOGO_LANDING_SEC_DEFAULT = 0.45   # 着地（縮小＋フェードイン）にかかる時間（以前は0.15秒）
+LOGO_START_WIDTH_RATIO_DEFAULT = 1.05  # ロゴの初期表示幅（出力幅に対する比率）。画面幅の105%＝
+                                        # 画面いっぱいからわずかにはみ出す状態で表示を始める。
+                                        # scale_fromは指定が無ければ、この値をwidth_ratioで割って
+                                        # 逆算する（resolve_logo_params参照）。
+LOGO_SCALE_FROM_DEFAULT = 1.6     # scale_from省略時のフォールバック（width_ratio未解決の場合のみ使用）
+LOGO_LANDING_SEC_DEFAULT = 0.6    # 着地（縮小＋フェードイン）にかかる時間（以前は0.45秒、その前は0.15秒）
 LOGO_LANDING_ANTICIPATION_RATIO = 0.6  # 着地アニメのうち「ゆっくり入って一気に落ちる」区間の割合（残りが沈み込み→セトル）
 LOGO_LANDING_DIP_DEFAULT = 0.02   # 着地の沈み込み量（スケール絶対値。セトル時に100%を一瞬下回る量）
 LOGO_FLASH_SEC = 0.05             # 着地直後の白フラッシュの長さ（固定）
@@ -1255,13 +1267,23 @@ def logo_landing_opacity(t):
     return float(np.clip(ease_out_cubic(min(local, 1.0)), 0.0, 1.0))
 
 
-def logo_corner_avg_color(logo_bgr):
-    """ロゴ画像の四隅の画素を平均したBGR色を返す（logo.background="auto"用）"""
+def logo_corner_avg_color(logo_bgr, patch_px=LOGO_CROP_CORNER_PATCH_PX):
+    """
+    ロゴ画像の四隅の背景色を推定してBGR色で返す（logo.background="auto"・
+    自動クロップの背景色判定の両方で使う）。
+    1画素だけを見ると、JPEG保存されたロゴ画像では圧縮ノイズでその1画素だけが
+    たまたま外れ値になり、背景色の推定自体がズレることがあるため、各隅
+    patch_px四方の小さなパッチを平均する（patch_px<=1なら従来どおり1画素）。
+    """
     h, w = logo_bgr.shape[:2]
-    corners = np.array([
-        logo_bgr[0, 0], logo_bgr[0, w - 1], logo_bgr[h - 1, 0], logo_bgr[h - 1, w - 1],
-    ], dtype=np.float32)
-    avg = corners.mean(axis=0)
+    p = max(1, min(int(patch_px), h, w))
+    patches = [
+        logo_bgr[0:p, 0:p],
+        logo_bgr[0:p, w - p:w],
+        logo_bgr[h - p:h, 0:p],
+        logo_bgr[h - p:h, w - p:w],
+    ]
+    avg = np.concatenate([patch.reshape(-1, 3) for patch in patches], axis=0).astype(np.float32).mean(axis=0)
     return tuple(int(round(c)) for c in avg)
 
 
@@ -1272,6 +1294,11 @@ def detect_logo_content_bbox(bgr, alpha, margin_ratio=LOGO_CROP_MARGIN_RATIO,
       - アルファに実際の透明部分があれば、そのアルファのしきい値で判定する
       - 無ければ（背景まで完全に不透明なPNG）、四隅の平均背景色との画素差分の
         しきい値で判定する
+    外接矩形はnp.where()のmin/maxで求めるため、背景側に「内容」と誤判定された
+    画素が1つでも紛れ込むと、そこまで矩形が引きずられてクロップが効かなくなる
+    （JPEG圧縮ノイズ等で背景の1画素だけが色距離のしきい値を超える、という
+    形で起こりうる）。そのためbool判定後にモルフォロジー・オープニング
+    （収縮→膨張）をかけ、孤立したノイズ画素を先に除去してから外接矩形を求める。
     検出した外接矩形の辺の長さに対してmargin_ratio分の余白を残して広げ、
     画像範囲内に収める。内容が検出できない・画像全体を占める場合は
     クロップ不要として (0, 0, w, h) を返す。
@@ -1285,6 +1312,9 @@ def detect_logo_content_bbox(bgr, alpha, margin_ratio=LOGO_CROP_MARGIN_RATIO,
         bg_color = np.array(logo_corner_avg_color(bgr), dtype=np.float32)
         diff = np.abs(bgr.astype(np.float32) - bg_color).sum(axis=2)
         content = diff > color_thresh
+
+    kernel = np.ones((LOGO_CROP_DENOISE_KERNEL_PX, LOGO_CROP_DENOISE_KERNEL_PX), np.uint8)
+    content = cv2.morphologyEx(content.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(bool)
 
     ys, xs = np.where(content)
     if ys.size == 0 or xs.size == 0:
@@ -1304,12 +1334,27 @@ def detect_logo_content_bbox(bgr, alpha, margin_ratio=LOGO_CROP_MARGIN_RATIO,
 
 
 def crop_logo_content(logo_bgr, logo_alpha):
-    """detect_logo_content_bbox()の結果でロゴ画像をクロップする（不要ならそのまま返す）"""
+    """
+    detect_logo_content_bbox()の結果でロゴ画像をクロップする（不要ならそのまま返す）。
+    実際に効いているか（元サイズ→クロップ後サイズ）を実行ログに残す。
+    """
     h, w = logo_bgr.shape[:2]
     x0, y0, x1, y1 = detect_logo_content_bbox(logo_bgr, logo_alpha)
     if (x0, y0, x1, y1) == (0, 0, w, h):
+        log(f"ロゴ自動クロップ: 余白なし（{w}x{h}のまま）")
         return logo_bgr, logo_alpha
+    cw, ch = x1 - x0, y1 - y0
+    log(f"ロゴ自動クロップ: {w}x{h} → {cw}x{ch}（余白を検出して切り抜き）")
     return logo_bgr[y0:y1, x0:x1].copy(), logo_alpha[y0:y1, x0:x1].copy()
+
+
+def save_logo_crop_preview_png(logo_bgr, logo_alpha, out_path):
+    """--preview 用：自動クロップ後のロゴ単体をアルファ付きPNG(BGRA)として書き出す"""
+    a = logo_alpha[:, :, 0] if logo_alpha.ndim == 3 else logo_alpha
+    alpha_u8 = np.clip(a * 255.0, 0, 255).astype(np.uint8)
+    bgra = np.dstack([logo_bgr, alpha_u8])
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    cv2.imwrite(out_path, bgra)
 
 
 def resolve_logo_background_color(bg_spec, logo_bgr):
@@ -1338,9 +1383,18 @@ def resolve_logo_background_color(bg_spec, logo_bgr):
 
 
 def resolve_logo_params(logo_cfg):
-    """logo{} 配下のアニメーション上書きパラメータ（未指定なら既定値）をまとめて返す"""
+    """
+    logo{} 配下のアニメーション上書きパラメータ（未指定なら既定値）をまとめて返す。
+    scale_from（着地アニメ開始時のスケール）は、指定が無ければ
+    「LOGO_START_WIDTH_RATIO_DEFAULT（画面幅比、既定105%）÷ width_ratio（着地後の画面幅比）」
+    から逆算する。こうすることで、width_ratioをJSON側で変えても、着地アニメの
+    開始時サイズは常に「画面幅の105%＝画面いっぱい」から揃う（scale_from自体を
+    明示指定すれば、従来どおりそちらが優先される）。
+    """
+    width_ratio = max(0.01, float(logo_cfg.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT)))
+    default_scale_from = LOGO_START_WIDTH_RATIO_DEFAULT / width_ratio if width_ratio > 1e-6 else LOGO_SCALE_FROM_DEFAULT
     return {
-        "scale_from": float(logo_cfg.get("scale_from", LOGO_SCALE_FROM_DEFAULT)),
+        "scale_from": float(logo_cfg.get("scale_from", default_scale_from)),
         "landing_sec": max(1e-3, float(logo_cfg.get("landing_sec", LOGO_LANDING_SEC_DEFAULT))),
         "sweep_start_sec": max(0.0, float(logo_cfg.get("sweep_start_sec", LOGO_SWEEP_START_SEC_DEFAULT))),
         "sweep_sec": max(1e-3, float(logo_cfg.get("sweep_sec", LOGO_SWEEP_SEC_DEFAULT))),
@@ -1350,7 +1404,7 @@ def resolve_logo_params(logo_cfg):
         "duration_sec": max(0.0, float(logo_cfg.get("duration_sec", LOGO_DURATION_SEC_DEFAULT))),
         "fade_sec": max(0.0, float(logo_cfg.get("fade_sec", LOGO_FADE_TO_BG_SEC_DEFAULT))),
         "sfx_tail": bool(logo_cfg.get("sfx_tail", True)),
-        "width_ratio": max(0.01, float(logo_cfg.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT))),
+        "width_ratio": width_ratio,
     }
 
 
@@ -1446,12 +1500,13 @@ def logo_animation_state(elapsed_sec, params):
       fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
     タイムライン（既定値の場合。より重厚でゆっくりした着地にするため、旧バージョンより
     全体的に間を長く取っている）:
-      0.00-0.45  着地（アンティシペーション＋セトル：ゆっくり入って一気に落ち、
-                 100%を2%だけ沈み込んでから戻る。scale 160%→100%・不透明度0→1）
-      0.45-0.50  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
-      0.45-0.70  画面全体のわずかな揺れ（振幅0.4%、0.25秒で減衰）
-      0.80-1.50  光彩スイープ（着地から0.35秒後に開始、0.70秒かける）
-      1.50-終了  ゆっくり103%まで拡大、最後の0.6秒で背景色へ暗転
+      0.00-0.60  着地（アンティシペーション＋セトル：ゆっくり入って一気に落ち、
+                 着地後サイズを2%だけ沈み込んでから戻る。scale ≒画面幅105%相当
+                 （＝画面いっぱい）→着地後の基準サイズ（width_ratio）・不透明度0→1）
+      0.60-0.65  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
+      0.60-0.85  画面全体のわずかな揺れ（振幅0.4%、0.25秒で減衰）
+      0.95-1.65  光彩スイープ（着地から0.35秒後に開始、0.70秒かける）
+      1.65-終了  ゆっくり103%まで拡大、最後の0.4秒で背景色へ暗転
     """
     landing = params["landing_sec"]
     flash_sec = LOGO_FLASH_SEC
@@ -2192,7 +2247,15 @@ def render(project, json_path, video_path, out_path, preview_path=None):
             frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
             before_path, after_path = render_preview(frame, plan, W, H, fps, {}, preview_path,
                                                        cache_dir=cache_dir, video_path=video_path)
-            log(f"プレビューを書き出しました: {before_path}（スライド前） / {after_path}（スライド後）")
+            preview_msg = f"プレビューを書き出しました: {before_path}（スライド前） / {after_path}（スライド後）"
+            if logo_cfg and logo_bgr is not None:
+                # 自動クロップが実際に効いているかを目視確認できるよう、
+                # クロップ後のロゴ単体もアルファ付きPNGで書き出す
+                base, ext = os.path.splitext(preview_path)
+                logo_preview_path = f"{base}_logo{ext or '.png'}"
+                save_logo_crop_preview_png(logo_bgr, logo_alpha, logo_preview_path)
+                preview_msg += f" / {logo_preview_path}（クロップ後ロゴ単体）"
+            log(preview_msg)
             return before_path, after_path
 
         # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---

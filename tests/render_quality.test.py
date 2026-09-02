@@ -68,6 +68,11 @@ def ensure_fixtures():
         md.render_dummy_video_vfr(vfr_path)
         md.mux_audio_into_video(vfr_path, md.make_tone_track())
 
+    opaque_logo_png = os.path.join(md.EXAMPLES_DIR, "store_logo_opaque_black.png")
+    opaque_logo_jpg = os.path.join(md.EXAMPLES_DIR, "store_logo_opaque_black.jpg")
+    if not os.path.exists(opaque_logo_png) or not os.path.exists(opaque_logo_jpg):
+        md.gen_dummy_logo_opaque_black(opaque_logo_png, jpeg_path=opaque_logo_jpg)
+
     return video_path, vfr_path
 
 
@@ -762,10 +767,12 @@ try:
     print("")
     print("=== ラストロゴ：既定値がよりゆっくり・重厚になっている ===")
     default_logo_params = render.resolve_logo_params({})
-    check(abs(default_logo_params["scale_from"] - 1.6) < 1e-9,
-          f"scale_fromの既定は1.6（以前は2.0）: {default_logo_params['scale_from']}")
-    check(abs(default_logo_params["landing_sec"] - 0.45) < 1e-9,
-          f"landing_secの既定は0.45秒（以前は0.15秒）: {default_logo_params['landing_sec']}")
+    expected_scale_from = 1.05 / 0.62
+    check(abs(default_logo_params["scale_from"] - expected_scale_from) < 1e-9,
+          f"scale_fromの既定は「画面幅の105%」÷width_ratio(0.62)から逆算される（以前は1.6固定）: "
+          f"{default_logo_params['scale_from']}（期待値 {expected_scale_from}）")
+    check(abs(default_logo_params["landing_sec"] - 0.6) < 1e-9,
+          f"landing_secの既定は0.6秒（以前は0.45秒、その前は0.15秒）: {default_logo_params['landing_sec']}")
     check(abs(default_logo_params["flash_strength"] - 0.35) < 1e-9,
           f"flash_strengthの既定は0.35（以前は0.6）: {default_logo_params['flash_strength']}")
     check(abs(default_logo_params["sweep_start_sec"] - 0.35) < 1e-9,
@@ -781,8 +788,8 @@ try:
     check(abs(default_logo_params["fade_sec"] - 0.4) < 1e-9,
           f"fade_secの既定は0.4秒（以前は0.3秒→0.6秒→0.4秒）: {default_logo_params['fade_sec']}")
     check(default_logo_params["sfx_tail"] is True, "sfx_tailの既定はTrue")
-    check(abs(default_logo_params["width_ratio"] - 0.55) < 1e-9,
-          f"width_ratioの既定は0.55（以前は0.4固定）: {default_logo_params['width_ratio']}")
+    check(abs(default_logo_params["width_ratio"] - 0.62) < 1e-9,
+          f"width_ratioの既定は0.62（以前は0.55、その前は0.4固定）: {default_logo_params['width_ratio']}")
 
     custom_logo_cfg = {
         "scale_from": 1.3, "landing_sec": 0.2, "sweep_start_sec": 0.1, "sweep_sec": 0.4,
@@ -796,6 +803,98 @@ try:
                         "fade_sec", "width_ratio")),
           f"logo{{}}配下で全パラメータを上書きできる: {custom_logo_params}")
     check(custom_logo_params["sfx_tail"] is False, "sfx_tail: false も上書きできる")
+
+    # ------------------------------------------------------------------
+    # 6.9) ラストロゴの自動クロップ：黒背景・アルファ無しの実ロゴ画像で効いているか
+    # ------------------------------------------------------------------
+    print("")
+    print("=== ラストロゴ：自動クロップ（黒背景・アルファ無しロゴ）の効き目とJPEGノイズ耐性 ===")
+    opaque_png_path = os.path.join("examples", "store_logo_opaque_black.png")
+    opaque_jpg_path = os.path.join("examples", "store_logo_opaque_black.jpg")
+
+    png_bgr, png_alpha = render.load_logo_image(opaque_png_path)
+    orig_h, orig_w = png_bgr.shape[:2]
+    check(png_alpha.min() >= 1.0 - 1e-6,
+          "テスト用ロゴ(PNG)はアルファ無し相当（全面不透明）になっている（色距離での判定経路を通す）")
+
+    cropped_png_bgr, _ = render.crop_logo_content(png_bgr, png_alpha)
+    crop_h, crop_w = cropped_png_bgr.shape[:2]
+    check(crop_w < orig_w * 0.7 and crop_h < orig_h * 0.7,
+          f"余白多め（画像幅の30%）のロゴが自動クロップで実際に大きく縮む: "
+          f"{orig_w}x{orig_h} → {crop_w}x{crop_h}")
+    check(crop_w > orig_w * 0.3 and crop_h > orig_h * 0.3,
+          "クロップし過ぎて内容自体を失ってはいない（極端に小さくなりすぎない）")
+
+    jpg_bgr, jpg_alpha = render.load_logo_image(opaque_jpg_path)
+    cropped_jpg_bgr, _ = render.crop_logo_content(jpg_bgr, jpg_alpha)
+    crop_jh, crop_jw = cropped_jpg_bgr.shape[:2]
+    check(abs(crop_jw - crop_w) <= max(4, crop_w * 0.05) and abs(crop_jh - crop_h) <= max(4, crop_h * 0.05),
+          f"JPEG（quality=82）に再圧縮した同じロゴでも、PNG版とほぼ同じ範囲にクロップされる"
+          f"（PNG:{crop_w}x{crop_h} JPEG:{crop_jw}x{crop_jh}）")
+
+    # 四隅の1画素だけがノイズで大きく外れ値になっても、内容の外接矩形が
+    # そこに引きずられて肥大化しない（モルフォロジー・オープニングで孤立画素を除去）ことを確認
+    noisy_bgr = png_bgr.copy()
+    noisy_bgr[0, 0] = [90, 40, 200]
+    x0n, y0n, x1n, y1n = render.detect_logo_content_bbox(noisy_bgr, png_alpha)
+    x0c, y0c, x1c, y1c = render.detect_logo_content_bbox(png_bgr, png_alpha)
+    check((x0n, y0n, x1n, y1n) == (x0c, y0c, x1c, y1c),
+          f"背景の1画素だけが外れ値でも、外接矩形は孤立ノイズに引きずられず同じ結果になる: "
+          f"ノイズ無し={(x0c, y0c, x1c, y1c)} ノイズ有り={(x0n, y0n, x1n, y1n)}")
+
+    # 四隅を1点だけで見ると、この外れ値1点で背景色の推定自体が大きくズレることも確認しておく
+    # （＝パッチ平均化で背景色推定を安定させたことの意味）
+    old_style_bg = render.logo_corner_avg_color(noisy_bgr, patch_px=1)
+    new_style_bg = render.logo_corner_avg_color(noisy_bgr, patch_px=render.LOGO_CROP_CORNER_PATCH_PX)
+    true_bg = render.logo_corner_avg_color(png_bgr, patch_px=render.LOGO_CROP_CORNER_PATCH_PX)
+    old_err = sum(abs(a - b) for a, b in zip(old_style_bg, true_bg))
+    new_err = sum(abs(a - b) for a, b in zip(new_style_bg, true_bg))
+    check(new_err < old_err,
+          f"背景色推定は、四隅1画素だけより周囲をパッチ平均した方が外れ値の影響を受けにくい: "
+          f"1画素推定の誤差={old_err} パッチ平均推定の誤差={new_err}")
+
+    # ------------------------------------------------------------------
+    # 6.10) ラストロゴのアニメーション：「画面いっぱい→縮小して定位置」になっているか
+    # ------------------------------------------------------------------
+    print("")
+    print("=== ラストロゴ：着地アニメが「画面いっぱい→縮小」になっている ===")
+    LW, LH = 540, 960
+    logo_params_default = render.resolve_logo_params({})
+    backdrop = np.full((LH, LW, 3), 40, np.uint8)  # ロゴ本体・背景色のどちらとも異なる中間グレー
+    cropped_bgr, cropped_alpha = render.crop_logo_content(png_bgr, png_alpha)
+    logo_luma = render.build_logo_luminance_mask(cropped_bgr, cropped_alpha)
+    logo_bg_color = render.resolve_logo_background_color("auto", cropped_bgr)
+
+    def logo_content_width_px(frame_bgr, bg_color_bgr, tol=20):
+        """backdropの色(bg_color_bgr)と有意に異なる画素の左右端の幅(px)を返す"""
+        diff = np.abs(frame_bgr.astype(np.int32) - np.array(bg_color_bgr, dtype=np.int32)).sum(axis=2)
+        cols_with_content = np.where(diff.max(axis=0) > tol)[0]
+        if cols_with_content.size == 0:
+            return 0
+        return int(cols_with_content.max() - cols_with_content.min()) + 1
+
+    early_frame = render.render_logo_frame(
+        backdrop, cropped_bgr, cropped_alpha, logo_luma, LW, LH, 0.12, logo_params_default, logo_bg_color)
+    early_width_px = logo_content_width_px(early_frame, (40, 40, 40))
+    check(early_width_px > LW * 0.90,
+          f"着地アニメ開始直後（t=0.12s）は、ロゴがほぼ画面幅いっぱいに見える: "
+          f"content_width={early_width_px}px / frame_width={LW}px "
+          f"({early_width_px / LW * 100:.1f}%)")
+
+    # 着地直後(t=landing_sec)は白フラッシュ・画面の揺れがまだ発火中で画面全体の色が
+    # 動いてしまうため、それらが収まった少し後（+0.3秒。スイープ開始前）で計測する
+    landed_frame = render.render_logo_frame(
+        backdrop, cropped_bgr, cropped_alpha, logo_luma, LW, LH,
+        logo_params_default["landing_sec"] + 0.3, logo_params_default, logo_bg_color)
+    landed_width_px = logo_content_width_px(landed_frame, (40, 40, 40))
+    expected_landed_ratio = logo_params_default["width_ratio"]
+    check(abs(landed_width_px / LW - expected_landed_ratio) < 0.08,
+          f"着地完了後は、ロゴの表示幅がwidth_ratio（既定{expected_landed_ratio:.2f}）付近に縮小している: "
+          f"content_width={landed_width_px}px / frame_width={LW}px "
+          f"({landed_width_px / LW * 100:.1f}%)")
+    check(early_width_px > landed_width_px,
+          "着地アニメ中に、ロゴの表示幅は「画面いっぱい」から「着地後の定位置サイズ」へ縮小していく: "
+          f"開始直後={early_width_px}px → 着地完了={landed_width_px}px")
 
     print("")
     print("=== ラストロゴ：着地タイミング（アンティシペーション＋セトル・揺れ・スイープ開始の遅延） ===")

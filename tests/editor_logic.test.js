@@ -685,11 +685,19 @@ test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として2.2秒（
   assert.strictEqual(core.DEFAULT_LOGO_DURATION_SEC, 2.2);
 });
 
-test("logoLandingScale/logoLandingEase: t=0で初期スケール(160%)・不透明度0、t=1で100%・不透明度1", () => {
+test("logoLandingScale/logoLandingEase: t=0で初期スケール(LOGO_PREVIEW_SCALE_FROM)・不透明度0、t=1で100%・不透明度1", () => {
   assert.strictEqual(core.logoLandingScale(0), core.LOGO_PREVIEW_SCALE_FROM);
   assert.strictEqual(core.logoLandingScale(1), 1);
   assert.strictEqual(core.logoLandingEase(0), 0);
   assert.strictEqual(core.logoLandingEase(1), 1);
+});
+
+test("LOGO_PREVIEW_SCALE_FROM: 「画面幅の105%」÷LOGO_PREVIEW_WIDTH_RATIO(0.62)から算出される", () => {
+  const expected = core.LOGO_PREVIEW_START_WIDTH_RATIO / core.LOGO_PREVIEW_WIDTH_RATIO;
+  assert.ok(Math.abs(core.LOGO_PREVIEW_SCALE_FROM - expected) < 1e-9);
+  assert.strictEqual(core.LOGO_PREVIEW_WIDTH_RATIO, 0.62);
+  assert.strictEqual(core.LOGO_PREVIEW_START_WIDTH_RATIO, 1.05);
+  assert.strictEqual(core.LOGO_PREVIEW_LANDING_SEC, 0.6);
 });
 
 test("buildProjectJSON/parseProjectJSON: shadowを含めて往復できる", () => {

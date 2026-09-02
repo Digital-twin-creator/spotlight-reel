@@ -500,6 +500,50 @@ def gen_dummy_logo(out_path):
     return out_path
 
 
+def gen_dummy_logo_opaque_black(out_path, jpeg_path=None):
+    """
+    テスト用のダミーロゴ（不透明・黒背景・アルファ無し、余白多め）を生成する。
+    実際の店舗ロゴでよくある「黒背景に白抜き文字、アルファチャンネル無しで書き出された
+    PNG/JPG」を想定し、render.pyの自動クロップ（crop_logo_content。アルファが無い画像では
+    四隅の背景色との距離で内容を判定する経路を通る）が実際に効くかを確認するための
+    テスト画像。gen_dummy_logo()（アルファ有り、余白16%）よりさらに余白を大きく
+    （画像幅の30%）取っている。
+    jpeg_pathを指定すると、同じ絵柄をJPEG（quality=82）でも書き出す。JPEG圧縮ノイズが
+    あっても自動クロップが正しく働くか（四隅1画素だけでなくパッチ平均で背景色を
+    推定しているか）の確認に使う。
+    """
+    w, h, ss = 640, 640, 2
+    img = Image.new("RGB", (w * ss, h * ss), (6, 6, 8))
+    draw = ImageDraw.Draw(img)
+    pad = int(w * ss * 0.30)
+    draw.ellipse([pad, pad, w * ss - pad, h * ss - pad],
+                 fill=(235, 235, 240), outline=(255, 255, 255), width=4 * ss)
+
+    text = "SHOP"
+    font = None
+    for cand in (ANTON_FONT_PATH, FONT_PATH):
+        if os.path.exists(cand):
+            try:
+                font = ImageFont.truetype(cand, 70 * ss)
+                break
+            except Exception:  # noqa: BLE001
+                font = None
+    if font is not None:
+        draw.text((w * ss / 2, h * ss / 2), text, font=font, anchor="mm", fill=(10, 10, 20))
+    else:
+        arr = np.array(img)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 2.4 * ss, 5 * ss)
+        org = (int(w * ss / 2 - tw / 2), int(h * ss / 2 + th / 2))
+        cv2.putText(arr, text, org, cv2.FONT_HERSHEY_SIMPLEX, 2.4 * ss, (10, 10, 20), 5 * ss, cv2.LINE_AA)
+        img = Image.fromarray(arr)
+
+    img = img.resize((w, h), Image.LANCZOS)
+    img.save(out_path)  # PNGだがアルファ無し(RGB)のまま保存する
+    if jpeg_path:
+        img.convert("RGB").save(jpeg_path, "JPEG", quality=82)
+    return out_path
+
+
 # ---------------------------------------------------------------------------
 # extract.py 検証用のシルエット画像（examples/extract_test_silhouette.png）
 #
@@ -735,6 +779,13 @@ def main():
     log("=== ダミーロゴを生成 ===")
     logo_path = gen_dummy_logo(os.path.join(EXAMPLES_DIR, "store_logo.png"))
     log(f"  {logo_path} を生成しました")
+
+    log("=== ダミーロゴ（不透明・黒背景・余白多め）を生成 ===")
+    opaque_logo_path = gen_dummy_logo_opaque_black(
+        os.path.join(EXAMPLES_DIR, "store_logo_opaque_black.png"),
+        jpeg_path=os.path.join(EXAMPLES_DIR, "store_logo_opaque_black.jpg"))
+    log(f"  {opaque_logo_path} / {os.path.splitext(opaque_logo_path)[0]}.jpg を生成しました"
+        "（自動クロップ＋JPEGノイズ耐性の検証用）")
 
     log("=== extract.py 検証用シルエット画像を生成 ===")
     silhouette_path = gen_extract_test_silhouette(os.path.join(EXAMPLES_DIR, "extract_test_silhouette.png"))

@@ -1496,9 +1496,13 @@ function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H) {
 /**
  * ラストロゴの「着地」演出の簡易プレビュー用イージング（render.pyのLOGO_*_DEFAULTと
  * 同じ値。厳密な揺れ・フラッシュ・SFXテールまでは簡易プレビューでは再現しない）。
+ * 「画面幅の105%（画面いっぱい）」で表示を始め、着地後の基準表示幅（0.62、
+ * render.pyのLOGO_WIDTH_RATIO_DEFAULTと同じ）まで縮小する。
  */
-var LOGO_PREVIEW_SCALE_FROM = 1.6;
-var LOGO_PREVIEW_LANDING_SEC = 0.45;
+var LOGO_PREVIEW_WIDTH_RATIO = 0.62;
+var LOGO_PREVIEW_START_WIDTH_RATIO = 1.05;
+var LOGO_PREVIEW_SCALE_FROM = LOGO_PREVIEW_START_WIDTH_RATIO / LOGO_PREVIEW_WIDTH_RATIO;
+var LOGO_PREVIEW_LANDING_SEC = 0.6;
 var LOGO_PREVIEW_SWEEP_SEC = 0.70;
 function logoLandingEase(t) {
   t = clamp01(t);
@@ -1855,6 +1859,8 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_LOGO_AT: DEFAULT_LOGO_AT,
     DEFAULT_LOGO_DURATION_SEC: DEFAULT_LOGO_DURATION_SEC,
     DEFAULT_LOGO_BACKGROUND: DEFAULT_LOGO_BACKGROUND,
+    LOGO_PREVIEW_WIDTH_RATIO: LOGO_PREVIEW_WIDTH_RATIO,
+    LOGO_PREVIEW_START_WIDTH_RATIO: LOGO_PREVIEW_START_WIDTH_RATIO,
     LOGO_PREVIEW_SCALE_FROM: LOGO_PREVIEW_SCALE_FROM,
     LOGO_PREVIEW_LANDING_SEC: LOGO_PREVIEW_LANDING_SEC,
     LOGO_PREVIEW_SWEEP_SEC: LOGO_PREVIEW_SWEEP_SEC,
@@ -3732,7 +3738,7 @@ function startPreviewPlayback() {
       scale = logoLandingScale(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
       opacity = logoLandingEase(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
     }
-    var lw = W * 0.4 * scale;
+    var lw = W * LOGO_PREVIEW_WIDTH_RATIO * scale;
     var lh = lw * (logoImgEl.naturalHeight / logoImgEl.naturalWidth);
     var x = (W - lw) / 2, y = (H - lh) / 2;
     pctx.save();
