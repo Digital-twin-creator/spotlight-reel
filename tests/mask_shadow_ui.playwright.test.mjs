@@ -137,6 +137,40 @@ async function main() {
     "解析完了のステータス文言が表示される");
   await page.click("#maskPreviewCloseBtn");
   check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが隠れる");
+  const canvasSizeAfterCloseBtn = await page.evaluate(() => {
+    var c = document.getElementById("maskPreviewCanvas");
+    return { w: c.width, h: c.height };
+  });
+  check(canvasSizeAfterCloseBtn.w === 0 && canvasSizeAfterCloseBtn.h === 0,
+    "✕で閉じるとプレビューcanvasのバッキングストアを即座に解放する（width/height=0）: " + JSON.stringify(canvasSizeAfterCloseBtn));
+
+  console.log("");
+  console.log("=== 簡易プレビュー：Esc・モーダル外タップでも閉じ、閉じた後は編集操作が復帰する ===");
+  const drawBox = await page.locator("#drawCanvas").boundingBox();
+
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
+    null, { timeout: 5000 });
+  check(await page.isVisible("#maskPreviewModal"), "再度開くとモーダルが表示される");
+  await page.keyboard.press("Escape");
+  check(await page.isHidden("#maskPreviewModal"), "Escキーでもモーダルが閉じる");
+
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
+    null, { timeout: 5000 });
+  await page.mouse.click(8, 8); // カード外（背景）の左上をタップ
+  check(await page.isHidden("#maskPreviewModal"), "モーダル外（背景）をタップしても閉じる");
+
+  // 閉じた直後、下に隠れていた描画キャンバスへのタッチがすぐ復帰する
+  // （モーダルの残骸がブロックし続けていないことの確認）
+  const strokesBeforeTouchBack = await page.evaluate(() => draft.strokes.length);
+  await dragStroke(page, drawBox, 0.15, 0.6, 0.3, 0.7);
+  const strokesAfterTouchBack = await page.evaluate(() => draft.strokes.length);
+  check(strokesAfterTouchBack === strokesBeforeTouchBack + 1,
+    "モーダルを閉じた直後、描画キャンバスへのブラシ操作がすぐ復帰する（裏でブロックされていない）");
+  // 上の確認用に描いたストロークは、後続のauto+brushテスト（drawn順の検証）に
+  // 影響しないようここで消しておく
+  await page.click("#clearStrokesBtn");
 
   await page.selectOption("#maskModeSelect", "brush");
   check(await page.isHidden("#maskPreviewBtn"), "mask='brush'に戻すと「切り抜き結果を確認」ボタンは隠れる");
@@ -199,6 +233,46 @@ async function main() {
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   check((await page.inputValue("#maskModeSelect")) === "auto+brush", "再編集時にmaskModeSelectが'auto+brush'に復元される");
   check(await page.isVisible("#brushEditModeRow"), "再編集時にbrushEditModeRowが表示される");
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  console.log("");
+  console.log("=== 簡易プレビュー：閉じずにフリーズ編集を終えても自動的に閉じ、別フリーズでは改めて追従する ===");
+  // フリーズDを新規に追加し、プレビューを開いたまま（閉じずに）「完了」してみる。
+  // モーダルは画面全体を覆うposition:fixedのため、実際の指操作では下の「完了」ボタンを
+  // タップすることはできない（=ユーザーが誤って古い結果を持ち越す経路は無い）が、
+  // 万一プログラム的にcommitFreezeEdit()が呼ばれた場合の安全網として、
+  // exitDrawMode側で確実にモーダルを閉じることを直接確認しておく。
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.selectOption("#maskModeSelect", "auto");
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
+    null, { timeout: 5000 });
+  check(await page.isVisible("#maskPreviewModal"), "「完了」を押す前提として、プレビューを開いたままにしておく");
+  await page.evaluate(() => { draft.name = "プレビュー開いたまま完了テスト"; commitFreezeEdit(); });
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  check(await page.isHidden("#maskPreviewModal"),
+    "プレビューを開いたまま「完了」しても、フリーズ編集を抜けると同時にモーダルは自動的に閉じる");
+
+  // 続けてフリーズEを新規に開き、プレビューが（フリーズDの結果を持ち越さず）新しい
+  // 静止フレームで改めて解析されることを確認する
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.selectOption("#maskModeSelect", "auto");
+  check(await page.isHidden("#maskPreviewModal"), "別フリーズの編集を開始した時点でもモーダルは閉じたまま");
+  await page.click("#maskPreviewBtn");
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("解析完了") >= 0,
+    null, { timeout: 5000 });
+  check(await page.isVisible("#maskPreviewModal"),
+    "別フリーズの編集でも「切り抜き結果を確認」は改めて開いて解析できる（追従する）");
+  const followCanvasSize = await page.evaluate(() => {
+    var c = document.getElementById("maskPreviewCanvas");
+    return { w: c.width, h: c.height };
+  });
+  check(followCanvasSize.w > 1 && followCanvasSize.h > 1,
+    "新しいフリーズの静止フレームで改めて描画されている: " + JSON.stringify(followCanvasSize));
+  await page.click("#maskPreviewCloseBtn");
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 

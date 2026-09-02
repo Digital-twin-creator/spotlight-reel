@@ -982,6 +982,45 @@ test("estimateForegroundMaskCoarse: 幅・高さが0以下なら空配列を返�
   assert.strictEqual(core.estimateForegroundMaskCoarse(new Uint8ClampedArray(0), 10, 0).length, 0);
 });
 
+test("estimateForegroundMaskCoarse: 解析用の解像度を引き上げても（長辺260px相当）中央は前景・四隅は背景のまま", () => {
+  const W = 180, H = 260;
+  const subjectRect = { x0: 60, x1: 120, y0: 60, y1: 220 };
+  const rgba = makeSyntheticFrame(W, H, [40, 60, 90], [210, 180, 40], subjectRect);
+  const mask = core.estimateForegroundMaskCoarse(rgba, W, H);
+  assert.strictEqual(mask.length, W * H);
+  const at = (x, y) => mask[y * W + x];
+  assert.strictEqual(at(90, 140), 255, "被写体矩形の中心は前景と判定される");
+  assert.strictEqual(at(3, 3), 0, "左上の隅は背景と判定される");
+  assert.strictEqual(at(W - 4, H - 4), 0, "右下の隅は背景と判定される");
+});
+
+function addNoise(rgba, W, H, amplitude, seed) {
+  // 決定論的な疑似乱数（テストを再現可能にするため、Math.randomは使わない）
+  let s = seed;
+  function next() { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; }
+  const out = new Uint8ClampedArray(rgba.length);
+  for (let i = 0; i < W * H; i++) {
+    const o = i * 4;
+    for (let c = 0; c < 3; c++) {
+      out[o + c] = rgba[o + c] + Math.round((next() - 0.5) * 2 * amplitude);
+    }
+    out[o + 3] = 255;
+  }
+  return out;
+}
+
+test("estimateForegroundMaskCoarse: 背景に多少のノイズ（撮影環境の粒状感相当）があっても、深い内側の判定は揺らがない", () => {
+  const W = 60, H = 100;
+  const subjectRect = { x0: 20, x1: 40, y0: 30, y1: 80 };
+  const clean = makeSyntheticFrame(W, H, [30, 30, 200], [230, 200, 60], subjectRect);
+  const noisy = addNoise(clean, W, H, 10, 42);
+  const mask = core.estimateForegroundMaskCoarse(noisy, W, H);
+  const at = (x, y) => mask[y * W + x];
+  assert.strictEqual(at(30, 55), 255, "ノイズがあっても被写体矩形の中心は前景と判定される");
+  assert.strictEqual(at(2, 2), 0, "ノイズがあっても左上の隅は背景と判定される");
+  assert.strictEqual(at(W - 3, H - 3), 0, "ノイズがあっても右下の隅は背景と判定される");
+});
+
 /* ---- validateProjectForConfirmation（「動画を作る」実行前の内容チェック） ---- */
 function makeFreeze(overrides) {
   return Object.assign({

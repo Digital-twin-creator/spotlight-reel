@@ -589,6 +589,78 @@ async function main() {
     await context.close();
   }
 
+  console.log("");
+  console.log("=== シナリオ8: GitHub連携設定は「保存」ボタンを押さなくても入力のたびに保存され、クラッシュ後も消えない ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
+
+    // 「設定を保存」ボタンは一切押さず、入力するだけにする
+    // （page.fillはvalueを設定した上でinputイベントを発火させる。
+    //   実機で「保存を押し忘れたままページがクラッシュした」状況に相当する）
+    await page.fill("#ghUserInput", OWNER);
+    await page.fill("#ghRepoInput", REPO);
+    await page.fill("#ghTokenInput", TOKEN);
+
+    const statusBeforeSaveClick = await page.evaluate(() => document.getElementById("ghSettingsStatus").textContent);
+    check(statusBeforeSaveClick.indexOf("保存済み") >= 0 && statusBeforeSaveClick.indexOf(TOKEN.slice(-4)) >= 0,
+      "「保存」ボタンを押す前でも、入力するだけでステータス表示が「保存済み」になる: " + statusBeforeSaveClick);
+
+    // ここでリロード（＝ボタンを押す前にクラッシュ・再読み込みされた状況を再現）
+    await page.reload({ waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.evaluate(() => { document.getElementById("ghSettingsDetails").open = true; });
+
+    const userAfterCrash = await page.inputValue("#ghUserInput");
+    const repoAfterCrash = await page.inputValue("#ghRepoInput");
+    const tokenAfterCrash = await page.inputValue("#ghTokenInput");
+    check(userAfterCrash === OWNER, "「保存」ボタンを押さず入力しただけでも、ユーザー名はクラッシュ後の再読み込みで消えない: " + userAfterCrash);
+    check(repoAfterCrash === REPO, "同上：リポジトリ名も消えない: " + repoAfterCrash);
+    check(tokenAfterCrash === TOKEN, "同上：トークンも消えない: " + tokenAfterCrash);
+
+    console.log("");
+    console.log("--- 保存キーのバージョンが変わっても(v1→v2相当)、GitHub連携設定だけは自動的に引き継がれる ---");
+    // GH_SETTINGS_KEYを次のバージョンに見立てた別名に切り替え、現行キーが空の状態で
+    // loadGhSettings()を呼び直す。旧キー(現行のGH_SETTINGS_KEY)がGH_SETTINGS_LEGACY_KEYSに
+    // 含まれていれば、そこから読み込んで新しいキーへ自動移行されるはずである。
+    const migrationResult = await page.evaluate(() => {
+      var oldKey = GH_SETTINGS_KEY;
+      var newKey = "spotlightReel.ghSettings.v2-test";
+      GH_SETTINGS_LEGACY_KEYS.push(oldKey);
+      GH_SETTINGS_KEY = newKey;
+      try {
+        loadGhSettings();
+        var userAfterMigration = document.getElementById("ghUserInput").value;
+        var tokenAfterMigration = document.getElementById("ghTokenInput").value;
+        var migratedRaw = localStorage.getItem(newKey);
+        return {
+          userAfterMigration: userAfterMigration,
+          tokenAfterMigration: tokenAfterMigration,
+          migratedSaved: !!migratedRaw && JSON.parse(migratedRaw).token === tokenAfterMigration
+        };
+      } finally {
+        GH_SETTINGS_KEY = oldKey;
+        GH_SETTINGS_LEGACY_KEYS.length = 0;
+        localStorage.removeItem(newKey);
+      }
+    });
+    check(migrationResult.userAfterMigration === OWNER,
+      "現行キーを切り替えても、旧キーからユーザー名が自動的に引き継がれる: " + migrationResult.userAfterMigration);
+    check(migrationResult.tokenAfterMigration === TOKEN,
+      "同上：トークンも自動的に引き継がれる");
+    check(migrationResult.migratedSaved === true,
+      "引き継いだ設定は新しいキーの下にも保存され、以後は移行処理なしで読み込める");
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
   await browser.close();
 
   console.log("");

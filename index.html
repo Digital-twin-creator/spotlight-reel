@@ -224,7 +224,19 @@
     background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
     padding:14px; width:100%; max-width:420px; max-height:90vh; overflow:auto;
   }
-  .mask-preview-header{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;}
+  /* 閉じるボタンはカードの子ではなくモーダル（ビューポート全体）基準のposition:fixedにし、
+     カード内をスクロールしても常に右上に留まるようにする */
+  .mask-preview-close-fixed{
+    position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); right:12px; z-index:70;
+    width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:18px; line-height:1; background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    padding:0;
+  }
+  .mask-preview-badge{
+    display:inline-block; margin:8px 0; padding:6px 10px; border-radius:999px;
+    background:rgba(255,179,0,.15); border:1px solid rgba(255,179,0,.45); color:#ffb300;
+    font-size:12px; font-weight:700; line-height:1.4;
+  }
   #maskPreviewCanvas{width:100%; height:auto; border-radius:10px; background:#000; display:block;}
   .mask-preview-note{font-size:12px; line-height:1.5;}
 
@@ -444,17 +456,16 @@
          #editorSection以外のmain直下要素がdisplay:noneになる仕組みのため、
          #fixedEditorBarと同様にeditorSectionの子として置く必要がある。 -->
     <div class="mask-preview-modal" id="maskPreviewModal" hidden>
+      <button type="button" class="mask-preview-close-fixed" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
       <div class="mask-preview-card">
-        <div class="mask-preview-header">
-          <strong>切り抜き結果プレビュー（簡易）</strong>
-          <button type="button" class="ghost small" id="maskPreviewCloseBtn">✕ 閉じる</button>
-        </div>
+        <strong>切り抜き結果プレビュー（簡易）</strong>
+        <div class="mask-preview-badge">⚠️ 参考値です。本番の自動切り抜きはこれよりずっと高精度です</div>
         <div class="muted" id="maskPreviewStatus">解析中…</div>
         <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
         <p class="muted mask-preview-note">
-          ⚠️ これは端末上で低解像度・簡易アルゴリズム（中央矩形初期化＋境界色との統計的な
-          近さで前景／背景を粗く分類する、GrabCut風の簡易推定）によって作った目安です。
-          本番のレンダリング（サーバー側の自動切り抜きAI）はこれより高精度です。
+          端末上・低解像度で行うGrabCut風の簡易推定（中央矩形を前景の手がかり、外周を
+          確実な背景として初期化し、CIE Lab色空間での近さで前景／背景を分類、
+          輪郭のはっきりした境目ではノイズ均しを止める、という簡略版）による目安です。
           大まかな範囲の確認用としてご利用ください。
         </p>
       </div>
@@ -1512,14 +1523,20 @@ function computeBgPixel(r, g, b, mode) {
  * エディタ内（端末上・低解像度）だけで即座に確認できるようにするための、
  * GrabCut風の簡易被写体推定。DOM非依存の純粋関数（rgbaはUint8ClampedArray/配列、
  * 長さ W*H*4）。本物のGrabCut（反復するGMM＋グラフカットによる平滑化）ではなく、
- * 次の1回限りの簡易版：
+ * 次の簡易版：
  *   1. 中央矩形を「前景シード」、外周リングを「確実な背景」として初期化する
  *      （GrabCutの矩形初期化と同じ考え方）。
- *   2. 前景シード・背景リングそれぞれの平均色を求め、全画素を「どちらの平均色に
+ *   2. 全画素をCIE Lab色空間に変換する（単純なRGBユークリッド距離より、明るさ・
+ *      色味の違いを人の見た目に近い形で比較できるため、分離精度が上がる）。
+ *   3. 前景シード・背景リングそれぞれの平均Labを求め、全画素を「どちらの平均に
  *      近いか」で2値分類する（GMM＋グラフカットの反復更新を、平均色1個ずつの
- *      最近傍分類1回に簡略化したもの）。
- *   3. 分類結果から前景の平均色を再計算し、もう一度だけ分類し直す（反復1回のみ）。
- *   4. 3x3の多数決でノイズを均す（グラフカットの平滑化項の簡易代用）。
+ *      最近傍分類に簡略化したもの）。
+ *   4. 分類結果から前景の平均を再計算し、収束するか上限回数に達するまで
+ *      分類をやり直す（簡易k-meansのような反復。背景側は外周リングの平均に
+ *      固定し、前景の誤判定に引きずられないようにする）。
+ *   5. 3x3の多数決でノイズを均す（グラフカットの平滑化項の簡易代用）。ただし
+ *      輝度の勾配が大きい＝実際の輪郭らしい画素は多数決で塗り替えず、
+ *      境界が多数決でにじむのを防ぐ。
  * 戻り値: Uint8Array（長さ W*H。255=前景、0=背景）。
  * 実際のサーバー側切り抜き（rembg）よりずっと粗い近似であることを呼び出し側で
  * 必ず明示すること（本物のAIモデルではない）。
@@ -1531,24 +1548,52 @@ function estimateForegroundMaskCoarse(rgba, W, H) {
   var fgX0 = Math.round(W * 0.30), fgX1 = Math.round(W * 0.70);
   var fgY0 = Math.round(H * 0.18), fgY1 = Math.round(H * 0.85);
 
-  function regionMean(x0, y0, x1, y1) {
-    var n = 0, r = 0, g = 0, b = 0;
-    for (var y = y0; y < y1; y++) {
-      for (var x = x0; x < x1; x++) {
-        var i = (y * W + x) * 4;
-        r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; n++;
-      }
-    }
-    return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
+  // sRGB(0-255) -> 線形光 のルックアップテーブル（256要素。画素ごとのpow()呼び出しを避ける）
+  var LIN_LUT = new Float32Array(256);
+  for (var v = 0; v < 256; v++) {
+    var cn = v / 255;
+    LIN_LUT[v] = cn <= 0.04045 ? cn / 12.92 : Math.pow((cn + 0.055) / 1.055, 2.4);
+  }
+  function labF(t) {
+    return t > 0.008856 ? Math.cbrt(t) : (7.787 * t) + (16 / 116);
+  }
+  function rgbToLab(r, g, b) {
+    var rl = LIN_LUT[r], gl = LIN_LUT[g], bl = LIN_LUT[b];
+    var x = (0.4124564 * rl + 0.3575761 * gl + 0.1804375 * bl) / 0.95047;
+    var y = (0.2126729 * rl + 0.7151522 * gl + 0.0721750 * bl) / 1.0;
+    var z = (0.0193339 * rl + 0.1191920 * gl + 0.9503041 * bl) / 1.08883;
+    var fx = labF(x), fy = labF(y), fz = labF(z);
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
   }
 
-  // 背景シード＝外周リング（上下左右の帯）の平均色
-  var borderSum = [0, 0, 0], borderN = 0;
+  // 全画素のLabを事前計算しておく（以降の反復のたびにRGB→Lab変換をやり直さないため）
+  var lab = new Float32Array(W * H * 3);
+  for (var y0 = 0; y0 < H; y0++) {
+    for (var x0 = 0; x0 < W; x0++) {
+      var pi = (y0 * W + x0) * 4, li = (y0 * W + x0) * 3;
+      var c = rgbToLab(rgba[pi], rgba[pi + 1], rgba[pi + 2]);
+      lab[li] = c[0]; lab[li + 1] = c[1]; lab[li + 2] = c[2];
+    }
+  }
+
+  function regionMeanLab(x0, y0, x1, y1) {
+    var n = 0, L = 0, A = 0, B = 0;
+    for (var y = y0; y < y1; y++) {
+      for (var x = x0; x < x1; x++) {
+        var li2 = (y * W + x) * 3;
+        L += lab[li2]; A += lab[li2 + 1]; B += lab[li2 + 2]; n++;
+      }
+    }
+    return n > 0 ? [L / n, A / n, B / n] : [50, 0, 0];
+  }
+
+  // 背景シード＝外周リング（上下左右の帯）の平均Lab
+  var borderSumL = 0, borderSumA = 0, borderSumB = 0, borderN = 0;
   function accumBorder(x0, y0, x1, y1) {
     for (var y = y0; y < y1; y++) {
       for (var x = x0; x < x1; x++) {
-        var i = (y * W + x) * 4;
-        borderSum[0] += rgba[i]; borderSum[1] += rgba[i + 1]; borderSum[2] += rgba[i + 2]; borderN++;
+        var li2 = (y * W + x) * 3;
+        borderSumL += lab[li2]; borderSumA += lab[li2 + 1]; borderSumB += lab[li2 + 2]; borderN++;
       }
     }
   }
@@ -1557,18 +1602,18 @@ function estimateForegroundMaskCoarse(rgba, W, H) {
   accumBorder(0, 0, marginX, H);
   accumBorder(Math.max(0, W - marginX), 0, W, H);
   var bgMean = borderN > 0
-    ? [borderSum[0] / borderN, borderSum[1] / borderN, borderSum[2] / borderN]
+    ? [borderSumL / borderN, borderSumA / borderN, borderSumB / borderN]
     : [0, 0, 0];
-  var fgMean = regionMean(fgX0, fgY0, fgX1, fgY1);
+  var fgMean = regionMeanLab(fgX0, fgY0, fgX1, fgY1);
 
   var mask = new Uint8Array(W * H);
   function classify(fg, bg) {
     for (var y = 0; y < H; y++) {
       for (var x = 0; x < W; x++) {
-        var i = (y * W + x) * 4;
-        var r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
-        var df = (r - fg[0]) * (r - fg[0]) + (g - fg[1]) * (g - fg[1]) + (b - fg[2]) * (b - fg[2]);
-        var db = (r - bg[0]) * (r - bg[0]) + (g - bg[1]) * (g - bg[1]) + (b - bg[2]) * (b - bg[2]);
+        var li2 = (y * W + x) * 3;
+        var L = lab[li2], A = lab[li2 + 1], B = lab[li2 + 2];
+        var df = (L - fg[0]) * (L - fg[0]) + (A - fg[1]) * (A - fg[1]) + (B - fg[2]) * (B - fg[2]);
+        var db = (L - bg[0]) * (L - bg[0]) + (A - bg[1]) * (A - bg[1]) + (B - bg[2]) * (B - bg[2]);
         mask[y * W + x] = df < db ? 255 : 0;
       }
     }
@@ -1586,24 +1631,53 @@ function estimateForegroundMaskCoarse(rgba, W, H) {
   classify(fgMean, bgMean);
   pinBorderToBackground();
 
-  // 分類結果から前景平均を再計算し、1回だけ更新して分類し直す
-  var fgSum = [0, 0, 0], fgN = 0;
-  for (var idx = 0; idx < mask.length; idx++) {
-    if (mask[idx]) {
-      var pi = idx * 4;
-      fgSum[0] += rgba[pi]; fgSum[1] += rgba[pi + 1]; fgSum[2] += rgba[pi + 2]; fgN++;
+  // 前景の平均Labを再計算して分類し直す、を最大4回繰り返す（簡易k-meansのような反復）。
+  // 平均の変化が小さくなったら早期に打ち切る（背景側は外周リングの平均に固定したまま）。
+  var ITER_MAX = 4;
+  for (var iter = 0; iter < ITER_MAX; iter++) {
+    var fgSumL = 0, fgSumA = 0, fgSumB = 0, fgN = 0;
+    for (var idx = 0; idx < mask.length; idx++) {
+      if (mask[idx]) {
+        var li3 = idx * 3;
+        fgSumL += lab[li3]; fgSumA += lab[li3 + 1]; fgSumB += lab[li3 + 2]; fgN++;
+      }
     }
-  }
-  if (fgN > 20) {
-    fgMean = [fgSum[0] / fgN, fgSum[1] / fgN, fgSum[2] / fgN];
+    if (fgN <= 20) break;
+    var nextFgMean = [fgSumL / fgN, fgSumA / fgN, fgSumB / fgN];
+    var delta = Math.abs(nextFgMean[0] - fgMean[0]) + Math.abs(nextFgMean[1] - fgMean[1]) + Math.abs(nextFgMean[2] - fgMean[2]);
+    fgMean = nextFgMean;
     classify(fgMean, bgMean);
     pinBorderToBackground();
+    if (delta < 0.5) break; // 収束したら以降の反復は無駄なので打ち切る
   }
 
-  // 3x3多数決でノイズを均す（グラフカットの平滑化項の簡易代用）
+  // エッジ強度（輝度Lチャンネルの簡易勾配）。強いエッジの上にある画素は、次の3x3多数決の
+  // 対象から外し、被写体の輪郭が多数決でにじまないようにする（GrabCutの境界保持に相当）。
+  var edge = new Float32Array(W * H);
+  var edgeMax = 0;
+  for (var y3 = 0; y3 < H; y3++) {
+    for (var x3 = 0; x3 < W; x3++) {
+      var selfLi = (y3 * W + x3) * 3;
+      var lRight = x3 + 1 < W ? lab[(y3 * W + x3 + 1) * 3] : lab[selfLi];
+      var lDown = y3 + 1 < H ? lab[((y3 + 1) * W + x3) * 3] : lab[selfLi];
+      var gx = lRight - lab[selfLi], gy = lDown - lab[selfLi];
+      var mag = Math.sqrt(gx * gx + gy * gy);
+      edge[y3 * W + x3] = mag;
+      if (mag > edgeMax) edgeMax = mag;
+    }
+  }
+  var edgeThreshold = Math.max(6, edgeMax * 0.25);
+
+  // 3x3多数決でノイズを均す（グラフカットの平滑化項の簡易代用）。強いエッジの上にある
+  // 画素はそのままの分類を保つ（輪郭が多数決でにじむのを防ぐ）。
   var smoothed = new Uint8Array(W * H);
   for (var y2 = 0; y2 < H; y2++) {
     for (var x2 = 0; x2 < W; x2++) {
+      var selfIdx = y2 * W + x2;
+      if (edge[selfIdx] >= edgeThreshold) {
+        smoothed[selfIdx] = mask[selfIdx];
+        continue;
+      }
       var on = 0, total = 0;
       for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
@@ -1613,7 +1687,7 @@ function estimateForegroundMaskCoarse(rgba, W, H) {
           if (mask[ny * W + nx]) on++;
         }
       }
-      smoothed[y2 * W + x2] = (total > 0 && on * 2 >= total) ? 255 : 0;
+      smoothed[selfIdx] = (total > 0 && on * 2 >= total) ? 255 : 0;
     }
   }
   return smoothed;
@@ -1910,6 +1984,17 @@ var telopDragging = false;               // テロップをドラッグ中か（
 var telopDragOffsetRatio = { x: 0, y: 0 }; // 掴んだ位置とテロップ位置(pos)のズレ（指に位置が飛ばないよう保持する）
 var previewRAF = null;
 var previewLogoObjectURL = null; // 簡易プレビュー中に読み込んだロゴ画像のObjectURL（停止時に必ず解放する）
+// 簡易プレビュー再生中に確保する表示解像度のcanvas群（frameCanvas/bgCanvas/doneMaskCanvas等）。
+// 再生終了・停止のたびに releasePreviewSessionCanvases() で明示的に解放する
+// （参照を外すだけだとiOS SafariでGCが遅れ、繰り返し再生でメモリを使い切る恐れがあるため）。
+var previewSessionCanvases = [];
+
+function releasePreviewSessionCanvases() {
+  previewSessionCanvases.forEach(function (c) {
+    if (c) { c.width = 0; c.height = 0; }
+  });
+  previewSessionCanvases = [];
+}
 
 var els = {};
 
@@ -2014,7 +2099,15 @@ function init() {
   els.clearStrokesBtn.addEventListener("click", clearAllStrokes);
   els.previewBtn.addEventListener("click", togglePreviewPlayback);
   els.maskPreviewBtn.addEventListener("click", showMaskPreview);
-  els.maskPreviewCloseBtn.addEventListener("click", function () { els.maskPreviewModal.hidden = true; });
+  els.maskPreviewCloseBtn.addEventListener("click", closeMaskPreview);
+  // モーダル背景（カードの外側）をタップしても閉じられるようにする
+  els.maskPreviewModal.addEventListener("click", function (e) {
+    if (e.target === els.maskPreviewModal) closeMaskPreview();
+  });
+  // Escキーでも閉じられるようにする（モーダルが開いている時だけ反応する）
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !els.maskPreviewModal.hidden) closeMaskPreview();
+  });
   els.cancelFreezeBtn.addEventListener("click", cancelFreezeEdit);
   els.commitFreezeBtn.addEventListener("click", commitFreezeEdit);
   els.brushShapeSelect.addEventListener("change", function () {
@@ -2161,6 +2254,12 @@ function init() {
 
   loadGhSettings();
   els.ghSettingsSaveBtn.addEventListener("click", saveGhSettingsFromInputs);
+  // 「保存」ボタンを押し忘れたまま端末が落ちても設定が消えないよう、各入力の変更を
+  // その都度localStorageへも保存する（入力中の値をそのまま保存し、input欄自体は
+  // 書き換えない＝ボタン押下時のtrim正規化とは別経路）
+  els.ghUserInput.addEventListener("input", persistGhSettingsFromInputsSilently);
+  els.ghRepoInput.addEventListener("input", persistGhSettingsFromInputsSilently);
+  els.ghTokenInput.addEventListener("input", persistGhSettingsFromInputsSilently);
   els.ghTokenToggleBtn.addEventListener("click", toggleGhTokenVisibility);
   els.makeVideoBtn.addEventListener("click", startMakeVideoJob);
   els.confirmWarningsBackBtn.addEventListener("click", function () { els.confirmWarningsModal.hidden = true; });
@@ -2383,6 +2482,20 @@ function seekAndWait(t) {
 // 描画モード中はこれだけを表示・利用し、videoへは触れない。
 var frozenFrameCanvas = null;
 
+/**
+ * frozenFrameCanvas（表示解像度そのままの静止フレーム。iPhoneの高dprだと数MB〜十数MBになりうる）を
+ * 手放す前に、必ずwidth/heightを0にしてバッキングストアを即座に解放する。
+ * ただ参照(=null)を外すだけだとiOS SafariのGCタイミング任せになり、描画モードの出入りを
+ * 繰り返すうちにメモリを使い切ってページごとクラッシュする原因になりうるため。
+ */
+function releaseFrozenFrameCanvas() {
+  if (frozenFrameCanvas) {
+    frozenFrameCanvas.width = 0;
+    frozenFrameCanvas.height = 0;
+  }
+  frozenFrameCanvas = null;
+}
+
 function startNewFreeze() {
   attemptEnterDrawMode({
     id: "fz-" + Date.now(),
@@ -2418,6 +2531,9 @@ function editFreeze(id) {
  * ライブ描画ループを止めて描画モードに入る。
  */
 function attemptEnterDrawMode(draftCandidate, isNew) {
+  // 別フリーズの静止フレームに切り替わるため、開いたままの簡易プレビューがあれば
+  // （通常はexitDrawMode側で既に閉じているはずだが、念のため）ここでも確実に閉じる
+  if (!els.maskPreviewModal.hidden) closeMaskPreview();
   captureFrozenFrame().then(function (frame) {
     if (!frame) {
       showError("静止フレームを取得できませんでした。少し待ってからもう一度お試しください。");
@@ -2442,7 +2558,7 @@ function attemptEnterDrawMode(draftCandidate, isNew) {
         els.videoWrap.style.width = "";
         els.videoWrap.style.height = "";
         document.body.classList.remove("freeze-editing");
-        frozenFrameCanvas = null;
+        releaseFrozenFrameCanvas();
         draft = null;
         layoutOverlayCanvases();
         startPlayerRenderLoop();
@@ -2568,13 +2684,17 @@ function exitDrawMode() {
     els.videoWrap.style.height = "";
     stopPreviewPlayback();
     hideDrawHint();
+    // 開いたままの簡易プレビューがあれば、フリーズ編集を抜けるタイミングで必ず閉じる
+    // （閉じずに残ると、次に別のフリーズを編集した時に古い静止フレームの結果が
+    // 表示され続けてしまう）
+    if (!els.maskPreviewModal.hidden) closeMaskPreview();
   } catch (err) {
     showError("後始末中にエラーが発生しました: " + (err && err.message ? err.message : err));
   } finally {
     draft = null;
     currentStroke = null;
     telopDragging = false;
-    frozenFrameCanvas = null;
+    releaseFrozenFrameCanvas();
     document.body.classList.remove("freeze-editing");
     // iOS Safariはposition:fixedの解除後、明示的にレイアウトを読み直させないと
     // 古い固定位置のまま描画され続けることがある（既知のレンダリング不具合）。
@@ -3246,11 +3366,16 @@ function escapeHtml(s) {
  * という問題への対策。端末上・低解像度でGrabCut風の簡易推定（estimateForegroundMaskCoarse、
  * core-logic参照）を行い、「本番はこれより高精度」と明示した上で目安として表示する。 */
 
+// このモーダルを開いた時点のdraft（フリーズ）を覚えておき、閉じずに別フリーズの
+// 編集へ移ってしまった場合でも古い結果を表示し続けないようにする（下のcloseMaskPreview参照）。
+var maskPreviewOpenedForDraft = null;
+
 function showMaskPreview() {
   if (!frozenFrameCanvas) {
     showError("静止フレームがまだ用意できていません。少し待ってからもう一度お試しください。");
     return;
   }
+  maskPreviewOpenedForDraft = draft;
   els.maskPreviewModal.hidden = false;
   els.maskPreviewStatus.textContent = "解析中…";
   els.maskPreviewCanvas.width = 1;
@@ -3270,28 +3395,50 @@ function showMaskPreview() {
   });
 }
 
+/**
+ * プレビューモーダルを閉じ、確保していたcanvasのバッキングストアを明示的に解放する。
+ * iOS Safariはcanvasの裏画像メモリをGCまかせにすると解放が遅れがちで、繰り返し開閉すると
+ * メモリ不足でページごと落ちることがあるため、参照を外すだけでなくwidth/heightを0にして
+ * 即座に解放する（✕ボタン・Esc・モーダル外タップ・フリーズの切り替え、すべてここを通る）。
+ */
+function closeMaskPreview() {
+  els.maskPreviewModal.hidden = true;
+  els.maskPreviewCanvas.width = 0;
+  els.maskPreviewCanvas.height = 0;
+  maskPreviewOpenedForDraft = null;
+}
+
 function runMaskPreviewAnalysis() {
+  // モーダルが閉じられていたり、開いた後に別フリーズの編集へ切り替わっていたりしたら、
+  // 古い（または今はもう存在しない）静止フレームを解析・表示しない
+  if (els.maskPreviewModal.hidden || draft !== maskPreviewOpenedForDraft) return;
+
   var srcW = frozenFrameCanvas.width, srcH = frozenFrameCanvas.height;
   if (!srcW || !srcH) {
     els.maskPreviewStatus.textContent = "静止フレームの画像サイズが取得できませんでした。";
     return;
   }
 
-  // 低解像度に縮小して解析する（速度優先。長辺を最大200pxに）
-  var MAX_DIM = 200;
+  // 低解像度に縮小して解析する（長辺を最大260pxに。フル解像度のImageDataは
+  // 一度も保持しない＝常にこの縮小後のサイズだけを扱う）
+  var MAX_DIM = 260;
   var scale = Math.min(1, MAX_DIM / Math.max(srcW, srcH));
   var W = Math.max(2, Math.round(srcW * scale));
   var H = Math.max(2, Math.round(srcH * scale));
 
+  // 解析用の一時canvasは使い終わったら即座にwidth=0で解放する（下記のwork/overlayとも）
   var work = document.createElement("canvas");
   work.width = W; work.height = H;
   var wctx = work.getContext("2d");
   wctx.drawImage(frozenFrameCanvas, 0, 0, W, H);
   var imageData = wctx.getImageData(0, 0, W, H);
+  work.width = 0; work.height = 0;
 
   var mask = estimateForegroundMaskCoarse(imageData.data, W, H);
+  imageData = null;
 
   // 表示：静止フレームをそのまま描き、推定した前景マスクをシアン半透明で重ねる
+  // （表示側も常に縮小解像度＝最大720px幅に留める。frozenFrameCanvas自体のコピーは作らない）
   var dispW = Math.min(720, srcW);
   var dispScale = dispW / srcW;
   var dispH = Math.round(srcH * dispScale);
@@ -3315,6 +3462,7 @@ function runMaskPreviewAnalysis() {
   octx.putImageData(overlayData, 0, 0);
   dctx.imageSmoothingEnabled = false;
   dctx.drawImage(overlay, 0, 0, dispW, dispH);
+  overlay.width = 0; overlay.height = 0;
 
   els.maskPreviewStatus.textContent = "解析完了（" + W + "x" + H + "px・簡易推定。シアン色の部分が推定した被写体の範囲）";
 }
@@ -3330,6 +3478,7 @@ function stopPreviewPlayback() {
   if (previewRAF) cancelAnimationFrame(previewRAF);
   previewRAF = null;
   if (previewLogoObjectURL) { URL.revokeObjectURL(previewLogoObjectURL); previewLogoObjectURL = null; }
+  releasePreviewSessionCanvases();
   els.videoWrap.classList.remove("previewing");
   els.previewBtn.textContent = "▶ プレビュー";
   if (draft) setPlayStatus("フリーズ編集中");
@@ -3361,6 +3510,9 @@ function startPreviewPlayback() {
     return;
   }
 
+  // 前回の再生セッションが何らかの理由で解放されずに残っていた場合の保険
+  releasePreviewSessionCanvases();
+
   var W = overlaySize.width, H = overlaySize.height;
   var frameCanvas, fctx, bgCanvas, geoInfo;
   try {
@@ -3370,10 +3522,12 @@ function startPreviewPlayback() {
     frameCanvas.width = W; frameCanvas.height = H;
     fctx = frameCanvas.getContext("2d");
     fctx.drawImage(frozenFrameCanvas, 0, 0, W, H);
+    previewSessionCanvases.push(frameCanvas);
 
     bgCanvas = document.createElement("canvas");
     bgCanvas.width = W; bgCanvas.height = H;
     buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background);
+    previewSessionCanvases.push(bgCanvas);
 
     geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
   } catch (err) {
@@ -3409,9 +3563,11 @@ function startPreviewPlayback() {
   var autoPlaceholderMaskCanvas = null, autoBrushStrokeMaskCanvas = null;
   if (maskMode === "auto") {
     autoPlaceholderMaskCanvas = buildAutoPlaceholderMask(W, H);
+    previewSessionCanvases.push(autoPlaceholderMaskCanvas);
   } else if (maskMode === "auto+brush") {
     autoBrushStrokeMaskCanvas = buildStrokeCompositeMask(
       draft.strokes, W, H, resolveBrushShape(draft.brushShape), Number(els.brushWidthSlider.value));
+    previewSessionCanvases.push(autoBrushStrokeMaskCanvas);
   }
 
   // 出現アニメが完了した状態のマスク（render.pyのdone_maskと同じ考え方。フリーズ中は
@@ -3419,6 +3575,7 @@ function startPreviewPlayback() {
   // 表示はすべてこれを使う。
   var doneMaskCanvas = document.createElement("canvas");
   doneMaskCanvas.width = W; doneMaskCanvas.height = H;
+  previewSessionCanvases.push(doneMaskCanvas);
   if (maskMode === "brush") {
     if (geoInfo.total > 0) {
       var dmctx = doneMaskCanvas.getContext("2d");
@@ -3561,6 +3718,7 @@ function startPreviewPlayback() {
     }
     previewRAF = null;
     if (previewLogoObjectURL) { URL.revokeObjectURL(previewLogoObjectURL); previewLogoObjectURL = null; }
+    releasePreviewSessionCanvases();
     els.videoWrap.classList.remove("previewing");
     els.previewBtn.textContent = "▶ プレビュー";
     if (draft) setPlayStatus("フリーズ編集中");
@@ -4033,13 +4191,32 @@ function loadFromLocalStorage(videoFileName) {
 /* ---------------- GitHub連携・動画を作るジョブ ---------------- */
 
 var GH_SETTINGS_KEY = "spotlightReel.ghSettings.v1";
+// GH_SETTINGS_KEYを将来バージョンアップする（v1→v2等）際は、それまでの
+// GH_SETTINGS_KEYの値をここに追加しておく。loadGhSettings()が現行キーに
+// データが無い場合だけ古い順に確認し、見つかればそのまま現行キーへ移行（再保存）する。
+// これにより、保存キーの形式が変わってもGitHub連携設定（トークン等）だけは失われない。
+var GH_SETTINGS_LEGACY_KEYS = [];
+
+function readGhSettingsRaw(key) {
+  try {
+    var raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
 
 function loadGhSettings() {
-  var saved = null;
-  try {
-    var raw = localStorage.getItem(GH_SETTINGS_KEY);
-    if (raw) saved = JSON.parse(raw);
-  } catch (e) { /* 無視 */ }
+  var saved = readGhSettingsRaw(GH_SETTINGS_KEY);
+  if (!saved) {
+    for (var i = GH_SETTINGS_LEGACY_KEYS.length - 1; i >= 0 && !saved; i--) {
+      var legacy = readGhSettingsRaw(GH_SETTINGS_LEGACY_KEYS[i]);
+      if (legacy) {
+        saved = legacy;
+        persistGhSettings(legacy.user || "", legacy.repo || "spotlight-jobs", legacy.token || "");
+      }
+    }
+  }
   els.ghUserInput.value = (saved && saved.user) || "";
   els.ghRepoInput.value = (saved && saved.repo) || "spotlight-jobs";
   els.ghTokenInput.value = (saved && saved.token) || "";
@@ -4062,6 +4239,20 @@ function saveGhSettingsFromInputs() {
   var token = els.ghTokenInput.value.trim();
   els.ghUserInput.value = user;
   els.ghRepoInput.value = repo;
+  persistGhSettings(user, repo, token);
+  updateGhSettingsStatusDisplay();
+}
+
+/**
+ * 「設定を保存」ボタンを押さなくても、各入力欄を変更するたびにlocalStorageへ保存する。
+ * ページが（例えばクラッシュで）再読み込みされても入力済みの設定が消えないようにするための、
+ * ボタン押下とは独立した保存経路。入力中のカーソル位置に影響しないよう、
+ * 保存だけ行い入力欄の値自体は書き換えない（trim等の正規化は保存ボタン側でのみ行う）。
+ */
+function persistGhSettingsFromInputsSilently() {
+  var user = els.ghUserInput.value.trim();
+  var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
+  var token = els.ghTokenInput.value.trim();
   persistGhSettings(user, repo, token);
   updateGhSettingsStatusDisplay();
 }
