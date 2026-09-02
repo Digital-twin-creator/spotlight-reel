@@ -58,11 +58,19 @@ guard let sourceImage = CIImage(contentsOf: inputURL) else {
 let handler = VNImageRequestHandler(ciImage: sourceImage, options: [:])
 let request = VNGenerateForegroundInstanceMaskRequest()
 
-// 初回の実機（GitHub-hosted macOSランナー）検証で、Visionが要求するコンピュートデバイス
-// （GPU/ANE）がそのまま使えるかどうかをログに残しておく（うまく走らなかった場合の
-// 切り分け用。ANEはmacOSランナーの仮想化環境では利用できない可能性があるとの報告があるため）。
+// 実機（GitHub-hosted macOSランナー）検証で判明した既知の問題への対処：
+// VNGenerateForegroundInstanceMaskRequestはCPUでは動作せず、GitHub-hosted macOSランナー
+// （Apple Virtualization.framework上の仮想マシンで、ANEは仮想化環境に露出されない）では、
+// コンピュートデバイスを明示指定しないと Code=9「Could not create inference context」で
+// 失敗することを確認した。Appleのデベロッパーフォーラムで案内されている回避策どおり、
+// 利用可能なステージデバイスからGPUを明示的に選んでperform前に設定する。
 if let devices = try? request.supportedComputeStageDevices {
     FileHandle.standardError.write("Vision compute devices: \(devices)\n".data(using: .utf8)!)
+    if let mainStageDevices = devices[.main],
+       let gpuDevice = mainStageDevices.first(where: { "\($0)".contains("GPU") }) {
+        request.setComputeDevice(gpuDevice, for: .main)
+        FileHandle.standardError.write("Vision compute device をGPUに固定しました: \(gpuDevice)\n".data(using: .utf8)!)
+    }
 }
 
 do {
