@@ -405,80 +405,37 @@ async function main() {
 
   console.log("");
   console.log("=== 「切り抜き結果を確認」ボタン：自動系モードでのみ表示され、押すとサーバー確認（extract.yml）が走る ===");
+  // 以前は結果を全画面モーダルに直接描画していたが、実機（iOS Safari）でレイアウト起因の
+  // 表示不具合が2度の修正でも解消しなかったため、モーダル方式をやめ、結果は別ページ
+  // （preview.html）への通常のページ遷移で表示するようにした。エディタ側は進捗を
+  // テキストのみで表示し、完了したら「結果を見る」ボタンを出す（showMaskPreview参照）。
+  // preview.htmlでの画像表示・「OK」による確認結果の反映・戻った時の状態復元は、
+  // 別ファイル（tests/preview_confirm_flow.playwright.test.mjs）でページ遷移込みで検証する。
   check(await page.isVisible("#maskPreviewBtn"), "mask='auto'のときは「切り抜き結果を確認」ボタンが表示される");
-  check(await page.isHidden("#maskPreviewModal"), "押す前はモーダルが隠れている");
+  check(await page.isHidden("#maskPreviewStatusLine"), "押す前はステータス文言が隠れている");
+  check(await page.isHidden("#maskPreviewViewResultBtn"), "押す前は「結果を見る」ボタンが隠れている");
   await page.click("#maskPreviewBtn");
-  check(await page.isVisible("#maskPreviewModal"), "ボタンを押すと（結果を待たず）すぐにモーダルが表示される");
-  check(await page.isVisible("#maskPreviewProgressWrap"), "進捗バーが表示される");
-  check(await page.isVisible("#maskPreviewSkipBtn"), "「確認せずに進む」の選択肢が表示される");
-  const modalBox = await page.locator("#maskPreviewModal").boundingBox();
-  const viewportSize = page.viewportSize();
-  check(Math.abs(modalBox.width - viewportSize.width) < 1 && Math.abs(modalBox.height - viewportSize.height) < 1,
-    "モーダルは画面幅いっぱいの全画面オーバーレイになっている: " + JSON.stringify({ modalBox, viewportSize }));
-  const closeBtnBox = await page.locator("#maskPreviewCloseBtn").boundingBox();
-  check(closeBtnBox.width >= 44 && closeBtnBox.height >= 44,
-    "右上の閉じるボタンが十分大きい（44px角以上）: " + JSON.stringify(closeBtnBox));
-  check(closeBtnBox.x >= 0 && closeBtnBox.y >= 0 &&
-    closeBtnBox.x + closeBtnBox.width <= viewportSize.width && closeBtnBox.y + closeBtnBox.height <= viewportSize.height,
-    "閉じるボタンがviewport内に収まっており実際にタップ可能な位置にある: " + JSON.stringify({ closeBtnBox, viewportSize }));
+  check(await page.isVisible("#maskPreviewStatusLine"), "ボタンを押すと（結果を待たず）すぐにステータス文言（テキストのみ）が表示される");
+  check(await page.isHidden("#maskPreviewViewResultBtn"), "処理中はまだ「結果を見る」ボタンは隠れている");
 
-  // 実機（iOS Safari）で見つかった不具合の再現条件：フリーズ編集中は#editorSectionが
-  // -webkit-overflow-scrolling:touchのスクロール領域になり、この中にposition:fixedの
-  // モーダルをネストすると、実機では「ビューポート基準の全画面」ではなく祖先の
-  // スクロールコンテナ内の擬似固定として描画されてしまう（Chromiumでは再現しないため、
-  // 単なるboundingBoxのサイズ確認だけでは検出できない）。これを構造的に防いだことを、
-  // freeze-editing状態（映像エリアがfixedで固定される状態）であることを明示した上で確認する。
-  check(await page.evaluate(() => document.body.classList.contains("freeze-editing")),
-    "この検証はフリーズ編集中（body.freeze-editing、映像エリアがfixedで固定される状態）で行っている");
-  check(await page.evaluate(() => {
-    var modal = document.getElementById("maskPreviewModal");
-    return modal.closest("#editorSection") === null;
-  }), "maskPreviewModalは#editorSection（-webkit-overflow-scrolling:touchのスクロール領域）の外にある");
-  check(await page.evaluate(() => document.getElementById("maskPreviewModal").parentElement === document.body),
-    "maskPreviewModalはbody直下に置かれている（ネストされたposition:fixedの実機不具合を避けるため）");
-  const videoWrapCenter = await page.evaluate(() => {
-    var r = document.getElementById("videoWrap").getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  });
-  check(await page.evaluate(({ x, y }) => {
-    var el = document.elementFromPoint(x, y);
-    return !!(el && el.closest("#maskPreviewModal"));
-  }, videoWrapCenter),
-    "映像エリア（#videoWrap）の中心座標でも、実際にオーバーレイが最前面に描画されている（elementFromPointで確認）");
-  await page.waitForFunction(() => {
-    var status = document.getElementById("maskPreviewStatus");
-    return status && status.textContent.indexOf("確認完了") >= 0;
-  }, null, { timeout: 15000 });
-  const previewCanvasSize = await page.evaluate(() => {
-    var c = document.getElementById("maskPreviewCanvas");
-    return { w: c.width, h: c.height };
-  });
-  check(previewCanvasSize.w > 1 && previewCanvasSize.h > 1,
-    "サーバーから取得したpreview.pngがcanvasに実際のサイズで描画されている: " + JSON.stringify(previewCanvasSize));
-  check((await page.textContent("#maskPreviewStatus")).indexOf("確認完了") >= 0,
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
+    null, { timeout: 15000 });
+  check((await page.textContent("#maskPreviewStatusLine")).indexOf("確認完了") >= 0,
     "確認完了のステータス文言が表示される");
-  check(await page.isHidden("#maskPreviewProgressWrap"), "完了すると進捗バーが隠れる");
-  check(await page.isHidden("#maskPreviewSkipBtn"), "完了すると「確認せずに進む」も隠れる（もう待つものが無いため）");
+  check(await page.isVisible("#maskPreviewViewResultBtn"), "確認完了後、「結果を見る」ボタンが表示される");
   check(confirmMock.createReleaseCalls === 1, "確認用のReleaseが作成される");
   check(confirmMock.blobCalls === 2, "静止フレーム(frame.jpg)とparams.jsonの2つのblobが作成される: " + confirmMock.blobCalls);
   check(confirmMock.treePayload && confirmMock.treePayload.tree.some((e) => e.path === "frame.jpg")
     && confirmMock.treePayload.tree.some((e) => e.path === "params.json"),
     "treeにframe.jpgとparams.jsonが含まれる: " + JSON.stringify(confirmMock.treePayload && confirmMock.treePayload.tree));
   check(confirmMock.dispatchCalls === 1, "render.ymlではなくextract.ymlがdispatchされる（モックのURLパターンが一致）: " + confirmMock.dispatchCalls);
-  check(confirmMock.downloadAssetCalls >= 1, "job-confirm-<tag>ブランチのpreview.pngをContents API経由で認証付きで取得する");
-  const confirmedAlphaOnDraft = await page.evaluate(() => draft.confirmedAlpha);
-  check(!!confirmedAlphaOnDraft && confirmedAlphaOnDraft.tag === confirmMock.tag,
-    "確認完了後、draft.confirmedAlphaに確認結果（タグ等）が記録される（本番レンダリング時の再利用用）: " +
-    JSON.stringify(confirmedAlphaOnDraft));
-
-  await page.click("#maskPreviewCloseBtn");
-  check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが隠れる");
-  const canvasSizeAfterCloseBtn = await page.evaluate(() => {
-    var c = document.getElementById("maskPreviewCanvas");
-    return { w: c.width, h: c.height };
-  });
-  check(canvasSizeAfterCloseBtn.w === 0 && canvasSizeAfterCloseBtn.h === 0,
-    "✕で閉じるとプレビューcanvasのバッキングストアを即座に解放する（width/height=0）: " + JSON.stringify(canvasSizeAfterCloseBtn));
+  check(confirmMock.downloadAssetCalls === 0,
+    "結果画像のダウンロードはエディタ側では行わない（preview.htmlへ遷移した先で行う）: " + confirmMock.downloadAssetCalls);
+  const pendingReview = await page.evaluate(() => pendingReviewResult);
+  check(!!pendingReview && pendingReview.tag === confirmMock.tag,
+    "確認完了後、「結果を見る」が指す確認ジョブのタグがpendingReviewResultに記録される: " + JSON.stringify(pendingReview));
+  check((await page.evaluate(() => draft.confirmedAlpha)) == null,
+    "この時点ではまだdraft.confirmedAlphaは記録されない（preview.htmlで「OK」した時だけ記録される）");
 
   console.log("");
   console.log("=== サーバー確認：タブのバックグラウンド化等で見失った結果も、次に開いた時に拾える（pendingConfirm復旧） ===");
@@ -500,24 +457,21 @@ async function main() {
       tag: recoveryTag, runId: 777015, cacheAssetTimeLabel: Number(currentTime).toFixed(3)
     });
     await routeConfirmApiGithub(page, recoveryMock);
-    await page.evaluate(() => { draft.confirmedAlpha = null; });
 
     await page.click("#maskPreviewBtn");
-    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
       null, { timeout: 15000 });
 
     check(recoveryMock.createReleaseCalls === 0, "復旧時はReleaseを新規作成しない（既存のものをそのまま使う）: " + recoveryMock.createReleaseCalls);
     check(recoveryMock.blobCalls === 0, "復旧時は静止フレーム等の再アップロードをしない: " + recoveryMock.blobCalls);
     check(recoveryMock.dispatchCalls === 0, "復旧時はextract.ymlを再dispatchしない: " + recoveryMock.dispatchCalls);
     check(recoveryMock.getReleaseByTagCalls >= 1, "保存しておいたタグでReleaseを直接確認する");
-    const confirmedAlphaAfterRecovery = await page.evaluate(() => draft.confirmedAlpha);
-    check(!!confirmedAlphaAfterRecovery && confirmedAlphaAfterRecovery.tag === recoveryTag,
-      "復旧した結果がdraft.confirmedAlphaに記録される: " + JSON.stringify(confirmedAlphaAfterRecovery));
+    const pendingReviewAfterRecovery = await page.evaluate(() => pendingReviewResult);
+    check(!!pendingReviewAfterRecovery && pendingReviewAfterRecovery.tag === recoveryTag,
+      "復旧した結果のタグが「結果を見る」の遷移先として記録される: " + JSON.stringify(pendingReviewAfterRecovery));
     const pendingAfterRecovery = await page.evaluate((videoFileName) =>
       localStorage.getItem("spotlightReel:pendingConfirm:" + videoFileName), currentVideoFileName);
     check(pendingAfterRecovery === null, "復旧が完了するとpendingConfirmの記録は消される");
-
-    await page.click("#maskPreviewCloseBtn");
   }
 
   console.log("");
@@ -530,74 +484,48 @@ async function main() {
     await routeConfirmApiGithub(page, failMock);
 
     await page.click("#maskPreviewBtn");
-    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("失敗しました") >= 0,
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("失敗しました") >= 0,
       null, { timeout: 15000 });
 
     check(await page.isVisible("#maskPreviewActionsLink"), "失敗時はActionsページへのリンクが表示される（無言にならない）");
     const actionsHref = await page.getAttribute("#maskPreviewActionsLink", "href");
     check(!!actionsHref && actionsHref.indexOf("/actions/runs/777016") >= 0,
       "リンク先が該当のActions run（777016）を指している: " + actionsHref);
-    check((await page.textContent("#maskPreviewStatus")).indexOf("確認せずに進む") >= 0,
-      "エラーメッセージに「確認せずに進む」で続けられる旨が含まれる");
-
-    await page.click("#maskPreviewCloseBtn");
-    check(await page.isHidden("#maskPreviewActionsLink"), "閉じるとActionsリンクも隠れる（次回の確認に持ち越さない）");
+    check(await page.isHidden("#maskPreviewViewResultBtn"), "失敗時は「結果を見る」ボタンは表示されない");
   }
 
   console.log("");
-  console.log("=== 「確認せずに進む」：結果を待たずにモーダルを閉じられ、confirmedAlphaは記録されない ===");
-  const skipMock = makeConfirmMock({ runId: 777010 });
-  await routeConfirmApiGithub(page, skipMock);
-  await page.evaluate(() => { draft.confirmedAlpha = null; });
-  await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => !document.getElementById("maskPreviewSkipBtn").hidden, null, { timeout: 3000 });
-  await page.click("#maskPreviewSkipBtn");
-  check(await page.isHidden("#maskPreviewModal"), "「確認せずに進む」ですぐにモーダルが閉じる（結果を待たない）");
-  await page.waitForTimeout(500); // 打ち切り後もバックグラウンドの非同期処理が例外を投げないことを確認する猶予
-  const confirmedAlphaAfterSkip = await page.evaluate(() => draft.confirmedAlpha);
-  check(!confirmedAlphaAfterSkip, "「確認せずに進む」を選ぶと確認結果は記録されない（そのままdraft.confirmedAlphaはnullのまま）");
-  check(pageErrors.length === 0, "スキップ後もページ例外が発生していない: " + JSON.stringify(pageErrors));
-
-  console.log("");
-  console.log("=== サーバー確認：Escキーでも閉じ、閉じた後は編集操作が復帰する（全画面化により背景タップは廃止） ===");
-  // 全画面オーバーレイ化により、映像とチロームが画面全体を隙間なく覆うため、
-  // 「カード外（背景）をタップして閉じる」という以前の操作は成立しなくなった
-  // （閉じるボタン・Escキーのみが閉じる手段になる）。
+  console.log("=== サーバー確認：フリーズ編集を終える／別フリーズへ切り替えると、確認UIがリセットされる ===");
   const drawBox = await page.locator("#drawCanvas").boundingBox();
-  const escTapMock = makeConfirmMock({ runId: 777011 });
-  await routeConfirmApiGithub(page, escTapMock);
-
-  await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
-    null, { timeout: 15000 });
-  check(await page.isVisible("#maskPreviewModal"), "再度開くとモーダルが表示される");
-  await page.keyboard.press("Escape");
-  check(await page.isHidden("#maskPreviewModal"), "Escキーでもモーダルが閉じる");
-
   const closeBtnMock = makeConfirmMock({ runId: 777012 });
   await routeConfirmApiGithub(page, closeBtnMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
     null, { timeout: 15000 });
-  await page.click("#maskPreviewCloseBtn");
-  check(await page.isHidden("#maskPreviewModal"), "閉じるボタンでモーダルが閉じる");
+  check(await page.isVisible("#maskPreviewViewResultBtn"), "確認完了後「結果を見る」が表示されている状態を前提にする");
 
-  // 閉じた直後、下に隠れていた描画キャンバスへのタッチがすぐ復帰する
-  // （モーダルの残骸がブロックし続けていないことの確認）
+  // 描画キャンバスへのタッチはブロックされずすぐ操作できる（全画面モーダルが無くなったため、
+  // 元々このためのEscキー・背景タップ等の回避策も不要になった）
   const strokesBeforeTouchBack = await page.evaluate(() => draft.strokes.length);
   await dragStroke(page, drawBox, 0.15, 0.6, 0.3, 0.7);
   const strokesAfterTouchBack = await page.evaluate(() => draft.strokes.length);
   check(strokesAfterTouchBack === strokesBeforeTouchBack + 1,
-    "モーダルを閉じた直後、描画キャンバスへのブラシ操作がすぐ復帰する（裏でブロックされていない）");
+    "確認完了状態でも描画キャンバスへのブラシ操作をブロックしない（全画面モーダルが無いため）");
   // 上の確認用に描いたストロークは、後続のauto+brushテスト（drawn順の検証）に
   // 影響しないようここで消しておく
   await page.click("#clearStrokesBtn");
+
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   console.log("");
   console.log("=== サーバー確認：GitHub連携の設定が未入力だと通信せずエラー表示になる ===");
   {
     let calledUnexpectedly = false;
     await page.route("https://api.github.com/**", (route) => { calledUnexpectedly = true; route.abort(); });
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.selectOption("#maskModeSelect", "auto");
     // ghSettingsDetailsはフリーズ編集中は隠れた領域(mainSection側)にあるため、
     // page.fillではなく直接値を書き換える（showMaskPreview側は表示状態に関わらず
     // .value.trim()を読むだけなので、これで「未入力状態」を正しく再現できる）。
@@ -607,7 +535,7 @@ async function main() {
     });
     await page.click("#maskPreviewBtn");
     await page.waitForTimeout(300);
-    check(await page.isHidden("#maskPreviewModal"), "設定未入力の場合、モーダルは開かない");
+    check(await page.isHidden("#maskPreviewStatusLine"), "設定未入力の場合、確認処理は始まらない（ステータス文言も出ない）");
     const errStatus = await page.evaluate(() => document.getElementById("errorBannerText").textContent);
     check(errStatus.indexOf("設定") >= 0, "GitHub連携設定の入力を促すエラーが表示される: " + errStatus);
     check(calledUnexpectedly === false, "設定未入力の場合、GitHub APIへは一切通信しない");
@@ -620,7 +548,14 @@ async function main() {
       document.getElementById("ghTokenInput").value = t;
     }, { u: CONFIRM_OWNER, r: CONFIRM_REPO, t: CONFIRM_TOKEN });
     await routeConfirmApiGithub(page, makeConfirmMock({ runId: 777020 }));
+    await page.click("#cancelFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   }
+
+  check(pageErrors.length === 0, "サーバー確認まわりの一連の操作でページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   await page.selectOption("#maskModeSelect", "brush");
   check(await page.isHidden("#maskPreviewBtn"), "mask='brush'に戻すと「切り抜き結果を確認」ボタンは隠れる");
@@ -687,46 +622,38 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   console.log("");
-  console.log("=== 簡易プレビュー：閉じずにフリーズ編集を終えても自動的に閉じ、別フリーズでは改めて追従する ===");
-  // フリーズDを新規に追加し、プレビューを開いたまま（閉じずに）「完了」してみる。
-  // モーダルは画面全体を覆うposition:fixedのため、実際の指操作では下の「完了」ボタンを
-  // タップすることはできない（=ユーザーが誤って古い結果を持ち越す経路は無い）が、
-  // 万一プログラム的にcommitFreezeEdit()が呼ばれた場合の安全網として、
-  // exitDrawMode側で確実にモーダルを閉じることを直接確認しておく。
+  console.log("=== サーバー確認：閉じずにフリーズ編集を終えても確認UIはリセットされ、別フリーズでは改めて追従する ===");
+  // フリーズDを新規に追加し、「結果を見る」が出た状態のまま（何も押さずに）「完了」してみる。
+  // exitDrawMode側で確実にリセットされる（resetMaskPreviewUI）ことを確認する。
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.selectOption("#maskModeSelect", "auto");
   const commitWhileOpenMock = makeConfirmMock({ runId: 777013 });
   await routeConfirmApiGithub(page, commitWhileOpenMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
     null, { timeout: 15000 });
-  check(await page.isVisible("#maskPreviewModal"), "「完了」を押す前提として、プレビューを開いたままにしておく");
+  check(await page.isVisible("#maskPreviewViewResultBtn"), "「完了」を押す前提として、「結果を見る」が出ている状態にしておく");
   await page.evaluate(() => { draft.name = "プレビュー開いたまま完了テスト"; commitFreezeEdit(); });
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
-  check(await page.isHidden("#maskPreviewModal"),
-    "プレビューを開いたまま「完了」しても、フリーズ編集を抜けると同時にモーダルは自動的に閉じる");
 
-  // 続けてフリーズEを新規に開き、プレビューが（フリーズDの結果を持ち越さず）新しい
-  // 静止フレームで改めて解析されることを確認する
+  // 続けてフリーズEを新規に開き、確認UIが（フリーズDの結果を持ち越さず）リセットされた
+  // 状態から始まり、新しい静止フレームで改めて解析されることを確認する
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
   await page.selectOption("#maskModeSelect", "auto");
-  check(await page.isHidden("#maskPreviewModal"), "別フリーズの編集を開始した時点でもモーダルは閉じたまま");
+  check(await page.isHidden("#maskPreviewStatusLine"), "別フリーズの編集を開始した時点でステータス文言はリセットされている");
+  check(await page.isHidden("#maskPreviewViewResultBtn"), "別フリーズの編集を開始した時点で「結果を見る」も隠れている");
   const followMock = makeConfirmMock({ runId: 777014 });
   await routeConfirmApiGithub(page, followMock);
   await page.click("#maskPreviewBtn");
-  await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+  await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
     null, { timeout: 15000 });
-  check(await page.isVisible("#maskPreviewModal"),
+  check(await page.isVisible("#maskPreviewViewResultBtn"),
     "別フリーズの編集でも「切り抜き結果を確認」は改めて開いてサーバー確認できる（追従する）");
-  const followCanvasSize = await page.evaluate(() => {
-    var c = document.getElementById("maskPreviewCanvas");
-    return { w: c.width, h: c.height };
-  });
-  check(followCanvasSize.w > 1 && followCanvasSize.h > 1,
-    "新しいフリーズの静止フレームで改めて描画されている: " + JSON.stringify(followCanvasSize));
-  await page.click("#maskPreviewCloseBtn");
+  const followPending = await page.evaluate(() => pendingReviewResult);
+  check(!!followPending && followPending.tag === followMock.tag,
+    "新しいフリーズの確認ジョブのタグに追従している（フリーズDの結果を持ち越さない）: " + JSON.stringify(followPending));
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
@@ -856,7 +783,7 @@ async function main() {
     const rvmMock = makeConfirmMock({ runId: 777030 });
     await routeConfirmApiGithub(page, rvmMock);
     await page.click("#maskPreviewBtn");
-    await page.waitForFunction(() => document.getElementById("maskPreviewStatus").textContent.indexOf("確認完了") >= 0,
+    await page.waitForFunction(() => document.getElementById("maskPreviewStatusLine").textContent.indexOf("確認完了") >= 0,
       null, { timeout: 15000 });
 
     const treeEntryPaths = (rvmMock.treePayload && rvmMock.treePayload.tree || []).map((e) => e.path);
@@ -880,7 +807,6 @@ async function main() {
     check(typeof rvmMock.lastParams.clip_fps === "number" && rvmMock.lastParams.clip_fps > 0,
       "params.json.clip_fpsが正の数値: " + rvmMock.lastParams.clip_fps);
 
-    await page.click("#maskPreviewCloseBtn");
     await page.click("#cancelFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
     await page.selectOption("#maskModelSelect", "isnet-general-use");
