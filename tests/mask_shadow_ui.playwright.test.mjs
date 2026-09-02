@@ -41,6 +41,34 @@ function prepareTestVideo() {
   return out;
 }
 
+/** 効果音ライブラリのアップロードテスト用に、ごく短い有効なPCM16 WAVファイルを作る（外部依存なし） */
+function prepareTestSfxWav(fileName, durationSec) {
+  const sr = 8000;
+  const n = Math.round(sr * durationSec);
+  const dataBytes = n * 2;
+  const buf = Buffer.alloc(44 + dataBytes);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + dataBytes, 4);
+  buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);   // PCM
+  buf.writeUInt16LE(1, 22);   // mono
+  buf.writeUInt32LE(sr, 24);
+  buf.writeUInt32LE(sr * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(dataBytes, 40);
+  for (let i = 0; i < n; i++) {
+    const sample = Math.round(Math.sin(2 * Math.PI * 440 * (i / sr)) * 16000);
+    buf.writeInt16LE(sample, 44 + i * 2);
+  }
+  const out = path.join(os.tmpdir(), fileName);
+  fs.writeFileSync(out, buf);
+  return out;
+}
+
 let failed = 0;
 let passed = 0;
 function check(cond, label) {
@@ -429,6 +457,65 @@ async function main() {
   check((await page.textContent("#previewBtn")) === "▶ プレビュー", "「■ 停止」を押すとプレビューが止まりボタン表示が戻る");
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  console.log("");
+  console.log("=== 効果音ライブラリ：mp3/wavファイルの登録・選択・JSON出力（{file,align}オブジェクト） ===");
+  const sfxWavPath = prepareTestSfxWav("spotlight_reel_test_sfx.wav", 0.3);
+  await page.setInputFiles("#sfxLibraryFileInput", sfxWavPath);
+  await page.waitForFunction(
+    () => document.getElementById("sfxLibraryStatus").textContent.indexOf("登録しました") >= 0,
+    null, { timeout: 5000 });
+  check((await page.evaluate(() => sfxLibrary.length)) === 1,
+    "ファイルを選ぶとsfxLibrary（メモリキャッシュ）に1件登録される");
+  const libId = await page.evaluate(() => sfxLibrary[0].id);
+  check(!!libId, "登録されたファイルにidが振られる: " + libId);
+
+  // ページをリロードしてもIndexedDBから復元されることを確認する
+  await page.reload({ waitUntil: "load" });
+  await page.click("#guideCloseBtn").catch(() => {});
+  await page.waitForFunction(
+    (id) => window.sfxLibrary && window.sfxLibrary.some((f) => f.id === id),
+    libId, { timeout: 5000 }
+  );
+  check(true, "リロード後もIndexedDBから効果音ライブラリが復元される（sfxLibraryに同じidが残る）");
+
+  await page.setInputFiles("#videoFileInput", videoPath);
+  await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+  await page.waitForTimeout(300);
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  await page.fill("#nameInput", "SFXライブラリテスト");
+  await page.selectOption("#sfxSelect", "lib:" + libId);
+  check(!(await page.isHidden("#sfxAlignSelect")), "ライブラリファイルを選ぶとsfxAlignSelectが表示される");
+  await page.selectOption("#sfxAlignSelect", "end_at_landing");
+  await page.click("#commitFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  const styleAfterFreezeSfx = await page.evaluate(() => buildProjectJSON(appState));
+  const fzWithSfx = styleAfterFreezeSfx.freezes.filter((f) => f.name === "SFXライブラリテスト")[0];
+  check(!!fzWithSfx, "テスト前提：名前を付けたフリーズがJSON出力に含まれている");
+  check(!!fzWithSfx && fzWithSfx.sfx && fzWithSfx.sfx.align === "end_at_landing" &&
+    typeof fzWithSfx.sfx.file === "string" && fzWithSfx.sfx.file.indexOf("sfx/" + libId) === 0,
+    "フリーズでライブラリ効果音を選ぶと、JSON出力のsfxが{file,align}オブジェクトになる: " +
+    JSON.stringify(fzWithSfx && fzWithSfx.sfx));
+
+  await page.click("#logoSection summary");
+  await page.selectOption("#logoSfxSelect", "lib:" + libId);
+  check(!(await page.isHidden("#logoSfxAlignSelect")), "ロゴでライブラリファイルを選ぶとlogoSfxAlignSelectが表示される");
+  await page.selectOption("#logoSfxAlignSelect", "peak_at_landing");
+  check((await page.evaluate(() => appState.logo.sfxLibraryId)) === libId,
+    "appState.logo.sfxLibraryIdが選択したファイルのidになる");
+  check((await page.evaluate(() => appState.logo.sfxAlign)) === "peak_at_landing",
+    "appState.logo.sfxAlignがpeak_at_landingになる");
+
+  console.log("");
+  console.log("=== 効果音ライブラリ：一覧からの削除 ===");
+  await page.click("#sfxLibrarySection summary");
+  page.once("dialog", (d) => d.accept());  // confirm()ダイアログをOKで受ける
+  await page.click("#sfxLibraryList button.danger");
+  await page.waitForFunction(() => window.sfxLibrary.length === 0, null, { timeout: 5000 });
+  check(true, "削除ボタンでライブラリから除去され、sfxLibraryが空になる");
 
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 

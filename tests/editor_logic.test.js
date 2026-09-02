@@ -403,6 +403,108 @@ test("parseProjectJSON: buildProjectJSONで高精度モデルを書き出し→�
   assert.strictEqual(loaded.maskModel, "birefnet-portrait");
 });
 
+/* ---- 効果音ライブラリ（自分のmp3/wav、align位置合わせ） ---- */
+
+test("resolveSfxAlign: 未知の値・未指定は既定(start_at_landing)にフォールバックする", () => {
+  assert.strictEqual(core.resolveSfxAlign(undefined, core.SFX_ALIGNS_FREEZE), "start_at_landing");
+  assert.strictEqual(core.resolveSfxAlign("no-such-align", core.SFX_ALIGNS_FREEZE), "start_at_landing");
+  assert.strictEqual(core.resolveSfxAlign("peak_at_landing", core.SFX_ALIGNS_FREEZE), "start_at_landing",
+    "フリーズ用のalignセットにpeak_at_landingは含まれないのでフォールバックする");
+});
+
+test("resolveSfxAlign: 対応するalignセット内の値はそのまま返る", () => {
+  assert.strictEqual(core.resolveSfxAlign("end_at_landing", core.SFX_ALIGNS_FREEZE), "end_at_landing");
+  assert.strictEqual(core.resolveSfxAlign("peak_at_landing", core.SFX_ALIGNS_LOGO), "peak_at_landing");
+});
+
+test("sfxLibraryAssetPath: idと拡張子から一意なパスを作る（ファイル名本体には依存しない）", () => {
+  assert.strictEqual(core.sfxLibraryAssetPath("sfx-abc123", "my rise.mp3"), "sfx/sfx-abc123.mp3");
+  assert.strictEqual(core.sfxLibraryAssetPath("sfx-xyz", "drum.WAV"), "sfx/sfx-xyz.wav");
+  assert.strictEqual(core.sfxLibraryAssetPath("sfx-1", "noext"), "sfx/sfx-1.mp3",
+    "拡張子が無ければmp3にフォールバックする");
+});
+
+test("collectUsedSfxLibraryIds: フリーズ・ロゴの両方から重複無く集める", () => {
+  const freezes = [
+    { sfxLibraryId: "a" }, { sfxLibraryId: "b" }, { sfxLibraryId: "a" }, { sfx: "shakin" }
+  ];
+  assert.deepStrictEqual(core.collectUsedSfxLibraryIds(freezes, { sfxLibraryId: "b" }), ["a", "b"]);
+  assert.deepStrictEqual(core.collectUsedSfxLibraryIds(freezes, { sfxLibraryId: "c" }), ["a", "b", "c"]);
+  assert.deepStrictEqual(core.collectUsedSfxLibraryIds([], null), []);
+});
+
+test("sfxSelectValue/applySfxSelectValue: <select>値とsfx/sfxLibraryIdペアを相互変換できる", () => {
+  assert.strictEqual(core.sfxSelectValue(null, "shakin"), "shakin");
+  assert.strictEqual(core.sfxSelectValue("sfx-1", "shakin"), "lib:sfx-1",
+    "sfxLibraryIdがあればプリセット値より優先される");
+  assert.deepStrictEqual(core.applySfxSelectValue("shakin"), { sfx: "shakin", sfxLibraryId: null });
+  assert.deepStrictEqual(core.applySfxSelectValue("lib:sfx-1"), { sfx: "", sfxLibraryId: "sfx-1" });
+  assert.deepStrictEqual(core.applySfxSelectValue(""), { sfx: "", sfxLibraryId: null });
+});
+
+test("resolveSfxFieldsFromJSON: 文字列プリセットはsfxLibraryId=nullでそのまま解決される", () => {
+  const fields = core.resolveSfxFieldsFromJSON("shakin", [], core.SFX_ALIGNS_FREEZE);
+  assert.strictEqual(fields.sfx, "shakin");
+  assert.strictEqual(fields.sfxLibraryId, null);
+});
+
+test("resolveSfxFieldsFromJSON: {file,align}オブジェクトは、fileのパスが一致するライブラリを見つけて解決する", () => {
+  const lib = [{ id: "sfx-1", name: "rise.mp3" }, { id: "sfx-2", name: "impact.wav" }];
+  const fields = core.resolveSfxFieldsFromJSON(
+    { file: "sfx/sfx-1.mp3", align: "end_at_landing" }, lib, core.SFX_ALIGNS_FREEZE);
+  assert.strictEqual(fields.sfx, "");
+  assert.strictEqual(fields.sfxLibraryId, "sfx-1");
+  assert.strictEqual(fields.sfxAlign, "end_at_landing");
+});
+
+test("resolveSfxFieldsFromJSON: ファイル名一致（別端末で作ったJSON等、パスが一致しない場合）でも解決できる", () => {
+  const lib = [{ id: "sfx-9", name: "rise.mp3" }];
+  const fields = core.resolveSfxFieldsFromJSON(
+    { file: "sfx/rise.mp3", align: "start_at_landing" }, lib, core.SFX_ALIGNS_FREEZE);
+  assert.strictEqual(fields.sfxLibraryId, "sfx-9");
+});
+
+test("resolveSfxFieldsFromJSON: ライブラリに無いファイル参照は未選択のまま、ヒントだけ残す", () => {
+  const fields = core.resolveSfxFieldsFromJSON(
+    { file: "sfx/missing.mp3", align: "end_at_landing" }, [], core.SFX_ALIGNS_FREEZE);
+  assert.strictEqual(fields.sfxLibraryId, null);
+  assert.strictEqual(fields.sfxMissingFile, "sfx/missing.mp3");
+});
+
+test("buildProjectJSON: フリーズがsfxLibraryIdを持つ場合、state.sfxLibraryから{file,align}オブジェクトを出力する", () => {
+  const state = sampleState();
+  state.sfxLibrary = [{ id: "sfx-1", name: "rise.mp3" }];
+  state.freezes[0].sfxLibraryId = "sfx-1";
+  state.freezes[0].sfxAlign = "end_at_landing";
+  state.freezes[0].sfx = "shakin";  // sfxLibraryIdがある場合はこちらは無視される
+  const project = core.buildProjectJSON(state);
+  const fz = project.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.deepStrictEqual(fz.sfx, { file: "sfx/sfx-1.mp3", align: "end_at_landing" });
+});
+
+test("buildProjectJSON: logoがsfxLibraryIdを持つ場合、state.sfxLibraryから{file,align}オブジェクトを出力する", () => {
+  const state = Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "auto", durationSec: 2.2,
+            sfxLibraryId: "sfx-2", sfxAlign: "peak_at_landing" },
+    sfxLibrary: [{ id: "sfx-2", name: "impact.wav" }]
+  });
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.logo.sfx, { file: "sfx/sfx-2.wav", align: "peak_at_landing" });
+});
+
+test("buildProjectJSON/parseProjectJSON: ライブラリ効果音のsfxLibraryId/sfxAlignを往復できる", () => {
+  const lib = [{ id: "sfx-1", name: "rise.mp3" }];
+  const state = sampleState();
+  state.sfxLibrary = lib;
+  state.freezes[0].sfxLibraryId = "sfx-1";
+  state.freezes[0].sfxAlign = "end_at_landing";
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project, lib);
+  const fz = loaded.freezes.filter(f => f.time === state.freezes[0].time)[0];
+  assert.strictEqual(fz.sfxLibraryId, "sfx-1");
+  assert.strictEqual(fz.sfxAlign, "end_at_landing");
+});
+
 /* ---- reveal_sec/slide_sec/hold_secの旧キー読み替え（freeze_sec/brush_anim_sec/shadow.slide_sec） ---- */
 
 test("parseProjectJSON: 旧freeze_sec/brush_anim_secは新しいhold_sec/reveal_secとして読み替えられる", () => {
@@ -642,7 +744,8 @@ test("parseProjectJSON: 新しいstyleキー・style.shadow・logo(background込
   assert.strictEqual(loaded.shadowBlurRatio, 0.02);
   assert.deepStrictEqual(loaded.logo, {
     imageFile: null, imageName: "store_logo.png", at: "last_freeze", background: "#00C8FF",
-    durationSec: 1.2, sfx: "don", autoColorHex: ""
+    durationSec: 1.2, sfx: "don", sfxLibraryId: null, sfxAlign: "start_at_landing", sfxMissingFile: "",
+    autoColorHex: ""
   });
 });
 

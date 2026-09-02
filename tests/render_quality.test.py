@@ -177,7 +177,7 @@ try:
     info_for_plan = render.probe_video(video_path)
     plans_for_silence = render.plan_freezes(
         [dict(render.DEFAULT_STYLE, **project["style"], **fz) for fz in project["freezes"]],
-        30.0, int(round(info_for_plan["duration"] * 30.0)))
+        30.0, int(round(info_for_plan["duration"] * 30.0)), ".")
     total_freeze_sec = sum(p["n_total"] for p in plans_for_silence) / 30.0
     max_freeze_sec = max(p["n_total"] for p in plans_for_silence) / 30.0
     check(all(dur <= max_freeze_sec + 0.5 for _, dur in runs),
@@ -249,7 +249,7 @@ try:
         merged["name"] = fz.get("name", "")
         merged["sfx"] = fz.get("sfx")
         freezes.append(merged)
-    plans = render.plan_freezes(freezes, fps, src_frames)
+    plans = render.plan_freezes(freezes, fps, src_frames, ".")
     for plan in plans:
         fz = plan["fz"]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
@@ -274,11 +274,11 @@ try:
         fz["shadow"] = None
         if fade_sec is not None:
             fz["brush_fade_sec"] = fade_sec
-        plan = render.plan_freezes([fz], fps, src_frames)[0]
+        plan = render.plan_freezes([fz], fps, src_frames, ".")[0]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
         fz_no_name = dict(fz)
         fz_no_name["name"] = ""  # テロップの変化と混同しないよう名前を消して分離する
-        plan_no_name = render.plan_freezes([fz_no_name], fps, src_frames)[0]
+        plan_no_name = render.plan_freezes([fz_no_name], fps, src_frames, ".")[0]
         frames = list(render.iter_freeze_frames(frame, plan_no_name, W, H, fps, {}))
         done_idx = plan_no_name["n_pre"] + plan_no_name["n_reveal"]
         first_rest = frames[done_idx]
@@ -367,7 +367,7 @@ try:
         return fz
 
     def render_freeze_frames(fz):
-        plan = render.plan_freezes([fz], fps, src_frames)[0]
+        plan = render.plan_freezes([fz], fps, src_frames, ".")[0]
         frame = render.grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
         frames = list(render.iter_freeze_frames(frame, plan, W, H, fps, {}))
         return plan, frames
@@ -428,7 +428,7 @@ try:
     print("")
     print("=== shadow演出：効果音は「着地の瞬間」（hold+brush+slide_in後）に鳴る ===")
     fz_sfx = make_dot_freeze(shadow=shadow_cfg, extra={"sfx": "shakin"})
-    plan_sfx = render.plan_freezes([fz_sfx], fps, src_frames)[0]
+    plan_sfx = render.plan_freezes([fz_sfx], fps, src_frames, ".")[0]
     check(plan_sfx["n_slide_in"] == plan_shadow["n_slide_in"],
           "sfx指定してもn_slide_inの計算は変わらない")
     audio = render.build_audio(video_path, [plan_sfx], fps, src_frames, True)
@@ -650,7 +650,7 @@ try:
                        "offset_y": 0.0, "blur": 0.0},
         })
         fz.update(pat)
-        plan = render.plan_freezes([fz], fps, src_frames)[0]
+        plan = render.plan_freezes([fz], fps, src_frames, ".")[0]
         expect_reveal = max(1, round(pat["reveal_sec"] * fps))
         expect_slide = round(pat["slide_sec"] * fps)
         expect_hold = round(pat["hold_sec"] * fps)
@@ -1004,16 +1004,17 @@ try:
     logo_params_no_tail = render.resolve_logo_params(dict(logo_cfg_tail, sfx_tail=False))
 
     plans_logo = render.plan_freezes(
-        [logo_fz], fps, src_frames, logo=logo_cfg_tail, logo_at="last_freeze",
+        [logo_fz], fps, src_frames, ".", logo=logo_cfg_tail, logo_at="last_freeze",
         logo_total_frames=render.logo_total_frames_for(logo_params_tail, fps), logo_crossfade_frames=0)
     plan0 = plans_logo[0]
     check(plan0["show_logo"], "テスト前提：このフリーズでラストロゴが表示される設定になっている")
 
+    don_sfx_spec = {"path": don_path, "align": "start_at_landing", "is_custom": False}
     audio_tail = render.build_audio(video_path, plans_logo, fps, src_frames, True,
-                                     logo_sfx_path=don_path, logo_at="last_freeze",
+                                     logo_sfx_spec=don_sfx_spec, logo_at="last_freeze",
                                      logo_params=logo_params_tail)
     audio_no_tail = render.build_audio(video_path, plans_logo, fps, src_frames, True,
-                                        logo_sfx_path=don_path, logo_at="last_freeze",
+                                        logo_sfx_spec=don_sfx_spec, logo_at="last_freeze",
                                         logo_params=logo_params_no_tail)
 
     landed_frame_offset = plan0["n_pre"] + plan0["n_reveal"] + plan0.get("n_slide_in", 0)
@@ -1171,6 +1172,137 @@ try:
     check(os.path.exists(os.path.join(md.SFX_DIR, "shakin.wav")) and
           os.path.exists(os.path.join(md.SFX_DIR, "don.wav")),
           "make_dummy.py 再実行後もassets/sfx/の各ファイルが存在する（上書きされていない）")
+
+    # ------------------------------------------------------------------
+    # 7) 効果音のカスタムファイル対応（オブジェクト形式のsfx・align位置合わせ）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 効果音：resolve_sfx_spec（文字列プリセット/オブジェクト形式の解決） ===")
+    sfx_json_dir = os.path.join(tmpdir, "sfx_json_dir")
+    os.makedirs(os.path.join(sfx_json_dir, "sfx"), exist_ok=True)
+    riser_samples, riser_content_len = md.synth_test_riser()
+    riser_path = os.path.join(sfx_json_dir, "sfx", "riser.wav")
+    md.write_wav(riser_path, riser_samples)
+
+    preset_spec = render.resolve_sfx_spec("shakin", sfx_json_dir, render.SFX_ALIGNS_FREEZE, "test")
+    check(preset_spec is not None and preset_spec["is_custom"] is False and
+          preset_spec["align"] == "start_at_landing" and os.path.exists(preset_spec["path"]),
+          f"resolve_sfx_spec：文字列プリセットはis_custom=False・align既定で解決される: {preset_spec}")
+
+    custom_spec = render.resolve_sfx_spec(
+        {"file": "sfx/riser.wav", "align": "end_at_landing"}, sfx_json_dir, render.SFX_ALIGNS_FREEZE, "test")
+    check(custom_spec is not None and custom_spec["is_custom"] is True and
+          custom_spec["align"] == "end_at_landing" and custom_spec["path"] == riser_path,
+          f"resolve_sfx_spec：オブジェクト形式はjson_dir基準でfileを解決し、is_custom=True・指定alignを返す: {custom_spec}")
+
+    bad_align_spec = render.resolve_sfx_spec(
+        {"file": "sfx/riser.wav", "align": "no-such-align"}, sfx_json_dir, render.SFX_ALIGNS_FREEZE, "test")
+    check(bad_align_spec is not None and bad_align_spec["align"] == "start_at_landing",
+          f"resolve_sfx_spec：不明なalignは既定(start_at_landing)にフォールバックする: {bad_align_spec}")
+
+    check(render.resolve_sfx_spec({"align": "end_at_landing"}, sfx_json_dir,
+                                   render.SFX_ALIGNS_FREEZE, "test") is None,
+          "resolve_sfx_spec：fileが無いオブジェクトはNoneを返す")
+    check(render.resolve_sfx_spec("no-such-preset", sfx_json_dir, render.SFX_ALIGNS_FREEZE, "test") is None,
+          "resolve_sfx_spec：存在しないプリセット名はNoneを返す")
+    check(render.resolve_sfx_spec(None, sfx_json_dir, render.SFX_ALIGNS_FREEZE, "test") is None,
+          "resolve_sfx_spec：sfx指定が無ければNoneを返す")
+
+    print("")
+    print("=== 効果音：位置合わせの計算（trailing_silence_trimmed_length/peak_sample_index/compute_sfx_start） ===")
+    loud = np.full((1000, 2), 0.5, np.float32)
+    silent = np.zeros((300, 2), np.float32)
+    mixed = np.concatenate([loud, silent], axis=0)
+    got_trim = render.trailing_silence_trimmed_length(mixed)
+    check(got_trim == 1000,
+          f"trailing_silence_trimmed_length：末尾の無音サンプル数を正確に除いた長さを返す: {got_trim}")
+    all_silent = np.zeros((500, 2), np.float32)
+    check(render.trailing_silence_trimmed_length(all_silent) == 500,
+          "trailing_silence_trimmed_length：全体が無音なら安全側でlen(samples)をそのまま返す")
+
+    peak_arr = np.zeros((1000, 2), np.float32)
+    peak_arr[420, 0] = 0.9
+    peak_arr[420, 1] = -0.3  # 絶対値としては0チャンネルの方が大きいので、argmaxは420のままのはず
+    got_peak = render.peak_sample_index(peak_arr)
+    check(got_peak == 420, f"peak_sample_index：全チャンネル中の絶対値最大のサンプル位置を返す: {got_peak}")
+
+    check(render.compute_sfx_start(loud, 5000, "start_at_landing") == 5000,
+          "compute_sfx_start：start_at_landingはlanding_sampleそのまま")
+    check(render.compute_sfx_start(mixed, 5000, "end_at_landing") == 5000 - 1000,
+          "compute_sfx_start：end_at_landingはlanding_sample-trailing_silence_trimmed_length")
+    check(render.compute_sfx_start(peak_arr, 5000, "peak_at_landing") == 5000 - 420,
+          "compute_sfx_start：peak_at_landingはlanding_sample-peak_sample_index")
+
+    loud_flat = np.full((1000, 2), 0.4, np.float32)
+    normalized = render.normalize_peak_dbfs(loud_flat, target_db=-1.0)
+    got_peak_db = 20.0 * float(np.log10(np.max(np.abs(normalized))))
+    check(abs(got_peak_db - (-1.0)) < 1e-4,
+          f"normalize_peak_dbfs：正規化後のピークが指定dBFSになる: {got_peak_db:.4f}dBFS")
+
+    print("")
+    print("=== 効果音：ライザー音（align=end_at_landing）が実際のミックスで着地位置に音の終わりが来る ===")
+    fz_riser = make_dot_freeze(shadow=None, extra={
+        "sfx": {"file": "sfx/riser.wav", "align": "end_at_landing"}})
+    plan_riser = render.plan_freezes([fz_riser], fps, src_frames, sfx_json_dir)[0]
+    check(plan_riser["sfx"] is not None and plan_riser["sfx"]["align"] == "end_at_landing" and
+          plan_riser["sfx"]["is_custom"] is True,
+          f"plan_freezes：カスタムsfxオブジェクトがjson_dir基準で解決され、alignが伝わる: {plan_riser['sfx']}")
+
+    audio_riser = render.build_audio(video_path, [plan_riser], fps, src_frames, True)
+    landed_frame_offset_riser = plan_riser["n_pre"] + plan_riser["n_reveal"] + plan_riser.get("n_slide_in", 0)
+    landing_sample_riser = render.frames_to_samples(
+        plan_riser["frame_index"] + landed_frame_offset_riser, fps, render.AUDIO_SR)
+    expected_start_riser = landing_sample_riser - riser_content_len
+    check(expected_start_riser >= 0,
+          f"align=end_at_landing：この検証用フリーズの着地位置なら開始位置が負にならない"
+          f"（0クランプに頼らずずれを検証できる）: {expected_start_riser}")
+    just_before = audio_riser[max(0, landing_sample_riser - 200):landing_sample_riser]
+    just_after = audio_riser[landing_sample_riser + 50:landing_sample_riser + 2000]
+    check(bool(np.any(np.abs(just_before) > 0.01)),
+          "align=end_at_landing：着地の直前はまだライザー音が鳴っている（終わりが着地に一致）")
+    check(bool(np.max(np.abs(just_after)) < 0.01),
+          "align=end_at_landing：着地の直後はライザーの無音区間に入り静かになる")
+
+    print("")
+    print("=== 効果音：衝撃音（align=peak_at_landing、ロゴ用）がロゴ着地にピークを合わせる ===")
+    impact_samples, impact_peak_idx = md.synth_test_impact_offset_peak()
+    impact_path = os.path.join(sfx_json_dir, "sfx", "impact_offset.wav")
+    md.write_wav(impact_path, impact_samples)
+
+    logo_fz_peak = dict(base_style)
+    logo_fz_peak.update({"time": 2.5, "name": "", "sfx": None, "strokes": [], "shadow": None})
+    # sfx_tail=false：着地SEの減衰ディレイ（apply_reverb_tail）は、原音のピークより後ろに
+    # 減衰コピーを重ねる別の演出であり、ミックス後の「実測ピーク位置」を数十サンプル動かし
+    # うる（このテストが検証したいのは位置合わせの計算そのものなので、無効化して切り分ける）
+    logo_cfg_peak = {"image": "store_logo.png", "at": "last_freeze", "sfx_tail": False,
+                      "sfx": {"file": "sfx/impact_offset.wav", "align": "peak_at_landing"}}
+    logo_params_peak = render.resolve_logo_params(logo_cfg_peak)
+    logo_sfx_spec_peak = render.resolve_sfx_spec(
+        logo_cfg_peak["sfx"], sfx_json_dir, render.SFX_ALIGNS_LOGO, "logo")
+    check(logo_sfx_spec_peak is not None and logo_sfx_spec_peak["align"] == "peak_at_landing" and
+          logo_sfx_spec_peak["is_custom"] is True,
+          f"resolve_sfx_spec：ロゴ用オブジェクトsfxもjson_dir基準で解決され、peak_at_landingが伝わる: "
+          f"{logo_sfx_spec_peak}")
+
+    plans_logo_peak = render.plan_freezes(
+        [logo_fz_peak], fps, src_frames, sfx_json_dir, logo=logo_cfg_peak, logo_at="last_freeze",
+        logo_total_frames=render.logo_total_frames_for(logo_params_peak, fps), logo_crossfade_frames=0)
+    plan0_peak = plans_logo_peak[0]
+    check(plan0_peak["show_logo"], "テスト前提：このフリーズでラストロゴが表示される設定になっている")
+
+    audio_peak = render.build_audio(video_path, plans_logo_peak, fps, src_frames, True,
+                                     logo_sfx_spec=logo_sfx_spec_peak, logo_at="last_freeze",
+                                     logo_params=logo_params_peak)
+    landed_frame_offset_peak = plan0_peak["n_pre"] + plan0_peak["n_reveal"] + plan0_peak.get("n_slide_in", 0)
+    landing_frames_peak = int(round(logo_params_peak["landing_sec"] * fps))
+    logo_landing_sample = render.frames_to_samples(
+        plan0_peak["frame_index"] + landed_frame_offset_peak + landing_frames_peak, fps, render.AUDIO_SR)
+    search_window = audio_peak[max(0, logo_landing_sample - 200):logo_landing_sample + 200]
+    measured_peak_offset = int(np.argmax(np.max(np.abs(search_window), axis=1)))
+    measured_peak_sample = max(0, logo_landing_sample - 200) + measured_peak_offset
+    check(abs(measured_peak_sample - logo_landing_sample) <= 2,
+          f"align=peak_at_landing：ミックス後の衝撃音のピークがロゴ着地位置と一致する"
+          f"（着地={logo_landing_sample}, 実測ピーク={measured_peak_sample}）")
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)

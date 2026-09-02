@@ -341,6 +341,45 @@ def synth_impact(sr=SR, dur=2.2):
     return np.stack([sig, sig], axis=1).astype(np.float32)
 
 
+def synth_test_riser(sr=SR, content_dur=1.6, silence_dur=0.4):
+    """
+    render.pyのalign="end_at_landing"（音の終わりを着地に合わせる）の検証用テスト音声
+    （既定で計2.0秒）。前半content_dur秒は音量が徐々に高まる上昇スイープ、後半silence_dur秒は
+    完全な無音（ゼロサンプル）にする。減衰カーブに頼らず厳密にゼロを敷き詰めることで、
+    trailing_silence_trimmed_length()が「後半の無音を除いた長さ」を1サンプルの誤差もなく
+    検出できることを、まぎれのない形で確認できるようにしている。
+    戻り値: (stereo音声(N,2)float32, 無音区間を除いた実効サンプル数)
+    """
+    n_content = int(round(sr * content_dur))
+    n_silence = int(round(sr * silence_dur))
+    t = np.linspace(0, content_dur, n_content, endpoint=False, dtype=np.float32)
+    freq = 200.0 + 3000.0 * (t / content_dur) ** 2  # 徐々に高くなる周波数（ライザーらしい上昇感）
+    env = (t / content_dur).astype(np.float32)       # 0→1のリニア音量上昇
+    phase = 2 * np.pi * np.cumsum(freq) / sr
+    sig = np.sin(phase).astype(np.float32) * env
+    sig = np.concatenate([sig, np.zeros(n_silence, np.float32)]).astype(np.float32)
+    return np.stack([sig, sig], axis=1).astype(np.float32), n_content
+
+
+def synth_test_impact_offset_peak(sr=SR, dur=1.0, peak_t=0.4):
+    """
+    render.pyのalign="peak_at_landing"（音声のピーク位置を着地に合わせる）の検証用テスト音声。
+    ピークが先頭ではなく中程（既定でpeak_t=0.4秒）にあることを保証するため、ピーク前の
+    弱い前振れ（プリロール）とピーク後の減衰を、いずれもピークよりはっきり小さい振幅に
+    抑えたうえで、ピーク位置のサンプルだけ明示的に振幅1.0にする（丸め誤差での位置ズレ防止）。
+    戻り値: (stereo音声(N,2)float32, ピークのサンプル位置)
+    """
+    n = int(round(sr * dur))
+    peak_idx = int(round(sr * peak_t))
+    t = np.linspace(0, dur, n, endpoint=False, dtype=np.float32)
+    pre_env = 0.15 * np.exp(-((t - peak_t * 0.4) ** 2) / (2 * (peak_t * 0.15) ** 2))
+    post_env = np.where(t < peak_t, 0.0, np.exp(-(t - peak_t) / 0.15)).astype(np.float32)
+    env = np.maximum(pre_env, post_env).astype(np.float32)
+    sig = (np.sin(2 * np.pi * 220.0 * t).astype(np.float32) * env).astype(np.float32)
+    sig[peak_idx] = 1.0
+    return np.stack([sig, sig], axis=1).astype(np.float32), peak_idx
+
+
 def write_wav(path, samples, sr=SR):
     pcm = np.clip(samples, -1.0, 1.0)
     pcm = (pcm * 32767.0).astype(np.int16)

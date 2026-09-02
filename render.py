@@ -1737,7 +1737,49 @@ def resolve_hold_sec(fz):
     return HOLD_SEC_DEFAULT
 
 
-def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
+def resolve_sfx_spec(sfx_value, json_dir, valid_aligns, context_label):
+    """
+    freeze.sfx / logo.sfx を解決する。戻り値は {"path", "align", "is_custom"} の辞書、
+    または指定が無い/解決できない場合は None。
+      - 文字列: 従来どおりのプリセット名（render.py同梱の assets/sfx/<name>.wav）。
+        フォント（resolve_title_font_path）と同じ理由でSCRIPT_DIR基準のみで解決する。
+        align は常に既定（start_at_landing）。
+      - {"file": "...", "align": "..."} オブジェクト: ユーザー提供の音声ファイル
+        （mp3/wav、ffmpeg decode_audioが対応する形式ならどちらでも可）。
+        file はロゴ画像（logo.image）と同じ方針で cwd→JSONの場所→SCRIPT_DIR の順に解決する
+        （job実行時はproject.jsonと同じ場所にコミットされている前提）。
+        align は valid_aligns のいずれか。未指定・不明な値は SFX_ALIGN_DEFAULT にフォールバックする。
+    """
+    if not sfx_value:
+        return None
+    if isinstance(sfx_value, str):
+        cand = os.path.join("assets", "sfx", f"{sfx_value}.wav")
+        path = resolve_path(cand, [SCRIPT_DIR])
+        if not os.path.exists(path):
+            warn(f"効果音が見つかりません（{context_label}）: {cand}")
+            return None
+        return {"path": path, "align": SFX_ALIGN_DEFAULT, "is_custom": False}
+    if isinstance(sfx_value, dict):
+        file_rel = sfx_value.get("file")
+        if not file_rel:
+            warn(f"sfx オブジェクトに file が指定されていません（{context_label}）。無視します。")
+            return None
+        path = resolve_path(file_rel, [os.getcwd(), json_dir, SCRIPT_DIR])
+        if not os.path.exists(path):
+            warn(f"効果音ファイルが見つかりません（{context_label}）: {file_rel}")
+            return None
+        align = sfx_value.get("align") or SFX_ALIGN_DEFAULT
+        if align not in valid_aligns:
+            warn(f"sfx.align='{align}' は未知の値です（{context_label}）。"
+                 f"{SFX_ALIGN_DEFAULT} として扱います。")
+            align = SFX_ALIGN_DEFAULT
+        log(f"  効果音ファイルを解決しました（{context_label}）: {file_rel} (align={align})")
+        return {"path": path, "align": align, "is_custom": True}
+    warn(f"sfx の値が不正です（{context_label}）。文字列またはオブジェクトを指定してください: {sfx_value!r}")
+    return None
+
+
+def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
                   logo_total_frames=0, logo_crossfade_frames=0):
     """
     各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
@@ -1772,15 +1814,8 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
         n_hold = max(0, int(round(hold_sec * fps)))
         n_slide_back = int(round(SHADOW_SLIDE_BACK_SEC * fps)) if shadow_cfg else 0
 
-        sfx_path = None
-        if fz.get("sfx"):
-            # 効果音はrender.pyに同梱されたアセット（assets/sfx/配下）である前提のため、
-            # フォント（resolve_title_font_path）と同じ理由でSCRIPT_DIR基準のみで解決する。
-            cand = os.path.join("assets", "sfx", f"{fz['sfx']}.wav")
-            sfx_path = resolve_path(cand, [SCRIPT_DIR])
-            if not os.path.exists(sfx_path):
-                warn(f"効果音が見つかりません: {cand}")
-                sfx_path = None
+        sfx_spec = resolve_sfx_spec(fz.get("sfx"), json_dir, SFX_ALIGNS_FREEZE,
+                                     f"t={fz['time']:.2f}s")
 
         plans.append({
             "fz": fz,
@@ -1791,7 +1826,7 @@ def plan_freezes(freezes, fps, src_frames, logo=None, logo_at=None,
             "n_hold": n_hold,
             "n_slide_back": n_slide_back,
             "n_total": n_pre + n_reveal + n_slide_in + n_hold + n_slide_back,
-            "sfx_path": sfx_path,
+            "sfx": sfx_spec,
             "show_logo": False,
             "logo_crossfade_frames": 0,
             "logo_total_frames": 0,
@@ -2076,6 +2111,18 @@ SFX_GAIN_OVER_SOURCE_DB = 3.0     # SEの音量は、元動画の音声（RMS基
 SFX_DEFAULT_RMS_WHEN_SILENT = 0.18  # 元動画に音声が無い/ほぼ無音の場合に使うSEの既定RMS目標値
 SOFT_LIMIT_THRESHOLD = 0.9        # このレベルを超えた分だけtanhで滑らかに丸める（ハードクリップ回避）
 
+# ユーザー提供の効果音ファイル（freeze.sfx / logo.sfx のオブジェクト形式）に関する既定値。
+# プリセット（assets/sfx/配下の同梱wav）は既にバランス調整済みという前提でこの正規化を
+# 適用しない。ユーザーファイルは録音・書き出し環境によって音量がまちまちなため、
+# まずピークを揃えてから、既存のRMS基準の音量バランス調整（SFX_GAIN_OVER_SOURCE_DB）に乗せる。
+SFX_CUSTOM_PEAK_TARGET_DB = -1.0
+# 「音の終わり」を判定するしきい値。末尾からこの値以下（無音）が続く区間を、
+# align="end_at_landing" の位置合わせでは無視する。
+SFX_TRAILING_SILENCE_DB = -50.0
+SFX_ALIGNS_FREEZE = ("start_at_landing", "end_at_landing")
+SFX_ALIGNS_LOGO = ("start_at_landing", "peak_at_landing")
+SFX_ALIGN_DEFAULT = "start_at_landing"
+
 
 def measure_rms(samples):
     """音声(N, ch)のRMS（二乗平均平方根）を返す。空なら0.0"""
@@ -2101,6 +2148,65 @@ def normalize_sfx_gain(snippet, source_rms):
                   if source_rms > 1e-4 else SFX_DEFAULT_RMS_WHEN_SILENT)
     gain = target_rms / snippet_rms
     return snippet * gain
+
+
+def normalize_peak_dbfs(snippet, target_db=SFX_CUSTOM_PEAK_TARGET_DB):
+    """
+    snippet(N, ch)の振幅ピークが target_db(dBFS) になるよう正規化する。
+    ユーザー提供の効果音ファイルは、録音・書き出し環境によって音量がまちまちなため、
+    RMS基準の音量バランス調整（normalize_sfx_gain）にかける前に、まずここでピークを
+    揃えておく。無音（ピークがほぼ0）の場合は何もしない。
+    """
+    if snippet.size == 0:
+        return snippet
+    peak = float(np.max(np.abs(snippet)))
+    if peak <= 1e-9:
+        return snippet
+    target_linear = 10.0 ** (target_db / 20.0)
+    return snippet * (target_linear / peak)
+
+
+def trailing_silence_trimmed_length(samples, threshold_db=SFX_TRAILING_SILENCE_DB):
+    """
+    samples(N, ch)を末尾から見て、threshold_db(dBFS)以下が続く無音区間を除いた
+    実効的な長さ（サンプル数）を返す。全体が無音（しきい値を一度も超えない）の場合は
+    安全側としてlen(samples)をそのまま返す（無音全体を「音」として扱い、極端に
+    早い位置へずれてしまうのを防ぐ）。
+    """
+    if samples.size == 0:
+        return 0
+    threshold = 10.0 ** (threshold_db / 20.0)
+    peak_per_sample = np.max(np.abs(samples), axis=1)
+    above = np.nonzero(peak_per_sample > threshold)[0]
+    if above.size == 0:
+        return len(samples)
+    return int(above[-1]) + 1
+
+
+def peak_sample_index(samples):
+    """samples(N, ch)のうち、振幅（全チャンネル中の絶対値最大）がピークとなるサンプル位置を返す"""
+    if samples.size == 0:
+        return 0
+    peak_per_sample = np.max(np.abs(samples), axis=1)
+    return int(np.argmax(peak_per_sample))
+
+
+def compute_sfx_start(snippet, landing_sample, align):
+    """
+    効果音snippetの再生開始位置（新タイムライン上のサンプル位置）を、align指定に応じて
+    landing_sample（着地の瞬間）から逆算する。
+      - start_at_landing（既定）: 着地の瞬間に再生開始（従来どおり、そのまま返す）
+      - end_at_landing: 音の終わり（末尾の無音を除いた位置）が着地に一致するよう
+        開始位置を前にずらす
+      - peak_at_landing: 音声のピーク位置が着地に一致するよう開始位置を前にずらす
+    計算結果が負（＝映像の先頭より前）になる場合は、呼び出し側のmix_into()が
+    自動的に0にクランプして先頭から鳴らす。
+    """
+    if align == "end_at_landing":
+        return landing_sample - trailing_silence_trimmed_length(snippet)
+    if align == "peak_at_landing":
+        return landing_sample - peak_sample_index(snippet)
+    return landing_sample
 
 
 def soft_limit(samples, threshold=SOFT_LIMIT_THRESHOLD):
@@ -2147,11 +2253,12 @@ def apply_reverb_tail(samples, sr, tail_sec=LOGO_SFX_TAIL_SEC, num_taps=6, decay
 
 
 def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUDIO_CH,
-                 logo_sfx_path=None, logo_at=None, logo_extra_frames=0, logo_params=None):
+                 logo_sfx_spec=None, logo_at=None, logo_extra_frames=0, logo_params=None):
     """
     フリーズ区間の分だけ元音声を後ろへずらし、
     フリーズ中は無音 or 直前0.5秒のループを差し込み、効果音を重ねる。
-    logo_sfx_path のSE（インパクトSE）は、ロゴが「着地」する瞬間に鳴らす
+    logo_sfx_spec のSE（インパクトSE）は、ロゴが「着地」する瞬間（align="start_at_landing"の場合。
+    align="peak_at_landing"なら音声のピーク位置がその瞬間に一致するよう前にずらす）に鳴らす
     （logo_at=='last_freeze' なら最後のフリーズのクロスフェード後の着地時、
       'end' なら末尾に追加する logo_extra_frames 区間内の着地時）。
     """
@@ -2163,7 +2270,7 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         orig = np.concatenate([orig, np.zeros((need - len(orig), ch), np.float32)])
 
     pieces = []
-    sfx_jobs = []      # (新タイムライン上の開始サンプル, wavパス, 減衰ディレイを付けるか)
+    sfx_jobs = []      # (着地の瞬間の新タイムライン上のサンプル位置, sfx_spec, 減衰ディレイを付けるか)
     cursor = 0         # 元音声の読み出し位置
     written = 0        # 出力済みサンプル数（＝新タイムラインの位置）
 
@@ -2190,18 +2297,20 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
             seg = np.zeros((n_samples, ch), np.float32)
         pieces.append(seg)
 
-        # 効果音は人物の出現が完了した瞬間（shadowがあれば、スライドインが着地した瞬間）
+        # 効果音の基準は「人物の出現が完了した瞬間」（shadowがあれば、スライドインが着地した瞬間）。
+        # align="start_at_landing"（既定）ならこの瞬間に再生開始、"end_at_landing"なら
+        # 音の終わりがこの瞬間に一致するよう開始位置を前にずらす（compute_sfx_start参照）。
         landed_frame_offset = plan["n_pre"] + plan["n_reveal"] + plan.get("n_slide_in", 0)
-        if plan["sfx_path"]:
+        if plan["sfx"]:
             offset = frames_to_samples(landed_frame_offset, fps, sr)
-            sfx_jobs.append((written + offset, plan["sfx_path"], False))
-        # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）にSEを鳴らす
-        if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_path and logo_params:
+            sfx_jobs.append((written + offset, plan["sfx"], False))
+        # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）を基準にSEを鳴らす
+        if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_spec and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
             logo_offset = frames_to_samples(
                 landed_frame_offset + plan.get("logo_crossfade_frames", 0) + landing_frames,
                 fps, sr)
-            sfx_jobs.append((written + logo_offset, logo_sfx_path, logo_params["sfx_tail"]))
+            sfx_jobs.append((written + logo_offset, logo_sfx_spec, logo_params["sfx_tail"]))
         written += n_samples
 
     pieces.append(orig[cursor:])
@@ -2210,18 +2319,24 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
     if logo_at == "end" and logo_extra_frames > 0:
         extra_samples = frames_to_samples(logo_extra_frames, fps, sr)
         pieces.append(np.zeros((extra_samples, ch), np.float32))
-        if logo_sfx_path and logo_params:
+        if logo_sfx_spec and logo_params:
             landing_frames = int(round(logo_params["landing_sec"] * fps))
             landing_samples = frames_to_samples(landing_frames, fps, sr)
-            sfx_jobs.append((tail_start + landing_samples, logo_sfx_path, logo_params["sfx_tail"]))
+            sfx_jobs.append((tail_start + landing_samples, logo_sfx_spec, logo_params["sfx_tail"]))
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
 
     # SEの音量バランス：元動画の音声(orig)のRMSを基準に、SFX_GAIN_OVER_SOURCE_DB分だけ
     # 大きく聞こえるよう各SFXを正規化する（ピークの歪みはsoft_limit()側で防ぐ）
     source_rms = measure_rms(orig)
-    for start, path, apply_tail in sfx_jobs:
-        snippet = decode_audio(path, sr, ch)
+    for landing_sample, spec, apply_tail in sfx_jobs:
+        snippet = decode_audio(spec["path"], sr, ch)
+        if spec["is_custom"]:
+            # ユーザー提供ファイルはまずピークを揃えてから、通常どおりのRMSバランス調整に乗せる
+            snippet = normalize_peak_dbfs(snippet)
+        # 位置合わせ（end_at_landing/peak_at_landing）は、RMS調整やテールで音量・長さが
+        # 変わる前の、元の波形のまま計算する（開始位置の計算に影響させないため）
+        start = compute_sfx_start(snippet, landing_sample, spec["align"])
         snippet = normalize_sfx_gain(snippet, source_rms)
         if apply_tail:
             snippet = apply_reverb_tail(snippet, sr)
@@ -2282,7 +2397,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
         logo_cfg = project.get("logo")
         logo_at = None
         logo_bgr, logo_alpha, logo_luma = None, None, None
-        logo_sfx_path = None
+        logo_sfx_spec = None
         logo_extra_frames = 0
         logo_params = None
         logo_bg_color = None
@@ -2302,20 +2417,15 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 logo_luma = build_logo_luminance_mask(logo_bgr, logo_alpha)
                 logo_params = resolve_logo_params(logo_cfg)
                 logo_bg_color = resolve_logo_background_color(logo_cfg.get("background"), logo_bgr)
-                if logo_cfg.get("sfx"):
-                    # 同梱アセットのためSCRIPT_DIR基準のみで解決する（freezeのsfxと同じ理由）
-                    cand = os.path.join("assets", "sfx", f"{logo_cfg['sfx']}.wav")
-                    logo_sfx_path = resolve_path(cand, [SCRIPT_DIR])
-                    if not os.path.exists(logo_sfx_path):
-                        warn(f"ロゴ用の効果音が見つかりません: {cand}")
-                        logo_sfx_path = None
+                logo_sfx_spec = resolve_sfx_spec(logo_cfg.get("sfx"), json_dir, SFX_ALIGNS_LOGO,
+                                                  "logo")
                 logo_total_frames = logo_total_frames_for(logo_params, fps)
                 if logo_at == "end":
                     logo_extra_frames = logo_total_frames
                 elif logo_at == "last_freeze" and logo_bg_color is not None:
                     logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
 
-        plans = plan_freezes(project["freezes"], fps, src_frames, logo_cfg, logo_at,
+        plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_crossfade_frames=logo_crossfade_frames)
 
@@ -2345,7 +2455,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
 
         # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---
         audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"],
-                             logo_sfx_path=logo_sfx_path, logo_at=logo_at,
+                             logo_sfx_spec=logo_sfx_spec, logo_at=logo_at,
                              logo_extra_frames=logo_extra_frames, logo_params=logo_params)
         wav_path = write_wav(os.path.join(tmpdir, "audio.wav"), audio)
         log(f"音声トラック: {len(audio) / AUDIO_SR:.2f} 秒")

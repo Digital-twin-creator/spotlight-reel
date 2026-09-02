@@ -432,6 +432,10 @@
             <option value="don">don（低音）</option>
             <option value="">なし</option>
           </select>
+          <select id="sfxAlignSelect" style="margin-top:6px;" hidden>
+            <option value="start_at_landing">着地の瞬間に再生開始</option>
+            <option value="end_at_landing">音の終わりを着地に合わせる</option>
+          </select>
         </div>
         <div class="field grow">
           <label>背景処理</label>
@@ -623,8 +627,25 @@
           <option value="shakin">shakin（上昇音）</option>
           <option value="">なし</option>
         </select>
+        <select id="logoSfxAlignSelect" style="margin-top:6px;" hidden>
+          <option value="start_at_landing">着地の瞬間に再生開始</option>
+          <option value="peak_at_landing">ピークを着地に合わせる</option>
+        </select>
       </div>
       <button class="ghost small danger" id="clearLogoBtn">ロゴ設定を削除</button>
+    </div>
+  </details>
+
+  <!-- 効果音ライブラリ：自分のmp3/wavファイルを登録し、フリーズ・ロゴの効果音として使う -->
+  <details class="card" id="sfxLibrarySection">
+    <summary>効果音ライブラリ（自分のファイルを登録）</summary>
+    <div class="stack">
+      <div class="muted">mp3/wavファイルを登録すると、端末のブラウザに保存され（IndexedDB）、
+        次回以降もそのまま使えます。フリーズや「ラストロゴ」の効果音選択に、登録したファイルが
+        候補として表示されます。</div>
+      <input type="file" id="sfxLibraryFileInput" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" multiple>
+      <div class="muted" id="sfxLibraryStatus"></div>
+      <div id="sfxLibraryList" class="stack"></div>
     </div>
   </details>
 
@@ -756,6 +777,10 @@ var REVEALS = ["wipe", "fade", "brush", "none"];
 /** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる2種類のみ） */
 var MASK_MODELS = ["isnet-general-use", "birefnet-portrait"];
 var DEFAULT_MASK_MODEL = "isnet-general-use";
+/** ライブラリの効果音（自分のmp3/wav）を使うときの位置合わせ（render.pyのSFX_ALIGNS_FREEZE/LOGOと同じ） */
+var SFX_ALIGNS_FREEZE = ["start_at_landing", "end_at_landing"];
+var SFX_ALIGNS_LOGO = ["start_at_landing", "peak_at_landing"];
+var SFX_ALIGN_DEFAULT = "start_at_landing";
 var SHADOW_DIRECTIONS = ["auto", "left", "right"];
 /** 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定秒数（render.pyのREVEAL_SEC_DEFAULT等と同じ値） */
 var REVEAL_SEC_DEFAULT = 0.5;
@@ -970,7 +995,7 @@ function strokeToJSON(st) {
   return out;
 }
 
-function freezeToJSON(fz) {
+function freezeToJSON(fz, sfxLibrary) {
   var maskMode = resolveMaskMode(fz.maskMode);
   var out = {
     time: round(numOr(fz.time, 0), 2),
@@ -986,7 +1011,16 @@ function freezeToJSON(fz) {
   } else {
     out.color_source = maskMode;   // "brush" | "auto"
   }
-  if (fz.sfx) out.sfx = fz.sfx;
+  if (fz.sfxLibraryId) {
+    // 効果音ライブラリ（自分のmp3/wav）を選んでいる場合は{file, align}のオブジェクト形式で出力する
+    var libFile = (sfxLibrary || []).filter(function (f) { return f.id === fz.sfxLibraryId; })[0];
+    if (libFile) {
+      out.sfx = { file: sfxLibraryAssetPath(libFile.id, libFile.name),
+                  align: resolveSfxAlign(fz.sfxAlign, SFX_ALIGNS_FREEZE) };
+    }
+  } else if (fz.sfx) {
+    out.sfx = fz.sfx;
+  }
   // テロップ位置・サイズ・寄せ（未指定なら省略し、全体設定 style.title_* を使わせる）
   if (fz.titlePos) out.title_pos = [round(fz.titlePos[0], 4), round(fz.titlePos[1], 4)];
   if (fz.titleSize !== null && fz.titleSize !== undefined) out.title_size = round(fz.titleSize, 4);
@@ -1018,7 +1052,7 @@ function buildProjectJSON(state) {
       audio_during_freeze: state.audioDuringFreeze === "keep" ? "keep" : "mute",
       reveal: resolveReveal(state.reveal)
     },
-    freezes: sortFreezesByTime(state.freezes).map(freezeToJSON)
+    freezes: sortFreezesByTime(state.freezes).map(function (fz) { return freezeToJSON(fz, state.sfxLibrary); })
   };
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
@@ -1050,7 +1084,16 @@ function buildProjectJSON(state) {
       background: state.logo.background || DEFAULT_LOGO_BACKGROUND,
       duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2)
     };
-    if (state.logo.sfx) project.logo.sfx = state.logo.sfx;
+    if (state.logo.sfxLibraryId) {
+      var logoLibFile = (state.sfxLibrary || [])
+        .filter(function (f) { return f.id === state.logo.sfxLibraryId; })[0];
+      if (logoLibFile) {
+        project.logo.sfx = { file: sfxLibraryAssetPath(logoLibFile.id, logoLibFile.name),
+                              align: resolveSfxAlign(state.logo.sfxAlign, SFX_ALIGNS_LOGO) };
+      }
+    } else if (state.logo.sfx) {
+      project.logo.sfx = state.logo.sfx;
+    }
   }
   return project;
 }
@@ -1100,15 +1143,40 @@ function matchOutputPreset(output) {
  * プロジェクトJSON（外部ファイル）を読み込んでエディタの内部状態に変換する。
  * render.py の load_project と同じく、未知のキーは無視し style を既定値にマージする。
  */
-function parseProjectJSON(json) {
+/**
+ * project.jsonの sfx（文字列プリセット、または{file, align}オブジェクト）を、エディタの
+ * 内部状態（sfx/sfxLibraryId/sfxAlign）に読み替える。オブジェクト形式の場合、fileのパスが
+ * このブラウザの効果音ライブラリ（sfxLibrary）内のいずれかのファイルと一致すれば
+ * そのライブラリ選択として復元し、一致しなければ未選択のまま（sfxMissingFileにヒントを残す。
+ * 別端末で作ったJSONを読み込んだ場合など、ライブラリに無いファイルを参照していることがある）。
+ */
+function resolveSfxFieldsFromJSON(sfxValue, sfxLibrary, validAligns) {
+  if (sfxValue && typeof sfxValue === "object" && sfxValue.file) {
+    var baseName = String(sfxValue.file).split("/").pop();
+    var match = (sfxLibrary || []).filter(function (f) {
+      return sfxLibraryAssetPath(f.id, f.name) === sfxValue.file || f.name === baseName;
+    })[0];
+    if (match) {
+      return { sfx: "", sfxLibraryId: match.id, sfxAlign: resolveSfxAlign(sfxValue.align, validAligns) };
+    }
+    return { sfx: "", sfxLibraryId: null, sfxMissingFile: sfxValue.file };
+  }
+  return { sfx: (typeof sfxValue === "string" ? sfxValue : ""), sfxLibraryId: null };
+}
+
+function parseProjectJSON(json, sfxLibrary) {
   json = json || {};
   var style = Object.assign({}, DEFAULT_STYLE, json.style || {});
   var freezes = (json.freezes || []).map(function (fz, i) {
+    var sfxFields = resolveSfxFieldsFromJSON(fz.sfx, sfxLibrary, SFX_ALIGNS_FREEZE);
     return {
       id: "loaded-" + i + "-" + Date.now(),
       time: numOr(fz.time, 0),
       name: fz.name || "",
-      sfx: fz.sfx || "",
+      sfx: sfxFields.sfx,
+      sfxLibraryId: sfxFields.sfxLibraryId,
+      sfxAlign: sfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
+      sfxMissingFile: sfxFields.sfxMissingFile || "",
       background: fz.background === "dark" ? "dark" : "mono",
       brushShape: resolveBrushShape(fz.brush_shape),
       maskMode: resolveColorSourceForFreeze(fz),
@@ -1200,13 +1268,17 @@ function parseProjectJSON(json) {
   }
   var logo = null;
   if (json.logo && json.logo.image) {
+    var logoSfxFields = resolveSfxFieldsFromJSON(json.logo.sfx, sfxLibrary, SFX_ALIGNS_LOGO);
     logo = {
       imageFile: null,
       imageName: json.logo.image,
       at: json.logo.at === "last_freeze" ? "last_freeze" : "end",
       background: json.logo.background || DEFAULT_LOGO_BACKGROUND,
       durationSec: numOr(json.logo.duration_sec, DEFAULT_LOGO_DURATION_SEC),
-      sfx: json.logo.sfx || "",
+      sfx: logoSfxFields.sfx,
+      sfxLibraryId: logoSfxFields.sfxLibraryId,
+      sfxAlign: logoSfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
+      sfxMissingFile: logoSfxFields.sfxMissingFile || "",
       autoColorHex: ""
     };
   }
@@ -1433,6 +1505,50 @@ function resolveReveal(reveal) {
 /** 未知の値は既定モデル（isnet-general-use）にフォールバックする */
 function resolveMaskModel(model) {
   return MASK_MODELS.indexOf(model) >= 0 ? model : DEFAULT_MASK_MODEL;
+}
+
+/** 未知の値は既定（start_at_landing）にフォールバックする（render.py の resolve_sfx_spec と同じ方針） */
+function resolveSfxAlign(align, validAligns) {
+  return (validAligns || []).indexOf(align) >= 0 ? align : SFX_ALIGN_DEFAULT;
+}
+
+/**
+ * 効果音ライブラリのファイル（IndexedDBに保存したもの）を、jobブランチ内で
+ * render.pyから解決できる相対パス "sfx/<id>.<拡張子>" にする。
+ * ファイル名そのものではなくidを使うことで、同名ファイルが複数登録されても衝突しない。
+ */
+function sfxLibraryAssetPath(id, originalFileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
+  var ext = m ? m[1].toLowerCase() : "mp3";
+  var safeId = String(id).replace(/[^A-Za-z0-9_-]/g, "");
+  return "sfx/" + safeId + "." + ext;
+}
+
+/**
+ * freezes（各要素にsfxLibraryIdがあれば）・logo(あればsfxLibraryId)から、実際に使われている
+ * ライブラリファイルのidを重複無く集める。「動画を作る」時にjobブランチへ同梱すべき
+ * sfxファイルを決めるために使う。
+ */
+/** draft/appState.logo の sfx関連フィールドから、<select>にセットすべき値を作る（"lib:<id>"またはプリセット値） */
+function sfxSelectValue(sfxLibraryId, sfxPreset) {
+  return sfxLibraryId ? ("lib:" + sfxLibraryId) : (sfxPreset || "");
+}
+
+/** <select>の選択値（"lib:<id>"またはプリセット値）を、sfx/sfxLibraryIdのペアに書き戻す */
+function applySfxSelectValue(selectValue) {
+  if (selectValue && selectValue.indexOf("lib:") === 0) {
+    return { sfx: "", sfxLibraryId: selectValue.slice(4) };
+  }
+  return { sfx: selectValue || "", sfxLibraryId: null };
+}
+
+function collectUsedSfxLibraryIds(freezes, logo) {
+  var ids = [];
+  (freezes || []).forEach(function (fz) {
+    if (fz && fz.sfxLibraryId && ids.indexOf(fz.sfxLibraryId) < 0) ids.push(fz.sfxLibraryId);
+  });
+  if (logo && logo.sfxLibraryId && ids.indexOf(logo.sfxLibraryId) < 0) ids.push(logo.sfxLibraryId);
+  return ids;
 }
 
 /** 未知の値は auto にフォールバックする（render.py の resolve_shadow_config と同じ方針） */
@@ -1917,6 +2033,15 @@ if (typeof module !== "undefined" && module.exports) {
     MASK_MODELS: MASK_MODELS,
     DEFAULT_MASK_MODEL: DEFAULT_MASK_MODEL,
     resolveMaskModel: resolveMaskModel,
+    SFX_ALIGNS_FREEZE: SFX_ALIGNS_FREEZE,
+    SFX_ALIGNS_LOGO: SFX_ALIGNS_LOGO,
+    SFX_ALIGN_DEFAULT: SFX_ALIGN_DEFAULT,
+    resolveSfxAlign: resolveSfxAlign,
+    sfxLibraryAssetPath: sfxLibraryAssetPath,
+    collectUsedSfxLibraryIds: collectUsedSfxLibraryIds,
+    resolveSfxFieldsFromJSON: resolveSfxFieldsFromJSON,
+    sfxSelectValue: sfxSelectValue,
+    applySfxSelectValue: applySfxSelectValue,
     resolveTitleField: resolveTitleField,
     telopBoxFromAnchor: telopBoxFromAnchor,
     clampBoxToCanvas: clampBoxToCanvas,
@@ -1969,12 +2094,148 @@ if (typeof module !== "undefined" && module.exports) {
 <script>
 "use strict";
 
+/* ---------------- 効果音ライブラリ（IndexedDB） ---------------- */
+/* ユーザーが登録したmp3/wavファイルをブラウザのIndexedDBに保存し、リロード後も使えるようにする。
+ * sfxLibrary（メモリ上のキャッシュ、{id,name,size,addedAt}の配列。Blob本体は含まない）を
+ * buildProjectJSON/parseProjectJSONが同期的に参照できるようにし、実際のファイル本体（Blob）は
+ * ジョブ作成時にだけ sfxLibraryGetRecord() で個別に取り出す。 */
+
+var SFX_LIBRARY_DB_NAME = "spotlight_reel_sfx_library";
+var SFX_LIBRARY_DB_VERSION = 1;
+var SFX_LIBRARY_STORE = "files";
+var sfxLibrary = [];   // {id, name, size, addedAt} の配列（Blob本体は含まない軽量キャッシュ）
+
+function sfxLibraryOpenDB() {
+  return new Promise(function (resolve, reject) {
+    if (!window.indexedDB) { reject(new Error("このブラウザはIndexedDBに対応していません")); return; }
+    var req = indexedDB.open(SFX_LIBRARY_DB_NAME, SFX_LIBRARY_DB_VERSION);
+    req.onupgradeneeded = function () {
+      var db = req.result;
+      if (!db.objectStoreNames.contains(SFX_LIBRARY_STORE)) {
+        db.createObjectStore(SFX_LIBRARY_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { reject(req.error); };
+  });
+}
+
+/** ファイル(File)をライブラリに追加する。戻り値はPromise<{id,name,size,addedAt}>（Blobは含まない） */
+function sfxLibraryAdd(file) {
+  return sfxLibraryOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var id = "sfx-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+      var record = { id: id, name: file.name, size: file.size, type: file.type,
+                      addedAt: Date.now(), blob: file };
+      var tx = db.transaction(SFX_LIBRARY_STORE, "readwrite");
+      tx.objectStore(SFX_LIBRARY_STORE).put(record);
+      tx.oncomplete = function () { resolve({ id: id, name: record.name, size: record.size, addedAt: record.addedAt }); };
+      tx.onerror = function () { reject(tx.error); };
+    });
+  });
+}
+
+/** 登録済みファイルの一覧（メタデータのみ、Blobは含まない）をPromiseで返す */
+function sfxLibraryListMeta() {
+  return sfxLibraryOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(SFX_LIBRARY_STORE, "readonly");
+      var req = tx.objectStore(SFX_LIBRARY_STORE).getAll();
+      req.onsuccess = function () {
+        var list = (req.result || []).map(function (r) {
+          return { id: r.id, name: r.name, size: r.size, addedAt: r.addedAt };
+        });
+        resolve(list);
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+/** idを指定して1件のレコード（Blob本体を含む）を取得する。無ければnullでresolveする */
+function sfxLibraryGetRecord(id) {
+  return sfxLibraryOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(SFX_LIBRARY_STORE, "readonly");
+      var req = tx.objectStore(SFX_LIBRARY_STORE).get(id);
+      req.onsuccess = function () { resolve(req.result || null); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function sfxLibraryDelete(id) {
+  return sfxLibraryOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(SFX_LIBRARY_STORE, "readwrite");
+      tx.objectStore(SFX_LIBRARY_STORE).delete(id);
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error); };
+    });
+  });
+}
+
+/** <select>に、既存のプリセット<option>群の後ろへライブラリファイルの<option>群を追加し直す */
+function populateSfxLibraryOptions(selectEl, library) {
+  Array.prototype.slice.call(selectEl.querySelectorAll('option[value^="lib:"]')).forEach(function (opt) {
+    opt.remove();
+  });
+  (library || []).forEach(function (f) {
+    var opt = document.createElement("option");
+    opt.value = "lib:" + f.id;
+    opt.textContent = "🎵 " + f.name;
+    selectEl.appendChild(opt);
+  });
+}
+
+/** 効果音ライブラリの一覧表示（#sfxLibraryList）を作り直す */
+function renderSfxLibraryList() {
+  els.sfxLibraryList.innerHTML = "";
+  if (sfxLibrary.length === 0) {
+    els.sfxLibraryList.innerHTML = '<div class="muted">まだ登録されたファイルはありません</div>';
+    return;
+  }
+  sfxLibrary.forEach(function (f) {
+    var row = document.createElement("div");
+    row.className = "row";
+    row.style.alignItems = "center";
+    var label = document.createElement("div");
+    label.className = "grow";
+    label.textContent = f.name + "（" + (f.size / 1024 / 1024).toFixed(2) + "MB）";
+    var delBtn = document.createElement("button");
+    delBtn.className = "small danger";
+    delBtn.textContent = "削除";
+    delBtn.addEventListener("click", function () {
+      if (!confirm('「' + f.name + '」をライブラリから削除しますか？（このファイルを使っているフリーズ・ロゴの設定は選び直しが必要になります）')) return;
+      sfxLibraryDelete(f.id).then(reloadSfxLibrary);
+    });
+    row.appendChild(label);
+    row.appendChild(delBtn);
+    els.sfxLibraryList.appendChild(row);
+  });
+}
+
+/** IndexedDBから最新の一覧を読み込み、メモリキャッシュ・一覧表示・各種<select>を更新する */
+function reloadSfxLibrary() {
+  return sfxLibraryListMeta().then(function (list) {
+    sfxLibrary = list;
+    // buildProjectJSON(appState) はappState.sfxLibraryを参照するため、常に同期させておく
+    appState.sfxLibrary = list;
+    renderSfxLibraryList();
+    populateSfxLibraryOptions(els.sfxSelect, sfxLibrary);
+    populateSfxLibraryOptions(els.logoSfxSelect, sfxLibrary);
+    updateJsonPreview();
+    return list;
+  });
+}
+
 /* ---------------- 状態 ---------------- */
 
 var appState = {
   videoFileName: "",
   videoFile: null,
   outputMode: "original",
+  sfxLibrary: [],  // reloadSfxLibrary()が起動時・登録/削除のたびに同期する（buildProjectJSON用）
   revealSec: REVEAL_SEC_DEFAULT,
   slideSec: SLIDE_SEC_DEFAULT,
   holdSec: HOLD_SEC_DEFAULT,
@@ -1996,7 +2257,7 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" }
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" }
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -2109,7 +2370,7 @@ function init() {
     "maskModeSelect", "autoMaskHint", "brushEditModeRow", "brushModeAddBtn", "brushModeEraseBtn",
     "maskPreviewBtn", "maskPreviewModal", "maskPreviewCanvas", "maskPreviewStatus", "maskPreviewCloseBtn",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
-    "nameInput", "sfxSelect", "backgroundSelect", "brushShapeSelect",
+    "nameInput", "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
@@ -2124,7 +2385,8 @@ function init() {
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
     "logoDurationSlider", "logoDurationValue",
-    "logoSfxSelect", "clearLogoBtn",
+    "logoSfxSelect", "logoSfxAlignSelect", "clearLogoBtn",
+    "sfxLibraryFileInput", "sfxLibraryStatus", "sfxLibraryList",
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
     "ghSettingsSaveBtn", "ghSettingsStatus",
@@ -2216,6 +2478,9 @@ function init() {
     draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
     updateMaskModeUI();
     redrawStrokesOverlay();
+  });
+  els.sfxSelect.addEventListener("change", function () {
+    els.sfxAlignSelect.hidden = els.sfxSelect.value.indexOf("lib:") !== 0;
   });
   els.brushModeAddBtn.addEventListener("click", function () { setBrushEditMode("add"); });
   els.brushModeEraseBtn.addEventListener("click", function () { setBrushEditMode("erase"); });
@@ -2317,6 +2582,7 @@ function init() {
 
   els.pickLogoBtn.addEventListener("click", function () { els.logoFileInput.click(); });
   els.logoFileInput.addEventListener("change", handleLogoFileChange);
+  els.sfxLibraryFileInput.addEventListener("change", handleSfxLibraryFileChange);
   els.logoAtSelect.addEventListener("change", function () {
     appState.logo.at = els.logoAtSelect.value === "last_freeze" ? "last_freeze" : "end";
     saveToLocalStorage();
@@ -2341,7 +2607,14 @@ function init() {
     saveToLocalStorage();
   });
   els.logoSfxSelect.addEventListener("change", function () {
-    appState.logo.sfx = els.logoSfxSelect.value;
+    var sfxFields = applySfxSelectValue(els.logoSfxSelect.value);
+    appState.logo.sfx = sfxFields.sfx;
+    appState.logo.sfxLibraryId = sfxFields.sfxLibraryId;
+    els.logoSfxAlignSelect.hidden = !sfxFields.sfxLibraryId;
+    saveToLocalStorage();
+  });
+  els.logoSfxAlignSelect.addEventListener("change", function () {
+    appState.logo.sfxAlign = resolveSfxAlign(els.logoSfxAlignSelect.value, SFX_ALIGNS_LOGO);
     saveToLocalStorage();
   });
   els.clearLogoBtn.addEventListener("click", clearLogo);
@@ -2377,6 +2650,11 @@ function init() {
   setPlayStatus("待機中");
   renderFreezeList();
   updateJsonPreview();
+
+  reloadSfxLibrary().catch(function (err) {
+    els.sfxLibraryStatus.textContent = "効果音ライブラリの読み込みに失敗しました: " +
+      (err && err.message ? err.message : err);
+  });
 }
 
 /* ---------------- 状態バー・エラー表示 ---------------- */
@@ -2619,6 +2897,8 @@ function startNewFreeze() {
     time: els.video.currentTime,
     name: "",
     sfx: "shakin",
+    sfxLibraryId: null,
+    sfxAlign: SFX_ALIGN_DEFAULT,
     background: "mono",
     brushShape: "round",
     maskMode: "brush",
@@ -2756,7 +3036,10 @@ function enterDrawMode() {
   els.editorTitle.innerHTML = '<span class="step-badge">④</span>' +
     (draftIsNew ? "止まった映像を指でなぞってください" : "フリーズを編集（" + draft.time.toFixed(2) + "s）");
   els.nameInput.value = draft.name || "";
-  els.sfxSelect.value = draft.sfx || "";
+  populateSfxLibraryOptions(els.sfxSelect, sfxLibrary);
+  els.sfxSelect.value = sfxSelectValue(draft.sfxLibraryId, draft.sfx);
+  els.sfxAlignSelect.value = resolveSfxAlign(draft.sfxAlign, SFX_ALIGNS_FREEZE);
+  els.sfxAlignSelect.hidden = !draft.sfxLibraryId;
   els.backgroundSelect.value = draft.background || "mono";
   els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
   els.maskModeSelect.value = resolveMaskMode(draft.maskMode);
@@ -2835,7 +3118,10 @@ function cancelFreezeEdit() {
  */
 function commitFreezeEdit() {
   draft.name = els.nameInput.value.trim();
-  draft.sfx = els.sfxSelect.value;
+  var sfxFields = applySfxSelectValue(els.sfxSelect.value);
+  draft.sfx = sfxFields.sfx;
+  draft.sfxLibraryId = sfxFields.sfxLibraryId;
+  draft.sfxAlign = resolveSfxAlign(els.sfxAlignSelect.value, SFX_ALIGNS_FREEZE);
   draft.background = els.backgroundSelect.value;
   draft.brushShape = els.brushShapeSelect.value;
   draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
@@ -4110,6 +4396,26 @@ function handleLogoFileChange(e) {
   updateJsonPreview();
 }
 
+/** 効果音ライブラリへのファイル追加（複数選択可）。1件ずつIndexedDBに保存し、終わったら一覧を更新する */
+function handleSfxLibraryFileChange(e) {
+  var files = Array.prototype.slice.call((e.target && e.target.files) || []);
+  els.sfxLibraryFileInput.value = "";  // 同じファイルを連続で選び直せるようにする
+  if (files.length === 0) return;
+  els.sfxLibraryStatus.textContent = "登録中…";
+  var chain = Promise.resolve();
+  files.forEach(function (file) {
+    chain = chain.then(function () { return sfxLibraryAdd(file); });
+  });
+  chain
+    .then(function () { return reloadSfxLibrary(); })
+    .then(function () {
+      els.sfxLibraryStatus.textContent = files.length + "件を登録しました";
+    })
+    .catch(function (err) {
+      els.sfxLibraryStatus.textContent = "登録に失敗しました: " + (err && err.message ? err.message : err);
+    });
+}
+
 /**
  * ロゴ画像の四隅の画素を平均した色を検出し、appState.logo.autoColorHex に反映する
  * （render.py の logo_corner_avg_color と同じ考え方。background="auto" の見本表示用）。
@@ -4150,7 +4456,7 @@ function cornerAverageColorHex(imgEl) {
 }
 
 function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
   els.logoFileInput.value = "";
   applyLogoSettingsToInputs();
   saveToLocalStorage();
@@ -4200,7 +4506,10 @@ function applyLogoSettingsToInputs() {
   var durationSec = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
   els.logoDurationSlider.value = durationSec;
   els.logoDurationValue.textContent = durationSec.toFixed(1) + "秒";
-  els.logoSfxSelect.value = logo.sfx || "";
+  populateSfxLibraryOptions(els.logoSfxSelect, sfxLibrary);
+  els.logoSfxSelect.value = sfxSelectValue(logo.sfxLibraryId, logo.sfx);
+  els.logoSfxAlignSelect.value = resolveSfxAlign(logo.sfxAlign, SFX_ALIGNS_LOGO);
+  els.logoSfxAlignSelect.hidden = !logo.sfxLibraryId;
 }
 
 /* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
@@ -4294,7 +4603,9 @@ function buildLocalStoragePayload(dropThumbs) {
       at: appState.logo.at,
       background: appState.logo.background,
       durationSec: appState.logo.durationSec,
-      sfx: appState.logo.sfx
+      sfx: appState.logo.sfx,
+      sfxLibraryId: appState.logo.sfxLibraryId || null,
+      sfxAlign: appState.logo.sfxAlign || SFX_ALIGN_DEFAULT
     } : null
   };
 }
@@ -4347,8 +4658,10 @@ function loadFromLocalStorage(videoFileName) {
       background: data.logo.background || DEFAULT_LOGO_BACKGROUND,
       durationSec: numOr(data.logo.durationSec, DEFAULT_LOGO_DURATION_SEC),
       sfx: data.logo.sfx || "",
+      sfxLibraryId: data.logo.sfxLibraryId || null,
+      sfxAlign: resolveSfxAlign(data.logo.sfxAlign, SFX_ALIGNS_LOGO),
       autoColorHex: ""
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
     return true;
   } catch (e) {
     return false;
@@ -4752,6 +5065,8 @@ function runMakeVideoJobUpload() {
   var videoBlobSha = null;
   var logoBlobSha = null;
   var releaseInfo = null;
+  var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
+  var sfxTreeEntries = [];
 
   setJobButtonBusy(true);
   showJobProgress(2, "リリースを作成中…");
@@ -4797,6 +5112,26 @@ function runMakeVideoJobUpload() {
     })
     .then(function (logoBlob) {
       if (logoBlob) logoBlobSha = logoBlob.sha;
+      // 効果音ライブラリ（自分のmp3/wav）のうち、実際に使われているファイルだけを
+      // 1件ずつIndexedDBから取り出してアップロードする（動画・ロゴ画像と同じGit Data API経由）
+      showJobProgress(87, "効果音ファイルをアップロード中… 0/" + usedSfxIds.length);
+      var chain = Promise.resolve();
+      usedSfxIds.forEach(function (id, i) {
+        chain = chain
+          .then(function () { return sfxLibraryGetRecord(id); })
+          .then(function (record) {
+            if (!record || !record.blob) return null;
+            return blobToBase64(record.blob).then(function (base64) {
+              return ghCreateBlob(user, repo, token, base64).then(function (blob) {
+                sfxTreeEntries.push({ path: sfxLibraryAssetPath(record.id, record.name), sha: blob.sha });
+                showJobProgress(87, "効果音ファイルをアップロード中… " + (i + 1) + "/" + usedSfxIds.length);
+              });
+            });
+          });
+      });
+      return chain;
+    })
+    .then(function () {
       showJobProgress(88, "コミットを作成中…");
       return ghGetCommit(user, repo, token, baseCommitSha);
     })
@@ -4808,6 +5143,7 @@ function runMakeVideoJobUpload() {
       if (logoFile && logoBlobSha) {
         entries.push({ path: logoAssetName(logoFile.name), sha: logoBlobSha });
       }
+      entries = entries.concat(sfxTreeEntries);
       return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
     })
     .then(function (tree) {
@@ -4936,7 +5272,7 @@ function handleJsonFileChange(e) {
   reader.onload = function () {
     try {
       var json = JSON.parse(String(reader.result));
-      var loaded = parseProjectJSON(json);
+      var loaded = parseProjectJSON(json, sfxLibrary);
       appState.revealSec = loaded.revealSec;
       appState.slideSec = loaded.slideSec;
       appState.holdSec = loaded.holdSec;
@@ -4954,7 +5290,7 @@ function handleJsonFileChange(e) {
       appState.shadowSource = loaded.shadowSource;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", autoColorHex: "" };
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();
