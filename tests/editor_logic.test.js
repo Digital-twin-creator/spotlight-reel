@@ -349,6 +349,60 @@ test("resolveReveal: 'none'はREVEALSに含まれ、そのまま返る", () => {
   assert.strictEqual(core.resolveReveal("none"), "none");
 });
 
+/* ---- 自動切り抜きモデル選択（mask_options.model） ---- */
+
+test("resolveMaskModel: 未知の値・未指定は既定モデル(isnet-general-use)にフォールバックする", () => {
+  assert.strictEqual(core.resolveMaskModel(undefined), core.DEFAULT_MASK_MODEL);
+  assert.strictEqual(core.resolveMaskModel(null), core.DEFAULT_MASK_MODEL);
+  assert.strictEqual(core.resolveMaskModel("no-such-model"), core.DEFAULT_MASK_MODEL);
+  assert.strictEqual(core.DEFAULT_MASK_MODEL, "isnet-general-use");
+});
+
+test("resolveMaskModel: 選択可能な2種類（isnet-general-use/birefnet-portrait）はそのまま返る", () => {
+  assert.strictEqual(core.resolveMaskModel("isnet-general-use"), "isnet-general-use");
+  assert.strictEqual(core.resolveMaskModel("birefnet-portrait"), "birefnet-portrait");
+  assert.deepStrictEqual(core.MASK_MODELS, ["isnet-general-use", "birefnet-portrait"]);
+});
+
+test("buildProjectJSON: maskModelが既定(isnet-general-use)ならstyle.mask_optionsキー自体を省略する（後方互換）", () => {
+  const state = sampleState();
+  state.maskModel = "isnet-general-use";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual("mask_options" in project.style, false);
+});
+
+test("buildProjectJSON: maskModelが未指定でもstyle.mask_optionsキーを省略する（既定モデル扱い）", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual("mask_options" in project.style, false);
+});
+
+test("buildProjectJSON: maskModelが高精度(birefnet-portrait)ならstyle.mask_options.modelを明示的に出力する", () => {
+  const state = sampleState();
+  state.maskModel = "birefnet-portrait";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.mask_options, { model: "birefnet-portrait" });
+});
+
+test("parseProjectJSON: style.mask_options.modelを読み込んでmaskModelとして復元する", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [],
+    style: { mask_options: { model: "birefnet-portrait" } }
+  });
+  assert.strictEqual(loaded.maskModel, "birefnet-portrait");
+});
+
+test("parseProjectJSON: style.mask_optionsが無ければmaskModelは既定モデルになる", () => {
+  const loaded = core.parseProjectJSON({ version: 1, video: "x.mp4", freezes: [], style: {} });
+  assert.strictEqual(loaded.maskModel, core.DEFAULT_MASK_MODEL);
+});
+
+test("parseProjectJSON: buildProjectJSONで高精度モデルを書き出し→読み込むと同じモデルに往復できる", () => {
+  const state = sampleState();
+  state.maskModel = "birefnet-portrait";
+  const loaded = core.parseProjectJSON(core.buildProjectJSON(state));
+  assert.strictEqual(loaded.maskModel, "birefnet-portrait");
+});
+
 /* ---- reveal_sec/slide_sec/hold_secの旧キー読み替え（freeze_sec/brush_anim_sec/shadow.slide_sec） ---- */
 
 test("parseProjectJSON: 旧freeze_sec/brush_anim_secは新しいhold_sec/reveal_secとして読み替えられる", () => {

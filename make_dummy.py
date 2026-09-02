@@ -112,6 +112,37 @@ def render_dummy_video(out_path, w=W, h=H):
     return out_path
 
 
+def gen_dummy_video_large_subject(out_path, w=W, h=H, duration_sec=2, fps=FPS):
+    """
+    自動切り抜き(rembg)のマスク面積チェック（render.pyのvalidate_auto_alpha。
+    画面の5%未満/85%超なら「切り抜き失敗」として止める）のテスト用に、実写の人物の
+    ように画面に対して十分な大きさ（画面の10%強）を持つ「被写体」（大きな円）を
+    描いた短いダミー動画を作る。通常のダミー動画（circle_positions由来の円）は
+    小さく、rembgの検出結果がこのチェックの下限(5%)を割り込みテストが不安定に
+    なるため、専用に用意する。
+    """
+    ffmpeg = "ffmpeg"
+    n_frames = int(duration_sec * fps)
+    cmd = [ffmpeg, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+           "-pix_fmt", "yuv420p", out_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    cx, cy = int(w * 0.5), int(h * 0.42)
+    r = int(min(w, h) * 0.28)
+    for i in range(n_frames):
+        t = i / fps
+        frame = make_gradient_bg(t, w, h)
+        cv2.circle(frame, (cx, cy), r, (60, 90, 220), -1, cv2.LINE_AA)
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("大型被写体ダミー動画の生成に失敗しました（ffmpeg）")
+    return out_path
+
+
 def render_dummy_video_vfr(out_path, w=W, h=H, base_fps=60, sub=2, duration_sec=DURATION_SEC,
                             stall_every=15, stall_extra_subframes=3):
     """

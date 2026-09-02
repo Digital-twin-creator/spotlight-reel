@@ -154,6 +154,14 @@ MASK_MODES = ("brush", "auto", "auto+brush")   # 後方互換専用（旧maskキ
 REVEALS = ("wipe", "fade", "brush", "none")
 CACHE_DIR_NAME = "cache"      # 自動切り抜きのアルファをキャッシュするディレクトリ（cwd基準）
 
+# 自動切り抜き（rembg）のアルファ品質チェック。実写フレームでは、照明や被写体との
+# コントラスト次第でモデルの出力が不安定になり、画面のほぼ全体（または逆にほぼ皆無）が
+# 前景と判定される「破綻」が起こることがある。そのまま使うと不定形の失敗動画が
+# できあがってしまうため、明らかにおかしい場合はレンダリング自体を止める。
+AUTO_MASK_MIN_AREA_RATIO = 0.05   # マスク面積がこれ未満（画面の5%未満）なら失敗とみなす
+AUTO_MASK_MAX_AREA_RATIO = 0.85   # マスク面積がこれを超える（画面の85%超）なら失敗とみなす
+AUTO_MASK_FEATHER_SIGMA_PX = 1.5  # 後処理で最後にかける軽いフェザー（ガウスぼかし）の強さ
+
 # 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定の秒数。
 # reveal_sec/slide_sec/hold_sec がJSON側で省略された場合に使う（resolve_reveal_sec/
 # resolve_hold_sec/_shadow_cfg_from_dict参照）。
@@ -916,6 +924,79 @@ def cache_path_for_alpha(video_path, t, cache_dir):
     return os.path.join(cache_dir, f"{base}_{t:.3f}.npz")
 
 
+def keep_largest_component(mask_u8):
+    """2値マスク(0/255, H×W)から最大連結成分だけを残した2値マスクを返す（ノイズ・分裂した破片の除去）"""
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if num_labels <= 1:
+        return mask_u8  # 前景（背景以外のラベル）が無い
+    areas = stats[1:, cv2.CC_STAT_AREA]  # ラベル0は背景なので除く
+    largest_label = 1 + int(np.argmax(areas))
+    return np.where(labels == largest_label, 255, 0).astype(np.uint8)
+
+
+def fill_holes(mask_u8):
+    """2値マスク(0/255, H×W)の内部にある穴（外周とつながっていない背景領域）を埋める"""
+    h, w = mask_u8.shape
+    padded = cv2.copyMakeBorder(mask_u8, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    flood = padded.copy()
+    ff_mask = np.zeros((h + 4, w + 4), np.uint8)
+    cv2.floodFill(flood, ff_mask, (0, 0), 255)
+    exterior_bg = cv2.bitwise_not(flood)
+    filled = cv2.bitwise_or(padded, exterior_bg)
+    return filled[1:-1, 1:-1]
+
+
+def postprocess_auto_alpha(alpha_u8):
+    """
+    自動切り抜き（rembg）のアルファに、破綻を防ぐための後処理を既定で適用する。
+      1. 最大連結成分のみ残す（ノイズ・被写体から分裂した破片を除去）
+      2. 穴埋め（被写体内部に残った小さな背景の穴を塞ぐ。白い服が背景と誤認されて
+         内部に穴があく、といった典型的な失敗を軽減する）
+      3. 軽いフェザー（ガウスぼかし）：1・2の処理でできた硬い輪郭を和らげる
+    最大連結成分の範囲内は、元のモデル出力の連続値（半透明の境界）をそのまま保つ
+    （境界の滑らかさを損なわないため、フェザー以外は範囲内の値自体を書き換えない）。
+    """
+    binary = np.where(alpha_u8 >= 128, 255, 0).astype(np.uint8)
+    kept = keep_largest_component(binary)
+    filled = fill_holes(kept)
+
+    out = np.where(filled > 0, alpha_u8, 0).astype(np.float32)
+    # 穴埋めで新たに追加された領域（穴埋め前は非前景だった箇所）は不透明として扱う
+    hole_added = (filled > 0) & (kept == 0)
+    out[hole_added] = 255.0
+
+    out = cv2.GaussianBlur(out, (0, 0), sigmaX=AUTO_MASK_FEATHER_SIGMA_PX)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def auto_mask_area_ratio(alpha_u8):
+    """アルファ(0-255)のうち、閾値128以上（＝前景）の画素が占める面積比を返す"""
+    return float((alpha_u8 >= 128).sum()) / float(alpha_u8.size)
+
+
+def validate_auto_alpha(alpha_u8, context_label):
+    """
+    自動切り抜きのマスク面積が明らかに異常（画面のAUTO_MASK_MAX_AREA_RATIO超、
+    またはAUTO_MASK_MIN_AREA_RATIO未満）であれば、「切り抜き失敗」とみなして
+    RuntimeErrorを送出する。実写フレームでは、照明や被写体とのコントラスト次第で
+    このような破綻が起こりうるため、不定形の失敗動画を最後まで作らないための最終防波堤。
+    """
+    ratio = auto_mask_area_ratio(alpha_u8)
+    if ratio > AUTO_MASK_MAX_AREA_RATIO:
+        raise RuntimeError(
+            f"自動切り抜きに失敗しました（{context_label}）：マスクが画面の{ratio * 100:.1f}%を占めており、"
+            "被写体だけを切り抜けていない可能性があります。動画のコントラストや照明を見直すか、"
+            "手動ブラシでの切り抜き（color_source を \"brush\"）に切り替えてください。"
+        )
+    if ratio < AUTO_MASK_MIN_AREA_RATIO:
+        raise RuntimeError(
+            f"自動切り抜きに失敗しました（{context_label}）：マスクが画面の{ratio * 100:.1f}%しかなく、"
+            "被写体を検出できていない可能性があります。動画のコントラストや照明を見直すか、"
+            "手動ブラシでの切り抜き（color_source を \"brush\"）に切り替えてください。"
+        )
+    return ratio
+
+
 def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options):
     """
     extract.py（自動切り抜き）でアルファ（0〜255連続値、H×W）を得る。
@@ -954,6 +1035,10 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
         rgba_img = rgba_img.resize((W, H), Image.LANCZOS)
     alpha = np.array(rgba_img)[:, :, 3]
     log(f"  自動切り抜き完了: {elapsed:.2f}秒（モデル={model}, refine={refine}, decontaminate={decontaminate}）")
+
+    alpha = postprocess_auto_alpha(alpha)
+    ratio = validate_auto_alpha(alpha, f"t={t:.2f}s")
+    log(f"  マスク後処理: 最大連結成分＋穴埋め＋フェザーを適用（面積比={ratio * 100:.1f}%）")
 
     np.savez_compressed(cache_file, alpha=alpha)
     return alpha

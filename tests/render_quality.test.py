@@ -681,7 +681,13 @@ try:
                        "offset_y": 0.0, "blur": 0.0, "source": "auto"},
         })
         mixed_cache_dir = os.path.join(tmpdir, "mixed_cache")
-        mixed_frame = render.grab_frame_at(video_path, 2.5, W, H, fps)
+        # render.validate_auto_alpha（マスク面積が画面の5%未満/85%超なら失敗とみなす）を
+        # 通常のダミー動画の小さな円（画面の約2.5%）で満たせないため、ここだけ実写の
+        # 人物のように十分な大きさを持つ合成フレームを使う（video_path/tはキャッシュキー
+        # 用にそのまま流用するが、専用のmixed_cache_dirを使うため他のテストとは衝突しない）
+        mixed_frame = np.full((H, W, 3), (90, 70, 60), np.uint8)
+        cv2.circle(mixed_frame, (int(W * 0.5), int(H * 0.42)), int(min(W, H) * 0.28),
+                   (60, 90, 220), -1, cv2.LINE_AA)
         color_ctx = render.build_mask_context(mixed_fz, mixed_frame, W, H, mixed_cache_dir, video_path)
         check(color_ctx["mask_mode"] == "brush", "color_source='brush'のとき、カラー化はブラシのマスクを使う")
         color_done_mask, _ = render.mask_and_paint_at(color_ctx, W, H, 1.0)
@@ -1024,6 +1030,70 @@ try:
     check(no_tail_energy < 1e-3,
           f"sfx_tail=Falseなら生のSE終了直後はほぼ無音のまま: {no_tail_energy:.5f}")
 
+    print("")
+    print("=== 自動切り抜きのアルファ後処理・破綻検知（keep_largest_component/fill_holes/postprocess_auto_alpha/validate_auto_alpha） ===")
+
+    # keep_largest_component: 小さなノイズの破片が除去され、大きな塊だけが残る
+    noise_mask = np.zeros((100, 100), np.uint8)
+    noise_mask[10:60, 10:60] = 255       # 大きな塊（50x50=2500px）
+    noise_mask[80:85, 80:85] = 255       # 小さなノイズの破片（5x5=25px、非連結）
+    kept = render.keep_largest_component(noise_mask)
+    check(kept[30, 30] == 255 and kept[82, 82] == 0,
+          "keep_largest_component：大きな塊は残り、非連結の小さなノイズの破片は除去される")
+    check(int((kept > 0).sum()) == 2500,
+          f"keep_largest_component：残った面積が最大成分の面積と一致する: {int((kept > 0).sum())}")
+
+    # fill_holes: 被写体内部の穴（外周とはつながっていない背景領域）だけが埋まり、外周の背景は変わらない
+    hole_mask = np.zeros((100, 100), np.uint8)
+    hole_mask[10:90, 10:90] = 255
+    hole_mask[40:50, 40:50] = 0          # 内部の穴（外周とは非連結）
+    filled = render.fill_holes(hole_mask)
+    check(filled[45, 45] == 255, "fill_holes：被写体内部の穴が埋まる")
+    check(filled[0, 0] == 0, "fill_holes：外周の背景（外部）はそのまま背景のまま")
+
+    # postprocess_auto_alpha: 連続値（半透明の境界）を保ちつつ、ノイズ除去・穴埋め・軽いフェザーを適用する
+    raw_alpha = np.zeros((100, 100), np.uint8)
+    raw_alpha[10:90, 10:90] = 200        # 被写体（完全な255ではなく半透明寄りの連続値のまま）
+    raw_alpha[40:50, 40:50] = 0          # 内部の穴
+    raw_alpha[95:100, 95:100] = 255      # 非連結のノイズの破片
+    post = render.postprocess_auto_alpha(raw_alpha)
+    check(int(post[45, 45]) > 200,
+          f"postprocess_auto_alpha：穴埋め後の内部領域は周囲より不透明寄りになる（フェザーで多少滲む）: {int(post[45, 45])}")
+    check(80 < int(post[50, 20]) <= 200,
+          f"postprocess_auto_alpha：元々前景だった領域は連続値が概ね保たれる（フェザーで多少変化しうる）: {int(post[50, 20])}")
+    check(int(post[97, 97]) < 50,
+          f"postprocess_auto_alpha：非連結のノイズの破片は除去される: {int(post[97, 97])}")
+
+    # auto_mask_area_ratio: 単純な閾値128以上の面積比
+    half_alpha = np.zeros((10, 10), np.uint8)
+    half_alpha[:, :5] = 255
+    check(abs(render.auto_mask_area_ratio(half_alpha) - 0.5) < 1e-9,
+          f"auto_mask_area_ratio：半分が前景なら0.5になる: {render.auto_mask_area_ratio(half_alpha)}")
+
+    # validate_auto_alpha: 85%超・5%未満のいずれでもRuntimeErrorになり、日本語の理由が含まれる
+    oversized = np.full((100, 100), 255, np.uint8)
+    oversized[:10, :10] = 0  # 前景 99% > 85%
+    try:
+        render.validate_auto_alpha(oversized, "t=1.00s")
+        check(False, "validate_auto_alpha：面積が85%を超えるとRuntimeErrorになる")
+    except RuntimeError as e:
+        check("失敗しました" in str(e) and "t=1.00s" in str(e),
+              f"validate_auto_alpha：面積が85%を超えるとRuntimeErrorになり、日本語の理由とラベルを含む: {e}")
+
+    undersized = np.zeros((100, 100), np.uint8)
+    undersized[:3, :3] = 255  # 前景 0.09% < 5%
+    try:
+        render.validate_auto_alpha(undersized, "t=2.00s")
+        check(False, "validate_auto_alpha：面積が5%未満だとRuntimeErrorになる")
+    except RuntimeError as e:
+        check("失敗しました" in str(e) and "t=2.00s" in str(e),
+              f"validate_auto_alpha：面積が5%未満だとRuntimeErrorになり、日本語の理由とラベルを含む: {e}")
+
+    normal_mask = np.zeros((100, 100), np.uint8)
+    normal_mask[10:60, 10:60] = 255  # 前景 25%（5%〜85%の範囲内）
+    check(abs(render.validate_auto_alpha(normal_mask, "t=3.00s") - 0.25) < 1e-9,
+          "validate_auto_alpha：5%〜85%の範囲内であればエラーにならず面積比を返す")
+
     has_rembg = False
     try:
         import rembg  # noqa: F401
@@ -1038,15 +1108,21 @@ try:
         print("")
         print("=== mask='auto'：自動切り抜き（rembg）を使ったフルレンダリングが成功し、キャッシュが効く ===")
         auto_cache_dir = os.path.join(tmpdir, "auto_cache")
+        # render.validate_auto_alpha（マスク面積が画面の5%未満/85%超なら失敗とみなす）を、
+        # 通常のダミー動画の小さな円（画面の約2.5%）では満たせないため、実写の人物のように
+        # 十分な大きさを持つ被写体を描いた専用のダミー動画を使う
+        import make_dummy as md_large
+        auto_video_path = os.path.join(tmpdir, "large_subject.mp4")
+        md_large.gen_dummy_video_large_subject(auto_video_path, w=W, h=int(H), duration_sec=2)
         auto_project = {
-            "version": 1, "video": "dummy_input.mp4",
+            "version": 1, "video": "large_subject.mp4",
             "output": {"width": W, "height": int(H)},
             "style": {
                 "freeze_sec": 1.0, "audio_during_freeze": "mute",
                 "mask": "auto", "mask_options": {"model": "isnet-general-use"},
                 "reveal": "wipe", "shadow": shadow_cfg,
             },
-            "freezes": [{"time": 2.5, "name": "自動くん"}],
+            "freezes": [{"time": 1.0, "name": "自動くん"}],
         }
         auto_json_path = os.path.join(tmpdir, "auto_project.json")
         import json as json_mod
@@ -1058,7 +1134,7 @@ try:
         try:
             os.chdir(tmpdir)  # render()のcache_dirはcwd基準のcache/なので、tmpdir配下に閉じ込める
             t0 = time.time()
-            render.render(loaded_auto, auto_json_path, video_path, out_auto)
+            render.render(loaded_auto, auto_json_path, auto_video_path, out_auto)
             elapsed_auto = time.time() - t0
         finally:
             os.chdir(old_cwd_auto)

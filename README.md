@@ -403,6 +403,11 @@ python extract.py input.png --out outdir/ \
 - `mask_options`：`color_source: "auto"` のときの自動切り抜き設定。
   `{"model": "...", "refine": "vitmatte"|null, "decontaminate": true|false}`。
   省略可（省略時は `extract.py` の既定モデル・`refine: null`・`decontaminate: false`）。
+  エディタの全体設定に「自動切り抜きのモデル」の選択肢があり、
+  **標準（速い）**＝`isnet-general-use`（既定・約3〜9秒/枚）と
+  **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）
+  のどちらかを選べます。標準を選んだ場合はJSONに `mask_options` キー自体を出力しません
+  （完全後方互換）。
 - `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
   表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
   `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /

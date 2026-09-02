@@ -354,6 +354,18 @@ async function main() {
   await page.selectOption("#shadowSourceSelect", "same");
 
   console.log("");
+  console.log("=== 全体設定：自動切り抜きのモデル（mask_options.model） ===");
+  check((await page.inputValue("#maskModelSelect")) === "isnet-general-use", "maskModelSelectの既定はisnet-general-use（標準）");
+  const styleDefaultModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(!("mask_options" in styleDefaultModel), "既定モデルのままなら style.mask_options キー自体を出力しない（後方互換）: " + JSON.stringify(styleDefaultModel.mask_options));
+
+  await page.selectOption("#maskModelSelect", "birefnet-portrait");
+  const styleHqModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleHqModel.mask_options && styleHqModel.mask_options.model === "birefnet-portrait",
+    "maskModelSelectを'高精度'にするとstyle.mask_options.modelが'birefnet-portrait'になる: " + JSON.stringify(styleHqModel.mask_options));
+  await page.selectOption("#maskModelSelect", "isnet-general-use");
+
+  console.log("");
   console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec） ===");
   check((await page.inputValue("#revealSecSlider")) === "0.5", "revealSecSliderの既定は0.5");
   check((await page.inputValue("#slideSecSlider")) === "0.5", "slideSecSliderの既定は0.5");

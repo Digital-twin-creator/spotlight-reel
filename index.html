@@ -529,6 +529,13 @@
           <option value="fade">fade（フェードイン）</option>
         </select>
       </div>
+      <div class="field">
+        <label>自動切り抜きのモデル（切り抜き方法が「自動」「自動＋ブラシ修正」のフリーズに適用）</label>
+        <select id="maskModelSelect">
+          <option value="isnet-general-use">標準（速い）</option>
+          <option value="birefnet-portrait">高精度（遅い・約+1分）</option>
+        </select>
+      </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="shadowEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
         <label style="margin:0;" for="shadowEnabledCheckbox">影（フィルム色）（人物がスライドして元の位置に影を見せる演出）</label>
@@ -746,6 +753,9 @@ var MASK_MODES = ["brush", "auto", "auto+brush"];
 var COLOR_SOURCES = ["brush", "auto"];
 var SHADOW_SOURCES = ["same", "brush", "auto"];
 var REVEALS = ["wipe", "fade", "brush", "none"];
+/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる2種類のみ） */
+var MASK_MODELS = ["isnet-general-use", "birefnet-portrait"];
+var DEFAULT_MASK_MODEL = "isnet-general-use";
 var SHADOW_DIRECTIONS = ["auto", "left", "right"];
 /** 1フリーズの流れ「①塗り(reveal)→②ズレ(slide)→③静止(hold)」の既定秒数（render.pyのREVEAL_SEC_DEFAULT等と同じ値） */
 var REVEAL_SEC_DEFAULT = 0.5;
@@ -1013,6 +1023,12 @@ function buildProjectJSON(state) {
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
   }
+  // mask_options.model は既定（isnet-general-use）のときは省略する（JSONの見た目を変えない＝
+  // 完全後方互換）。既定以外（高精度モデル）を選んだ場合のみ明示的に書き出す。
+  var maskModel = resolveMaskModel(state.maskModel);
+  if (maskModel !== DEFAULT_MASK_MODEL) {
+    project.style.mask_options = { model: maskModel };
+  }
   // style.shadow は常に出力する（enabled/disabledどちらの状態も明示するため）。
   // render.pyのresolve_shadow_configは"shadow"キー省略時を「既定で有効」と解釈するので、
   // オフの意図を確実に伝えるにはキー自体を省略せず {"enabled": false} を明示する必要がある。
@@ -1217,6 +1233,7 @@ function parseProjectJSON(json) {
     titleAlign: resolveTitleAlign(style.title_align),
     audioDuringFreeze: style.audio_during_freeze === "keep" ? "keep" : "mute",
     reveal: resolveReveal(style.reveal),
+    maskModel: resolveMaskModel(style.mask_options && style.mask_options.model),
     shadowEnabled: shadowEnabled,
     shadowColor: shadowColor,
     shadowAlpha: shadowAlpha,
@@ -1411,6 +1428,11 @@ function resolveColorSourceForFreeze(fz) {
 /** 未知の値は wipe にフォールバックする（render.py の resolve_reveal と同じ方針） */
 function resolveReveal(reveal) {
   return REVEALS.indexOf(reveal) >= 0 ? reveal : "wipe";
+}
+
+/** 未知の値は既定モデル（isnet-general-use）にフォールバックする */
+function resolveMaskModel(model) {
+  return MASK_MODELS.indexOf(model) >= 0 ? model : DEFAULT_MASK_MODEL;
 }
 
 /** 未知の値は auto にフォールバックする（render.py の resolve_shadow_config と同じ方針） */
@@ -1892,6 +1914,9 @@ if (typeof module !== "undefined" && module.exports) {
     resolveColorSourceForFreeze: resolveColorSourceForFreeze,
     resolveShadowSource: resolveShadowSource,
     resolveReveal: resolveReveal,
+    MASK_MODELS: MASK_MODELS,
+    DEFAULT_MASK_MODEL: DEFAULT_MASK_MODEL,
+    resolveMaskModel: resolveMaskModel,
     resolveTitleField: resolveTitleField,
     telopBoxFromAnchor: telopBoxFromAnchor,
     clampBoxToCanvas: clampBoxToCanvas,
@@ -1960,6 +1985,7 @@ var appState = {
   titleAlign: DEFAULT_STYLE.title_align,
   audioDuringFreeze: DEFAULT_STYLE.audio_during_freeze,
   reveal: DEFAULT_STYLE.reveal,
+  maskModel: DEFAULT_MASK_MODEL,
   shadowEnabled: true,  // render.pyの既定（"shadow"キー省略時は有効）に合わせ、エディタも初期状態でON
   shadowColor: DEFAULT_SHADOW.color,
   shadowAlpha: DEFAULT_SHADOW.alpha,
@@ -2090,7 +2116,7 @@ function init() {
     "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
-    "audioDuringFreezeSelect", "revealSelect",
+    "audioDuringFreezeSelect", "revealSelect", "maskModelSelect",
     "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
@@ -2250,6 +2276,10 @@ function init() {
   });
   els.revealSelect.addEventListener("change", function () {
     appState.reveal = resolveReveal(els.revealSelect.value);
+    saveToLocalStorage();
+  });
+  els.maskModelSelect.addEventListener("change", function () {
+    appState.maskModel = resolveMaskModel(els.maskModelSelect.value);
     saveToLocalStorage();
   });
   els.shadowEnabledCheckbox.addEventListener("change", function () {
@@ -4191,6 +4221,7 @@ function applySettingsToInputs() {
   updateFilmColorPresetSelection();
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.revealSelect.value = resolveReveal(appState.reveal);
+  els.maskModelSelect.value = resolveMaskModel(appState.maskModel);
   els.shadowEnabledCheckbox.checked = !!appState.shadowEnabled;
   els.shadowOptionsBody.hidden = !appState.shadowEnabled;
   els.shadowAlphaSlider.value = appState.shadowAlpha;
@@ -4240,6 +4271,7 @@ function buildLocalStoragePayload(dropThumbs) {
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
+    maskModel: appState.maskModel,
     shadowEnabled: appState.shadowEnabled,
     shadowColor: appState.shadowColor,
     shadowAlpha: appState.shadowAlpha,
@@ -4298,6 +4330,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
+    appState.maskModel = resolveMaskModel(data.maskModel);
     appState.shadowEnabled = !!data.shadowEnabled;
     appState.shadowColor = data.shadowColor || DEFAULT_SHADOW.color;
     appState.shadowAlpha = numOr(data.shadowAlpha, DEFAULT_SHADOW.alpha);
@@ -4911,6 +4944,7 @@ function handleJsonFileChange(e) {
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;
+      appState.maskModel = loaded.maskModel;
       appState.shadowEnabled = loaded.shadowEnabled;
       appState.shadowColor = loaded.shadowColor;
       appState.shadowAlpha = loaded.shadowAlpha;
