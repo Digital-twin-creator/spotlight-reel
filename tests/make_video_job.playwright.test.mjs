@@ -523,6 +523,72 @@ async function main() {
     await context.close();
   }
 
+  console.log("");
+  console.log("=== シナリオ7: 内容チェック（名前未入力・ストローク無しのフリーズ）で確認モーダルが出る ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    const mock = makeMock({ runId: 555007 });
+    await routeApiGithub(page, mock);
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+
+    // 名前を入力せず、ブラシも塗らずにフリーズを追加してコミットする
+    // （既定のmaskModeは"brush"なので、これだけで「名前未入力」「ストローク無し」の
+    // 2つの警告条件を両方満たす）
+    await page.click("#addFreezeBtn");
+    await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+    await page.click("#commitFreezeBtn");
+    await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+    await page.click("#makeVideoBtn");
+
+    await page.waitForFunction(
+      () => document.getElementById("confirmWarningsModal").hidden === false,
+      null, { timeout: 3000 }
+    );
+    const warningTexts = await page.$$eval("#confirmWarningsList li", (els) => els.map((el) => el.textContent));
+    check(warningTexts.length === 2, "警告が2件（名前未入力・ストローク無し）リストされる: " + JSON.stringify(warningTexts));
+    check(warningTexts.some((t) => t.indexOf("名前が入力されていません") >= 0),
+      "「名前が入力されていません」の警告が含まれる");
+    check(warningTexts.some((t) => t.indexOf("ブラシで何も塗られていません") >= 0),
+      "「ブラシで何も塗られていません」の警告が含まれる");
+    check(mock.createReleaseCalls === 0, "確認モーダル表示中はまだGitHub APIへ通信していない");
+
+    // 「戻って直す」を押すと、モーダルが閉じるだけでアップロードは始まらない
+    await page.click("#confirmWarningsBackBtn");
+    const hiddenAfterBack = await page.evaluate(() => document.getElementById("confirmWarningsModal").hidden);
+    check(hiddenAfterBack === true, "「戻って直す」を押すとモーダルが閉じる");
+    check(mock.createReleaseCalls === 0, "「戻って直す」後もGitHub APIへは通信していない（中断できている）");
+    const btnDisabledAfterBack = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
+    check(btnDisabledAfterBack === false, "「戻って直す」後、「動画を作る」ボタンは押せる状態のまま");
+
+    // 再度タップし、今度は「このまま作る」を選ぶと、通常どおりアップロードが進む
+    await page.click("#makeVideoBtn");
+    await page.waitForFunction(
+      () => document.getElementById("confirmWarningsModal").hidden === false,
+      null, { timeout: 3000 }
+    );
+    await page.click("#confirmWarningsProceedBtn");
+
+    const hiddenAfterProceed = await page.evaluate(() => document.getElementById("confirmWarningsModal").hidden);
+    check(hiddenAfterProceed === true, "「このまま作る」を押すとモーダルが閉じる");
+
+    await page.waitForFunction(
+      () => !document.getElementById("jobResultLink").hidden,
+      null, { timeout: 30000 }
+    );
+    check(mock.createReleaseCalls === 1, "「このまま作る」を選ぶと通常どおりRelease作成から始まる");
+    check(mock.dispatchCalls === 1, "「このまま作る」を選ぶと通常どおりworkflow_dispatchまで進む");
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+
+    await context.close();
+  }
+
   await browser.close();
 
   console.log("");

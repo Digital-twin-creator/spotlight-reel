@@ -982,6 +982,85 @@ test("estimateForegroundMaskCoarse: 幅・高さが0以下なら空配列を返�
   assert.strictEqual(core.estimateForegroundMaskCoarse(new Uint8ClampedArray(0), 10, 0).length, 0);
 });
 
+/* ---- validateProjectForConfirmation（「動画を作る」実行前の内容チェック） ---- */
+function makeFreeze(overrides) {
+  return Object.assign({
+    time: 1, name: "テスト", maskMode: "brush", strokes: [{ width: 0.1, points: [[0, 0], [1, 1]] }]
+  }, overrides);
+}
+function makeLogo(overrides) {
+  return Object.assign({ imageFile: null, imageName: "", at: "end" }, overrides);
+}
+
+test("validateProjectForConfirmation: 問題が無ければ警告は空", () => {
+  const warnings = core.validateProjectForConfirmation({ freezes: [makeFreeze()], logo: makeLogo() });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test("validateProjectForConfirmation: 名前が空のフリーズは警告される", () => {
+  const warnings = core.validateProjectForConfirmation({ freezes: [makeFreeze({ name: "" })], logo: makeLogo() });
+  assert.strictEqual(warnings.length, 1);
+  assert.ok(warnings[0].message.indexOf("名前が入力されていません") >= 0, warnings[0].message);
+  assert.strictEqual(warnings[0].freezeIndex, 0);
+});
+
+test("validateProjectForConfirmation: 名前が空白のみのフリーズも警告される", () => {
+  const warnings = core.validateProjectForConfirmation({ freezes: [makeFreeze({ name: "   " })], logo: makeLogo() });
+  assert.strictEqual(warnings.length, 1);
+});
+
+test("validateProjectForConfirmation: ストロークが無いbrushフリーズは警告される", () => {
+  const warnings = core.validateProjectForConfirmation({
+    freezes: [makeFreeze({ maskMode: "brush", strokes: [] })], logo: makeLogo()
+  });
+  assert.strictEqual(warnings.length, 1);
+  assert.ok(warnings[0].message.indexOf("ブラシで何も塗られていません") >= 0, warnings[0].message);
+});
+
+test("validateProjectForConfirmation: ストロークが無くてもauto/auto+brushフリーズは警告されない（自動切り抜きのみで成立するため）", () => {
+  const warnings = core.validateProjectForConfirmation({
+    freezes: [makeFreeze({ maskMode: "auto", strokes: [] }), makeFreeze({ maskMode: "auto+brush", strokes: [] })],
+    logo: makeLogo()
+  });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test("validateProjectForConfirmation: 未選択のロゴでatが既定値(end)から変更されていれば警告される", () => {
+  const warnings = core.validateProjectForConfirmation({
+    freezes: [], logo: makeLogo({ imageName: "", at: "last_freeze" })
+  });
+  assert.strictEqual(warnings.length, 1);
+  assert.ok(warnings[0].message.indexOf("ロゴ画像が選択されていない") >= 0, warnings[0].message);
+  assert.strictEqual(warnings[0].freezeIndex, undefined);
+});
+
+test("validateProjectForConfirmation: ロゴ画像が選択済みならatを変更していても警告されない", () => {
+  const warnings = core.validateProjectForConfirmation({
+    freezes: [], logo: makeLogo({ imageName: "logo.png", at: "last_freeze" })
+  });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test("validateProjectForConfirmation: ロゴ未選択でatも既定値のままなら警告されない", () => {
+  const warnings = core.validateProjectForConfirmation({ freezes: [], logo: makeLogo({ imageName: "", at: "end" }) });
+  assert.deepStrictEqual(warnings, []);
+});
+
+test("validateProjectForConfirmation: 複数のフリーズ・複数の問題が同時に一覧化される", () => {
+  const warnings = core.validateProjectForConfirmation({
+    freezes: [
+      makeFreeze({ time: 1, name: "" }),
+      makeFreeze({ time: 2, maskMode: "brush", strokes: [] }),
+      makeFreeze({ time: 0.5, name: "", maskMode: "brush", strokes: [] })
+    ],
+    logo: makeLogo({ imageName: "", at: "last_freeze" })
+  });
+  // 時刻でソートされるため、0.5秒のフリーズが先頭（インデックス0）になる。
+  // 内訳: 1秒フリーズ(名前)+2秒フリーズ(ストローク)+0.5秒フリーズ(名前・ストローク)+ロゴ = 5件
+  assert.strictEqual(warnings.length, 5);
+  assert.strictEqual(warnings.filter((w) => w.freezeIndex === 0).length, 2, "0.5秒のフリーズは名前・ストローク両方で警告される");
+});
+
 /* ---- makeJobTag ---- */
 test("makeJobTag: job-YYYYMMDD-HHMMSS 形式（UTC基準）になる", () => {
   const d = new Date(Date.UTC(2026, 7, 29, 15, 30, 5)); // 2026-08-29T15:30:05Z

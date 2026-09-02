@@ -228,6 +228,23 @@
   #maskPreviewCanvas{width:100%; height:auto; border-radius:10px; background:#000; display:block;}
   .mask-preview-note{font-size:12px; line-height:1.5;}
 
+  /* --- 「動画を作る」前の内容チェック確認モーダル --- */
+  .confirm-modal{
+    position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.72);
+    display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .confirm-modal-card{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:14px; width:100%; max-width:420px; max-height:90vh; overflow:auto;
+  }
+  .confirm-warning-list{list-style:none; margin:10px 0; padding:0; display:flex; flex-direction:column; gap:8px;}
+  .confirm-warning-list li{
+    background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:8px 10px; font-size:13px; line-height:1.5;
+  }
+  .confirm-modal-actions{display:flex; gap:8px; margin-top:12px;}
+  .confirm-modal-actions button{flex:1;}
+
   textarea#jsonPreviewArea{
     width:100%; min-height:120px; background:var(--panel3); color:var(--text);
     border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px;
@@ -638,6 +655,22 @@
       <a class="link-btn ghost" id="jobActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで実行状況を確認</a>
       <a class="link-btn" id="jobResultLink" href="#" target="_blank" rel="noopener" hidden>💾 完成動画を保存</a>
     </div>
+
+    <!-- 「動画を作る」実行前の内容チェック確認モーダル -->
+    <div class="confirm-modal" id="confirmWarningsModal" hidden>
+      <div class="confirm-modal-card">
+        <strong>⚠️ このまま作ってよいか確認してください</strong>
+        <p class="muted" style="margin-top:6px;">
+          レンダリング自体はエラーなく完了しますが、以下の点が意図と違う結果になる
+          可能性があります。
+        </p>
+        <ul class="confirm-warning-list" id="confirmWarningsList"></ul>
+        <div class="confirm-modal-actions">
+          <button type="button" class="ghost" id="confirmWarningsBackBtn">🔙 戻って直す</button>
+          <button type="button" class="primary" id="confirmWarningsProceedBtn">このまま作る</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 8. 書き出し・読み込み -->
@@ -993,6 +1026,37 @@ function buildProjectJSON(state) {
     if (state.logo.sfx) project.logo.sfx = state.logo.sfx;
   }
   return project;
+}
+
+/**
+ * 「動画を作る」実行前のアップロード直前チェック。レンダリング自体はエラーなく通るが、
+ * 意図と違う結果になりそうな状態（名前未入力のフリーズ、ストロークが無いbrushフリーズ、
+ * ロゴ画像未選択なのにラストロゴの表示位置だけ変更されている、等）を一覧で警告するための、
+ * DOM非依存の純粋関数。エラーではなく警告なので、呼び出し側は
+ * 「このまま作る／戻って直す」の選択をユーザーに促す。
+ */
+function validateProjectForConfirmation(state) {
+  var warnings = [];
+  var freezes = sortFreezesByTime(state.freezes || []);
+  freezes.forEach(function (fz, i) {
+    var label = "フリーズ" + (i + 1) + "（" + round(numOr(fz.time, 0), 2) + "秒）";
+    if (!(fz.name && fz.name.trim())) {
+      warnings.push({ freezeIndex: i, message: label + "：名前が入力されていません" });
+    }
+    var mode = resolveMaskMode(fz.maskMode);
+    if (mode === "brush" && (!fz.strokes || fz.strokes.length === 0)) {
+      warnings.push({
+        freezeIndex: i,
+        message: label + "：ブラシで何も塗られていません（色・影の範囲が指定されないままになります）"
+      });
+    }
+  });
+  if (state.logo && !state.logo.imageName && state.logo.at && state.logo.at !== DEFAULT_LOGO_AT) {
+    warnings.push({
+      message: "ラストロゴの表示位置を設定していますが、ロゴ画像が選択されていないため、ロゴは表示されません"
+    });
+  }
+  return warnings;
 }
 
 function matchOutputPreset(output) {
@@ -1762,6 +1826,7 @@ if (typeof module !== "undefined" && module.exports) {
     sortFreezesByTime: sortFreezesByTime,
     buildProjectJSON: buildProjectJSON,
     parseProjectJSON: parseProjectJSON,
+    validateProjectForConfirmation: validateProjectForConfirmation,
     matchOutputPreset: matchOutputPreset,
     buildStrokeGeometry: buildStrokeGeometry,
     trimGeometryToLength: trimGeometryToLength,
@@ -1882,7 +1947,8 @@ function init() {
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
     "ghSettingsSaveBtn", "ghSettingsStatus",
-    "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobActionsLink", "jobResultLink"
+    "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobActionsLink", "jobResultLink",
+    "confirmWarningsModal", "confirmWarningsList", "confirmWarningsBackBtn", "confirmWarningsProceedBtn"
   ].forEach(function (id) { els[id] = $(id); });
 
   wireGlobalErrorHandling();
@@ -2097,6 +2163,11 @@ function init() {
   els.ghSettingsSaveBtn.addEventListener("click", saveGhSettingsFromInputs);
   els.ghTokenToggleBtn.addEventListener("click", toggleGhTokenVisibility);
   els.makeVideoBtn.addEventListener("click", startMakeVideoJob);
+  els.confirmWarningsBackBtn.addEventListener("click", function () { els.confirmWarningsModal.hidden = true; });
+  els.confirmWarningsProceedBtn.addEventListener("click", function () {
+    els.confirmWarningsModal.hidden = true;
+    runMakeVideoJobUpload();
+  });
 
   wireDrawCanvasTouch();
   window.addEventListener("resize", handleWindowResize);
@@ -4282,6 +4353,33 @@ function startMakeVideoJob() {
     return;
   }
   persistGhSettings(user, repo, token);
+
+  var warnings = validateProjectForConfirmation(appState);
+  if (warnings.length > 0) {
+    showConfirmWarningsModal(warnings);
+    return;
+  }
+  runMakeVideoJobUpload();
+}
+
+/** レンダリングは通るが意図と違う結果になりそうな警告を、確認モーダルに一覧表示する */
+function showConfirmWarningsModal(warnings) {
+  els.confirmWarningsList.innerHTML = "";
+  warnings.forEach(function (w) {
+    var li = document.createElement("li");
+    li.textContent = w.message;
+    els.confirmWarningsList.appendChild(li);
+  });
+  els.confirmWarningsModal.hidden = false;
+}
+
+/** ハードエラーのチェックと内容確認（警告モーダル）を通過した後の、実際のアップロード・ジョブ実行本体 */
+function runMakeVideoJobUpload() {
+  var videoFile = appState.videoFile;
+  var logoFile = (appState.logo && appState.logo.imageFile) || null;
+  var user = els.ghUserInput.value.trim();
+  var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
+  var token = els.ghTokenInput.value.trim();
 
   var tag = makeJobTag(new Date());
   var videoName = videoAssetName(videoFile.name);
