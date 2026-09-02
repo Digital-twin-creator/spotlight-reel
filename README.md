@@ -354,7 +354,9 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
   1=引数不正・3=macOSバージョン不足・4=画像読み込み失敗・5=Visionリクエスト失敗）。
 - `spotlight-jobs` 側では、render.py自身がこのモデルを実行することはありません
   （`render.py --model apple-vision` 相当の抽出を試みると常に `RuntimeError` になります）。
-  代わりに、macOSランナー（`macos-14`）上で`subject_lift`を実行した結果を、
+  代わりに、macOSランナー（`macos-15`。`macos-14`はVNGenerateForegroundInstanceMaskRequestの
+  推論コンテキストを作成できず動かないことを実機検証で確認したため使いません）上で
+  `subject_lift`を実行した結果を、
   本番レンダリング前に `cache/` へ配置しておく3段構成のワークフローになっています
   （`prepare` → `extract_apple`（`model=apple-vision`の時だけ実行）→ `render`。
   詳細は[`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
