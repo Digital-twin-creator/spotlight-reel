@@ -169,10 +169,11 @@ try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirecto
 
 func writePNG(_ bytes: [UInt8], bytesPerPixel: Int, format: CIFormat, colorSpace: CGColorSpace, name: String) {
     let data = Data(bytes)
-    guard let image = CIImage(bitmapData: data, bytesPerRow: width * bytesPerPixel,
-                               size: CGSize(width: width, height: height), format: format, colorSpace: colorSpace) else {
-        fail(5, "\(name) の生成に失敗しました")
-    }
+    // CIImage(bitmapData:bytesPerRow:size:format:colorSpace:) はこの版のSDKでは
+    // 非failable（CIImage?ではなくCIImageを返す）。実機ビルドで判明した
+    // （事前のAPI調査では失敗判定つきと想定していたが、実際のシグネチャと異なった）。
+    let image = CIImage(bitmapData: data, bytesPerRow: width * bytesPerPixel,
+                         size: CGSize(width: width, height: height), format: format, colorSpace: colorSpace)
     let url = URL(fileURLWithPath: outDir).appendingPathComponent(name)
     do {
         try ciContext.writePNGRepresentation(of: image, to: url, format: format, colorSpace: colorSpace, options: [:])
