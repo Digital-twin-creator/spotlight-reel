@@ -405,6 +405,33 @@ async function main() {
   const closeBtnBox = await page.locator("#maskPreviewCloseBtn").boundingBox();
   check(closeBtnBox.width >= 44 && closeBtnBox.height >= 44,
     "右上の閉じるボタンが十分大きい（44px角以上）: " + JSON.stringify(closeBtnBox));
+  check(closeBtnBox.x >= 0 && closeBtnBox.y >= 0 &&
+    closeBtnBox.x + closeBtnBox.width <= viewportSize.width && closeBtnBox.y + closeBtnBox.height <= viewportSize.height,
+    "閉じるボタンがviewport内に収まっており実際にタップ可能な位置にある: " + JSON.stringify({ closeBtnBox, viewportSize }));
+
+  // 実機（iOS Safari）で見つかった不具合の再現条件：フリーズ編集中は#editorSectionが
+  // -webkit-overflow-scrolling:touchのスクロール領域になり、この中にposition:fixedの
+  // モーダルをネストすると、実機では「ビューポート基準の全画面」ではなく祖先の
+  // スクロールコンテナ内の擬似固定として描画されてしまう（Chromiumでは再現しないため、
+  // 単なるboundingBoxのサイズ確認だけでは検出できない）。これを構造的に防いだことを、
+  // freeze-editing状態（映像エリアがfixedで固定される状態）であることを明示した上で確認する。
+  check(await page.evaluate(() => document.body.classList.contains("freeze-editing")),
+    "この検証はフリーズ編集中（body.freeze-editing、映像エリアがfixedで固定される状態）で行っている");
+  check(await page.evaluate(() => {
+    var modal = document.getElementById("maskPreviewModal");
+    return modal.closest("#editorSection") === null;
+  }), "maskPreviewModalは#editorSection（-webkit-overflow-scrolling:touchのスクロール領域）の外にある");
+  check(await page.evaluate(() => document.getElementById("maskPreviewModal").parentElement === document.body),
+    "maskPreviewModalはbody直下に置かれている（ネストされたposition:fixedの実機不具合を避けるため）");
+  const videoWrapCenter = await page.evaluate(() => {
+    var r = document.getElementById("videoWrap").getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  check(await page.evaluate(({ x, y }) => {
+    var el = document.elementFromPoint(x, y);
+    return !!(el && el.closest("#maskPreviewModal"));
+  }, videoWrapCenter),
+    "映像エリア（#videoWrap）の中心座標でも、実際にオーバーレイが最前面に描画されている（elementFromPointで確認）");
   await page.waitForFunction(() => {
     var status = document.getElementById("maskPreviewStatus");
     return status && status.textContent.indexOf("確認完了") >= 0;

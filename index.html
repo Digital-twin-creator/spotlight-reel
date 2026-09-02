@@ -520,32 +520,6 @@
         </div>
       </div>
     </div>
-
-    <!-- 切り抜き結果のサーバー確認（全画面モーダル）。body.freeze-editing中は
-         #editorSection以外のmain直下要素がdisplay:noneになる仕組みのため、
-         #fixedEditorBarと同様にeditorSectionの子として置く必要がある。 -->
-    <div class="mask-preview-modal" id="maskPreviewModal" hidden>
-      <button type="button" class="fullscreen-close-btn" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
-      <div class="fullscreen-media">
-        <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
-      </div>
-      <div class="mask-preview-chrome">
-        <strong>切り抜き結果プレビュー（サーバー確認）</strong>
-        <div class="mask-preview-badge">本番と同じモデルで実際に切り抜いた結果です（所要1〜2分）</div>
-        <div class="muted" id="maskPreviewStatus">準備中…</div>
-        <div id="maskPreviewProgressWrap" hidden>
-          <div class="progress-track"><div class="progress-fill" id="maskPreviewProgressFill"></div></div>
-        </div>
-        <button type="button" class="ghost small" id="maskPreviewSkipBtn" hidden>確認せずに進む</button>
-        <a class="link-btn ghost small" id="maskPreviewActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
-        <p class="muted mask-preview-note">
-          静止フレーム（長辺1280px程度のJPEG）をサーバーへ送り、本番と同じモデルで
-          自動切り抜きを行った結果をチェッカー柄に重ねて表示します。この確認で使った
-          アルファは保存され、「動画を作る」実行時に同じものをそのまま使います
-          （モデルの再実行によるブレを防ぎます）。
-        </p>
-      </div>
-    </div>
   </section>
 
   <!-- 5. フリーズ一覧 -->
@@ -810,6 +784,37 @@
   </footer>
 
 </main>
+
+<!-- 切り抜き結果のサーバー確認（全画面モーダル）。「▶ プレビュー」の全画面表示（#videoWrap.previewing）
+     と同様、bodyの直下に置く。以前は#editorSectionの子だったが、#editorSectionは
+     -webkit-overflow-scrolling:touchを持つスクロール領域であり、実機のiOS Safariでは
+     その内側にネストされたposition:fixed要素が「ビューポート基準」ではなく祖先の
+     スクロールコンテナ基準の擬似固定として扱われてしまう既知の不具合がある
+     （Chromiumベースのテストでは再現しないため、Playwrightのみでは検出できなかった）。
+     実機で「結果が画面下部にインライン表示され、映像エリアの裏に隠れる／閉じるボタンが
+     押せない」という形で発生した。bodyの直下に置くことで、この不具合を構造的に回避する。 -->
+<div class="mask-preview-modal" id="maskPreviewModal" hidden>
+  <button type="button" class="fullscreen-close-btn" id="maskPreviewCloseBtn" aria-label="閉じる" title="閉じる">✕</button>
+  <div class="fullscreen-media">
+    <canvas id="maskPreviewCanvas" width="1" height="1"></canvas>
+  </div>
+  <div class="mask-preview-chrome">
+    <strong>切り抜き結果プレビュー（サーバー確認）</strong>
+    <div class="mask-preview-badge">本番と同じモデルで実際に切り抜いた結果です（所要1〜2分）</div>
+    <div class="muted" id="maskPreviewStatus">準備中…</div>
+    <div id="maskPreviewProgressWrap" hidden>
+      <div class="progress-track"><div class="progress-fill" id="maskPreviewProgressFill"></div></div>
+    </div>
+    <button type="button" class="ghost small" id="maskPreviewSkipBtn" hidden>確認せずに進む</button>
+    <a class="link-btn ghost small" id="maskPreviewActionsLink" href="#" target="_blank" rel="noopener" hidden>🔍 Actionsページで確認</a>
+    <p class="muted mask-preview-note">
+      静止フレーム（長辺1280px程度のJPEG）をサーバーへ送り、本番と同じモデルで
+      自動切り抜きを行った結果をチェッカー柄に重ねて表示します。この確認で使った
+      アルファは保存され、「動画を作る」実行時に同じものをそのまま使います
+      （モデルの再実行によるブレを防ぎます）。
+    </p>
+  </div>
+</div>
 
 <!-- ============================================================
      コアロジック（DOM非依存・純粋関数のみ）
