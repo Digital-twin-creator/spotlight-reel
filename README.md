@@ -51,6 +51,7 @@ spotlight-reel/
 │   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
 │   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのUI回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
+│   ├── startup_robustness.playwright.test.mjs  # 巨大/壊れた自動保存データ・起動失敗時の復旧UIの回帰テスト（任意、要playwright-core）
 │   └── make_video_job_live_cors.playwright.test.mjs # 実トークンでのCORS実証テスト（モック無し、既定はスキップ、要SPOTLIGHT_LIVE_PAT）
 ├── colab.ipynb             # Colab用ノートブック（手動フォールバック）
 └── README.md
@@ -101,6 +102,19 @@ spotlight-reel/
 
 編集内容は動画ファイル名をキーに端末の `localStorage` に自動保存されるため、途中でリロードしても
 同じ動画ファイルを選び直せば復元されます（動画そのものは保存されないので、再選択が必要です）。
+
+- 復元処理（サムネイル等を含む）は、動画を選んだ直後の同期処理からは切り離し、
+  次のタスクに遅延実行しています。フリーズ一覧はまず空の状態で即座に表示され、
+  復元が終わり次第反映されます。
+- 自動保存1件あたりのサイズには約2MBの上限を設けています。フリーズ数が多い等で
+  上限を超える場合は、サムネイル（フリーズごとのプレビュー画像）を諦めて座標データ
+  （ストローク・時刻・名前等）だけを保存します。サムネイル自体も保存時に長辺120pxへ
+  縮小しています。
+- 自動保存データが壊れている（JSONとして読めない）場合や、`localStorage`の保存容量
+  上限に達した場合でも、エラーにはせず初期状態（フリーズ0件）から開始します。
+- 起動処理そのものが失敗した場合（保存データの破損などで復旧できない状況）は、
+  「保存データの読み込みに失敗しました。初期化して開く」という復旧画面を表示します。
+  ボタンを押すとこのアプリの自動保存・GitHub連携設定等をすべて削除して再読み込みします。
 
 ### 動画を作る（GitHub Actionsでの自動レンダリング）
 
@@ -783,6 +797,7 @@ node tests/film_logo_bounce.playwright.test.mjs # freeze_sec・テロップバ�
 node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
 node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのE2E
 node tests/make_video_job.playwright.test.mjs   # 「動画を作る」ボタンのE2E（GitHub APIはモック、実際の通信はしない）
+node tests/startup_robustness.playwright.test.mjs # 巨大/壊れた自動保存データ・起動失敗時の復旧UIのE2E
 
 # 任意：モック無しでの実CORS実証（実トークンが必要。既定ではSPOTLIGHT_LIVE_PAT未設定でスキップされる）
 SPOTLIGHT_LIVE_PAT=github_pat_xxxx node tests/make_video_job_live_cors.playwright.test.mjs

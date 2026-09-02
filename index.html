@@ -2000,7 +2000,71 @@ var els = {};
 
 function $(id) { return document.getElementById(id); }
 
-document.addEventListener("DOMContentLoaded", init);
+document.addEventListener("DOMContentLoaded", function () {
+  try {
+    init();
+  } catch (err) {
+    handleFatalInitError(err);
+  }
+});
+
+/**
+ * 起動処理（init）自体が例外で失敗した場合の最後の砦。
+ * 壊れた/巨大な自動保存データを読み込むたびに毎回落ちる「クラッシュループ」を
+ * 避けるため、elsが正しく組み立てられているとは限らない前提でDOMを直接操作し、
+ * 保存データを消して開き直せるボタンを必ず表示する。
+ */
+function handleFatalInitError(err) {
+  console.error("起動処理に失敗しました:", err);
+  try {
+    var banner = document.createElement("div");
+    banner.id = "fatalInitBanner";
+    banner.style.cssText =
+      "position:fixed;inset:0;z-index:9999;background:#0b0d12;color:#eef1f7;" +
+      "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
+      "gap:14px;padding:24px;text-align:center;font-family:system-ui,-apple-system,sans-serif;";
+    var msg = document.createElement("p");
+    msg.style.cssText = "font-size:16px;font-weight:700;margin:0;";
+    msg.textContent = "保存データの読み込みに失敗しました。";
+    var msg2 = document.createElement("p");
+    msg2.style.cssText = "font-size:14px;margin:0;opacity:.85;";
+    msg2.textContent = "初期化して開き直してください（動画・設定は端末上のものが消えます）。";
+    var detail = document.createElement("p");
+    detail.style.cssText = "font-size:12px;opacity:.55;max-width:320px;word-break:break-all;margin:0;";
+    detail.textContent = (err && err.message) ? err.message : String(err);
+    var btn = document.createElement("button");
+    btn.id = "fatalInitResetBtn";
+    btn.type = "button";
+    btn.textContent = "初期化して開く";
+    btn.style.cssText =
+      "font-size:16px;padding:12px 28px;border-radius:12px;border:none;" +
+      "background:#5b8cff;color:#fff;font-weight:700;margin-top:8px;";
+    btn.addEventListener("click", function () {
+      clearAllAppLocalStorage();
+      location.reload();
+    });
+    banner.appendChild(msg);
+    banner.appendChild(msg2);
+    banner.appendChild(detail);
+    banner.appendChild(btn);
+    document.body.appendChild(banner);
+  } catch (err2) {
+    // 復旧UIの表示自体に失敗したら、せめてconsoleに残す（これ以上は打つ手がない）
+    console.error("復旧UIの表示にも失敗しました:", err2);
+  }
+}
+
+/** このアプリが使っているlocalStorageキー（自動保存・GitHub連携設定・ガイド既読など）を全て消す */
+function clearAllAppLocalStorage() {
+  try {
+    var keysToRemove = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf("spotlightReel") === 0) keysToRemove.push(k);
+    }
+    keysToRemove.forEach(function (k) { localStorage.removeItem(k); });
+  } catch (e) { /* localStorage自体に触れない環境ではこれ以上は何もできない */ }
+}
 
 function init() {
   [
@@ -2408,16 +2472,33 @@ function loadVideoFile(file) {
     }
   }).catch(function () { /* 読み取れなくても致命的ではないので無視 */ });
 
-  var restored = loadFromLocalStorage(file.name);
-  if (restored) {
-    els.restoreStatus.textContent = "前回の編集内容を復元しました（フリーズ " + appState.freezes.length + " 件）";
-  } else {
-    appState.freezes = [];
-    els.restoreStatus.textContent = "";
-  }
+  // 動画を選んだ直後の同期処理は軽く保つため、まず空の状態で描画する。
+  // 前回の編集内容の復元（サムネイルのdataURLを含み、フリーズ数によっては
+  // それなりの量になりうる）は、動画選択そのものと同じタイミングで行わず、
+  // 次のタスクへ遅延実行する（起動直後の重い処理の重なりを避けるため）。
+  appState.freezes = [];
+  els.restoreStatus.textContent = "";
   applySettingsToInputs();
   renderFreezeList();
   updateJsonPreview();
+
+  setTimeout(function () {
+    if (appState.videoFile !== detectingFor) return; // その間に別の動画へ切り替わっていたら何もしない
+    var restored = false;
+    try {
+      restored = loadFromLocalStorage(file.name);
+    } catch (err) {
+      restored = false;
+      showError("前回の編集内容の復元に失敗しました（初期状態のまま続けます）: " +
+        (err && err.message ? err.message : err));
+    }
+    if (restored) {
+      els.restoreStatus.textContent = "前回の編集内容を復元しました（フリーズ " + appState.freezes.length + " 件）";
+      applySettingsToInputs();
+      renderFreezeList();
+      updateJsonPreview();
+    }
+  }, 0);
 }
 
 function onVideoLoadedMetadata() {
@@ -3287,18 +3368,28 @@ function drawStampedGeo(ctx, shape, geo, startLen, endLen) {
  * pause済みで触れていないため、ここで改めて読み直すと黒フレームの
  * リスクを再び持ち込むことになる）。
  */
+// サムネイルの長辺（px）。自動保存されるデータの大半を占めるため、小さく保つ
+// （長辺基準にしているのは、この動画は縦長が多く、幅基準だと縦の長さが際限なく
+// 伸びてしまうため）。
+var THUMB_LONG_EDGE_PX = 120;
+
 function captureThumbnail(fz) {
   return new Promise(function (resolve) {
+    var c = null;
     try {
       if (!frozenFrameCanvas) { fz.thumb = ""; resolve(); return; }
       var vw = frozenFrameCanvas.width, vh = frozenFrameCanvas.height;
-      var tw = 92, th = Math.max(1, Math.round(tw * vh / vw));
-      var c = document.createElement("canvas");
+      var scale = Math.min(1, THUMB_LONG_EDGE_PX / Math.max(vw, vh));
+      var tw = Math.max(1, Math.round(vw * scale));
+      var th = Math.max(1, Math.round(vh * scale));
+      c = document.createElement("canvas");
       c.width = tw; c.height = th;
       c.getContext("2d").drawImage(frozenFrameCanvas, 0, 0, tw, th);
       fz.thumb = c.toDataURL("image/jpeg", 0.6);
     } catch (err) {
       fz.thumb = "";
+    } finally {
+      if (c) { c.width = 0; c.height = 0; }
     }
     resolve();
   });
@@ -4117,38 +4208,75 @@ function applySettingsToInputs() {
 // 古い保存データは読み込まず新しい既定値で始まるようにする。
 function storageKey(name) { return "spotlightReel:v3:" + name; }
 
+// 自動保存1件あたりのサイズ上限の目安。サムネイル（フリーズごとのJPEG dataURL）が
+// 大半を占めるため、これを超える場合はサムネイルを諦めて座標データだけを保存する
+// （復元できなくなるより、サムネイルが出ない方がずっとまし）。
+var SAVE_SIZE_BUDGET_BYTES = 2 * 1024 * 1024;
+
+function estimateByteLength(text) {
+  try { return new Blob([text]).size; } catch (e) { return text.length; }
+}
+
+function isQuotaExceededError(e) {
+  return !!e && (
+    e.name === "QuotaExceededError" ||
+    e.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+    e.code === 22 || e.code === 1014
+  );
+}
+
+function buildLocalStoragePayload(dropThumbs) {
+  return {
+    revealSec: appState.revealSec,
+    slideSec: appState.slideSec,
+    holdSec: appState.holdSec,
+    monoContrast: appState.monoContrast,
+    titleBounce: appState.titleBounce,
+    audioDuringFreeze: appState.audioDuringFreeze,
+    reveal: appState.reveal,
+    shadowEnabled: appState.shadowEnabled,
+    shadowColor: appState.shadowColor,
+    shadowAlpha: appState.shadowAlpha,
+    shadowDistanceRatio: appState.shadowDistanceRatio,
+    shadowDirection: appState.shadowDirection,
+    shadowBlurRatio: appState.shadowBlurRatio,
+    shadowSource: appState.shadowSource,
+    outputMode: appState.outputMode,
+    freezes: dropThumbs
+      ? appState.freezes.map(function (fz) {
+          var copy = Object.assign({}, fz);
+          copy.thumb = "";
+          return copy;
+        })
+      : appState.freezes,
+    // logo画像本体(File)は保存できないため、ファイル名等の設定だけ保存する
+    // （動画ファイルと同じく、復元後は「動画を作る」の前に選び直してもらう）
+    logo: (appState.logo && appState.logo.imageName) ? {
+      imageName: appState.logo.imageName,
+      at: appState.logo.at,
+      background: appState.logo.background,
+      durationSec: appState.logo.durationSec,
+      sfx: appState.logo.sfx
+    } : null
+  };
+}
+
 function saveToLocalStorage() {
   if (!appState.videoFileName) return;
   try {
-    var payload = {
-      revealSec: appState.revealSec,
-      slideSec: appState.slideSec,
-      holdSec: appState.holdSec,
-      monoContrast: appState.monoContrast,
-      titleBounce: appState.titleBounce,
-      audioDuringFreeze: appState.audioDuringFreeze,
-      reveal: appState.reveal,
-      shadowEnabled: appState.shadowEnabled,
-      shadowColor: appState.shadowColor,
-      shadowAlpha: appState.shadowAlpha,
-      shadowDistanceRatio: appState.shadowDistanceRatio,
-      shadowDirection: appState.shadowDirection,
-      shadowBlurRatio: appState.shadowBlurRatio,
-      shadowSource: appState.shadowSource,
-      outputMode: appState.outputMode,
-      freezes: appState.freezes,
-      // logo画像本体(File)は保存できないため、ファイル名等の設定だけ保存する
-      // （動画ファイルと同じく、復元後は「動画を作る」の前に選び直してもらう）
-      logo: (appState.logo && appState.logo.imageName) ? {
-        imageName: appState.logo.imageName,
-        at: appState.logo.at,
-        background: appState.logo.background,
-        durationSec: appState.logo.durationSec,
-        sfx: appState.logo.sfx
-      } : null
-    };
-    localStorage.setItem(storageKey(appState.videoFileName), JSON.stringify(payload));
-  } catch (e) { /* 容量超過などは無視 */ }
+    var text = JSON.stringify(buildLocalStoragePayload(false));
+    if (estimateByteLength(text) > SAVE_SIZE_BUDGET_BYTES) {
+      // サムネイルを含めると上限を超える場合は、サムネイルを諦めて座標データだけ保存する
+      text = JSON.stringify(buildLocalStoragePayload(true));
+    }
+    localStorage.setItem(storageKey(appState.videoFileName), text);
+  } catch (e) {
+    if (isQuotaExceededError(e)) {
+      showError("端末の保存容量が上限に達したため、今回の変更を自動保存できませんでした。" +
+        "フリーズの数を減らすか、ブラウザの保存領域を確認してください（レンダリング自体には影響しません）。");
+    }
+    // それ以外（プライベートブラウズでlocalStorageが使えない等）は致命的ではないため無視
+  }
   updateJsonPreview();
 }
 
@@ -4172,7 +4300,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blur);
     appState.shadowSource = resolveShadowSource(data.shadowSource);
     appState.outputMode = data.outputMode || "original";
-    appState.freezes = data.freezes || [];
+    appState.freezes = Array.isArray(data.freezes) ? data.freezes : [];
     appState.logo = (data.logo && data.logo.imageName) ? {
       imageFile: null,
       imageName: data.logo.imageName,
@@ -4226,7 +4354,12 @@ function loadGhSettings() {
 function persistGhSettings(user, repo, token) {
   try {
     localStorage.setItem(GH_SETTINGS_KEY, JSON.stringify({ user: user, repo: repo, token: token }));
-  } catch (e) { /* 保存できなくても処理自体は続行する */ }
+  } catch (e) {
+    if (isQuotaExceededError(e)) {
+      showError("端末の保存容量が上限に達したため、GitHub連携の設定を保存できませんでした。");
+    }
+    // それ以外は保存できなくても処理自体は続行する
+  }
 }
 
 function updateGhSettingsStatusDisplay() {
