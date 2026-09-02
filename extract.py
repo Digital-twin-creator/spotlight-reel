@@ -330,6 +330,8 @@ def rvm_infer_alpha(frames_rgb, target_index, downsample_ratio=None):
                 result_fgr, result_pha = fgr, pha
     elapsed = time.time() - t0
 
+    log(f"  [rvm debug] pha raw min={result_pha.min().item():.4f} max={result_pha.max().item():.4f} "
+        f"mean={result_pha.mean().item():.4f} shape={tuple(result_pha.shape)} dr={dr}")
     fgr_np = (result_fgr[0].clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
     pha_np = (result_pha[0, 0].clamp(0.0, 1.0).numpy() * 255.0).round().astype(np.uint8)
     rgba = np.dstack([fgr_np, pha_np])
