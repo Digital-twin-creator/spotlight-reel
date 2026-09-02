@@ -1236,6 +1236,41 @@ try:
         check(len(cache_files) >= 1, f"自動切り抜きのキャッシュ(.npz)が作られる: {cache_files}")
 
         print("")
+        print("=== render_timing.json：所要時間の内訳（render.ymlのジョブサマリー用）が書き出される ===")
+        timing_path = os.path.join(tmpdir, "render_timing.json")
+        check(os.path.exists(timing_path), f"render_timing.jsonが作られる: {timing_path}")
+        with open(timing_path, encoding="utf-8") as f:
+            timing = json_mod.load(f)
+        check(len(timing.get("freezes", [])) == 1,
+              f"フリーズ1件分のエントリが記録される: {timing.get('freezes')}")
+        fz_timing = timing["freezes"][0]
+        check(fz_timing["cache_used"] is False and fz_timing["time"] == 1.0,
+              f"初回実行はキャッシュ未使用として記録される（time=1.0）: {fz_timing}")
+        check(isinstance(fz_timing["extract_seconds"], (int, float)) and fz_timing["extract_seconds"] > 0,
+              f"自動切り抜きの所要時間が正の数で記録される: {fz_timing['extract_seconds']}")
+        check(timing.get("extract_seconds_total", 0) > 0,
+              f"切り抜き合計時間が記録される: {timing.get('extract_seconds_total')}")
+        check(timing.get("render_seconds", 0) >= timing.get("extract_seconds_total", 0),
+              "レンダリング全体の所要時間は切り抜き時間以上になる"
+              f"（render_seconds={timing.get('render_seconds')}, "
+              f"extract_seconds_total={timing.get('extract_seconds_total')}）")
+
+        print("")
+        print("=== render_timing.json：2回目（キャッシュヒット）はcache_used=Trueで記録される ===")
+        out_auto2 = os.path.join(tmpdir, "auto_out2.mp4")
+        old_cwd_auto2 = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            render.render(loaded_auto, auto_json_path, auto_video_path, out_auto2)
+        finally:
+            os.chdir(old_cwd_auto2)
+        with open(timing_path, encoding="utf-8") as f:
+            timing2 = json_mod.load(f)
+        fz_timing2 = timing2["freezes"][0]
+        check(fz_timing2["cache_used"] is True and fz_timing2["extract_seconds"] is None,
+              f"2回目はキャッシュヒットとして記録される: {fz_timing2}")
+
+        print("")
         print("=== mask='auto+brush'：addストロークで自動アルファに領域を足し足せる ===")
         rgb_frame = render.grab_frame_at(video_path, 2.5, W, H, fps)[:, :, ::-1]
         from PIL import Image

@@ -592,6 +592,17 @@ python extract.py input.png --out outdir/ \
   2. 完了すると、サーバー側が生成したチェッカー背景合成のプレビュー画像
      （`preview.png`）を取得してモーダルに表示します。透明（背景）部分がチェッカー柄で
      見えるため、本番と同じ精度で切り抜き結果を確認できます。
+     **実機検証の結果、非公開リポジトリのRelease アセットは
+     `GET /releases/assets/{id}`（`Accept: application/octet-stream`）で取得しても、
+     実体が `release-assets.githubusercontent.com` への302リダイレクトで返され、
+     そのリダイレクト先がCORS非対応（`Access-Control-Allow-Origin`を返さない）ため、
+     ブラウザの`fetch`ではプリフライトの時点で必ず失敗する（headless Chromiumで
+     再現・確認済み）ことが判明しました。**そのため `preview.png` とサーバー確認済み
+     アルファ（`.npz`）は、`extract.yml` がRelease（存在確認・手動閲覧用）だけでなく
+     `job-confirm-<tag>` ブランチにもコミットするようにし、エディタ側は
+     Contents API（`GET /repos/{owner}/{repo}/contents/{path}?ref={branch}`。
+     リダイレクトを伴わずAPI上で完結するため CORS 対応）でその中身を取得します
+     （動画・project.json のアップロードに Git Data API を使っているのと同じ理由）。
   3. 結果を待たずに編集を続けたい場合は「確認せずに進む」でいつでも中断できます
      （進捗バー横に常時表示）。GitHub Actions側の実行自体は止まりませんが、
      エディタ側はその結果を待たずにモーダルを閉じます。
@@ -606,7 +617,8 @@ python extract.py input.png --out outdir/ \
      一つでもズレていれば再利用は行わず、通常どおり本番レンダリング時にモデルが
      再実行されます（安全側フォールバック）。
      確認結果は本番タグと同じ `job-*` 命名規則を使っているため、`spotlight-jobs` 側の
-     7日後クリーンアップ（後述）でも自動的に削除対象になります（確認してからあまり
+     7日後クリーンアップ（後述。Release だけでなく `job-confirm-*` ブランチも一緒に
+     削除します）でも自動的に削除対象になります（確認してからあまり
      日を置かずに動画を作ることを想定しています）。
   - 表示中のフリーズに常に追従します：プレビューを開いたまま「完了」してフリーズ編集を
     抜けた場合でも、モーダルは自動的に閉じます（進行中のサーバー確認は打ち切られ、

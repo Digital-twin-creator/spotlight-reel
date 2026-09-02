@@ -217,15 +217,19 @@ function makeGithubMockRouter(mock) {
       });
     }
 
-    // GET /repos/{owner}/{repo}/releases/assets/9001  … サーバー確認済みアルファ(.npz)のダウンロード
-    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/9001`) {
+    // GET /repos/{owner}/{repo}/contents/{npz名}?ref={confirmTag}  …
+    // job-confirm-<tag>ブランチにコミットされたサーバー確認済みアルファ(.npz)の取得
+    // （Contents API。ghDownloadBranchFile参照。非公開Releaseアセットの実体は
+    // CORS非対応のホストへ302リダイレクトされブラウザから読み取れないため、
+    // ブランチへのコミット＋Contents APIに切り替えた）
+    if (method === "GET" && mock.confirmNpzAssetName &&
+        pathname === `/repos/${owner}/${repo}/contents/${mock.confirmNpzAssetName}`) {
       mock.downloadConfirmedAlphaCalls = (mock.downloadConfirmedAlphaCalls || 0) + 1;
-      await route.fulfill({
-        status: 200,
-        headers: { ...CORS_HEADERS, "content-type": "application/octet-stream" },
-        body: Buffer.from([1, 2, 3, 4]), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+      return json(200, {
+        name: mock.confirmNpzAssetName, path: mock.confirmNpzAssetName, sha: "confirmed-alpha-blob-sha",
+        content: Buffer.from([1, 2, 3, 4]).toString("base64"), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+        encoding: "base64",
       });
-      return;
     }
 
     console.log("  [警告] モックされていないGitHub APIリクエスト: " + method + " " + pathname);

@@ -2211,12 +2211,13 @@ function buildDispatchPayload(ref, tag) {
 
 /**
  * サーバー確認（extract.yml）で切り抜き済みのアルファがあるフリーズについて、確認時の
- * Releaseから該当アセット（video_<time>.npz）を取得し、本番jobブランチへ
+ * Release（存在確認用）とjob-confirm-<tag>ブランチ（中身の取得用。ghDownloadBranchFile
+ * 参照）から該当ファイル（video_<time>.npz）を取得し、本番jobブランチへ
  * cache/video_<time>.npz としてコミットするためのtreeエントリを作る。
  * render.pyのget_or_extract_alphaは、このファイルが本番の出力解像度と一致していれば
  * そのまま再利用しモデルを再実行しない（render.py側の変更は不要）。
- * 確認結果が既にReleaseから無くなっている場合（cleanup.ymlによる7日後の自動削除等）は、
- * そのフリーズだけ静かにスキップする（本番レンダリングはモデルの再実行にフォールバックする）。
+ * 確認結果が既に無くなっている場合（cleanup.ymlによる7日後の自動削除等）や取得に失敗した
+ * 場合は、そのフリーズだけ静かにスキップする（本番レンダリングはモデルの再実行にフォールバックする）。
  */
 function reuseConfirmedAlphaForFreezes(user, repo, token, freezes, videoFileName, model, onProgress) {
   var targets = (freezes || []).filter(function (fz) {
@@ -2227,11 +2228,10 @@ function reuseConfirmedAlphaForFreezes(user, repo, token, freezes, videoFileName
   targets.forEach(function (fz, i) {
     chain = chain
       .then(function () { return ghGetReleaseByTag(user, repo, token, fz.confirmedAlpha.tag); })
-      .catch(function () { return null; })
       .then(function (rel) {
         var asset = rel && findReleaseAsset(rel.assets, confirmedAlphaAssetName(fz.time));
         if (!asset) return null;
-        return ghDownloadReleaseAsset(user, repo, token, asset.id);
+        return ghDownloadBranchFile(user, repo, token, fz.confirmedAlpha.tag, confirmedAlphaAssetName(fz.time));
       })
       .then(function (arrayBuffer) {
         if (!arrayBuffer) return null;
@@ -2241,6 +2241,11 @@ function reuseConfirmedAlphaForFreezes(user, repo, token, freezes, videoFileName
         if (!base64) return null;
         return ghCreateBlob(user, repo, token, base64);
       })
+      // このフリーズの確認結果が既に無くなっている（7日後クリーンアップ済み等）・取得に
+      // 失敗した等、どの段階でエラーが起きても、このフリーズ1件だけを静かにスキップし
+      // （＝本番レンダリングはモデルの再実行にフォールバックする）、他のフリーズの引き継ぎや
+      // 「動画を作る」自体を巻き込んで失敗させない。
+      .catch(function () { return null; })
       .then(function (blob) {
         if (blob) entries.push({ path: confirmedAlphaCachePath(fz.time), sha: blob.sha });
         if (onProgress) onProgress(i + 1, targets.length);
@@ -4466,7 +4471,7 @@ function applyMaskPreviewResult(myToken, rel, tag, freezeTime, model, targetDraf
   }
   var cacheAsset = findReleaseAsset(rel.assets, confirmedAlphaAssetName(freezeTime));
   setMaskPreviewProgress(96);
-  return ghDownloadReleaseAsset(user, repo, token, previewAsset.id).then(function (arrayBuffer) {
+  return ghDownloadBranchFile(user, repo, token, tag, "preview.png").then(function (arrayBuffer) {
     checkAbort();
     var blob = new Blob([arrayBuffer], { type: "image/png" });
     maskPreviewObjectURL = URL.createObjectURL(blob);
@@ -5655,28 +5660,61 @@ function ghGetReleaseByTag(user, repo, token, tag) {
 }
 
 /**
- * 非公開リポジトリのReleaseアセットの中身（バイナリ）を取得する。
- * browser_download_urlへの直接ナビゲーションはユーザーの通常ブラウズ用（ログイン済み
- * ブラウザ前提でCORS対象外）なので、ページ内で内容を取り込んで表示する（プレビュー画像の
- * 重ね合わせ等）には、認証ヘッダ付きでAPIのアセットエンドポイントをAccept:application/
- * octet-streamで叩く必要がある。
+ * base64文字列（GitHubのContents/Blobs APIが返す、改行区切りのものを含む）をArrayBufferに変換する。
+ * atob()は仕様上ASCII空白文字（改行含む）を無視するため、そのまま渡してよい。
+ * 手動でbtoa(String.fromCharCode(...huge array...))のようなスプレッドはスタックを壊しうるため、
+ * 1バイトずつループで詰める（blobToBase64のコメント参照・同じ理由）。
  */
-function ghDownloadReleaseAsset(user, repo, token, assetId) {
-  var url = ghApiBase(user, repo) + "/releases/assets/" + assetId;
-  return fetch(url, {
-    headers: {
-      "Authorization": "Bearer " + token,
-      "Accept": "application/octet-stream",
-      "X-GitHub-Api-Version": "2022-11-28"
+function base64ToArrayBuffer(base64) {
+  var binary = atob(base64 || "");
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/**
+ * 非公開リポジトリの「job-<tag>ブランチにコミットされたファイル」の中身をbase64文字列で取得する
+ * （extract.ymlが確認結果（preview.png・アルファキャッシュ）をブランチへコミットする。
+ * render.pyのcache_path_for_alpha等、他の場所と同じ考え方でブランチをストレージとして使う）。
+ *
+ * 以前はGitHub ReleaseのアセットAPI（GET /releases/assets/{id} + Accept:application/octet-stream）
+ * を使っていたが、実機検証の結果、このエンドポイントは非公開アセットを
+ * release-assets.githubusercontent.com への302リダイレクトで返し、そのリダイレクト先が
+ * Access-Control-Allow-Originヘッダを一切返さないため、ブラウザからのfetchは
+ * プリフライトの時点で必ずCORSエラーになり、原理的に読み取り不可能なことが判明した
+ * （GitHub Actions上でheadless Chromiumから実際に叩いて確認済み）。
+ * Releaseアセット一覧の取得（ghGetReleaseByTag経由、存在確認用）はJSON応答でリダイレクトを
+ * 伴わないため今まで通り問題なく動く。問題は「バイナリの中身」を読み取る経路だけだった。
+ *
+ * 対策として、Contents API（GET /repos/{owner}/{repo}/contents/{path}?ref={branch}）を使う。
+ * こちらはapi.github.com上で完結するJSON応答で、1MB以下のファイルならcontentフィールドに
+ * base64で内容が直接埋め込まれて返る（リダイレクト無し＝CORS対応、動画コミット時に使っている
+ * Git Data API群と同じ理由で選んでいる）。1MBを超えファイルではcontentが省略されるため、
+ * その場合はshaを使ってGit Blobs API（GET /repos/{owner}/{repo}/git/blobs/{sha}。
+ * こちらも同じくAPI上で完結し100MBまで対応）で改めて取得する。
+ */
+function ghGetFileContentBase64(user, repo, token, branch, path) {
+  var url = ghApiBase(user, repo) + "/contents/" + path.split("/").map(encodeURIComponent).join("/") +
+    "?ref=" + encodeURIComponent(branch);
+  return ghFetchJson(url, token, {}).then(function (meta) {
+    if (meta && typeof meta.content === "string" && meta.encoding === "base64") {
+      return meta.content;
     }
-  }).then(function (res) {
-    if (!res.ok) {
-      return res.text().then(function (text) {
-        throw new Error("Releaseアセットの取得に失敗しました (" + res.status + "): " + (text || res.status));
-      });
+    if (!meta || !meta.sha) {
+      throw new Error("ファイルの内容を取得できませんでした: " + path);
     }
-    return res.arrayBuffer();
+    return ghFetchJson(ghApiBase(user, repo) + "/git/blobs/" + meta.sha, token, {}).then(function (blob) {
+      if (!blob || typeof blob.content !== "string") {
+        throw new Error("blobの内容を取得できませんでした: " + path);
+      }
+      return blob.content;
+    });
   });
+}
+
+/** job-<tag>ブランチにコミットされたファイルの中身をArrayBufferで取得する（ghGetFileContentBase64参照） */
+function ghDownloadBranchFile(user, repo, token, branch, path) {
+  return ghGetFileContentBase64(user, repo, token, branch, path).then(base64ToArrayBuffer);
 }
 
 function ghListWorkflowRuns(user, repo, token, workflowFile) {

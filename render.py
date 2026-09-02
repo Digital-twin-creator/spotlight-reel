@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 
 import cv2
@@ -153,6 +154,13 @@ SHADOW_SOURCES = ("same", "brush", "auto")
 MASK_MODES = ("brush", "auto", "auto+brush")   # 後方互換専用（旧maskキー）。新JSONはcolor_sourceを使う
 REVEALS = ("wipe", "fade", "brush", "none")
 CACHE_DIR_NAME = "cache"      # 自動切り抜きのアルファをキャッシュするディレクトリ（cwd基準）
+TIMING_JSON_NAME = "render_timing.json"  # 所要時間の内訳（--summary。render()呼び出しごとにリセット）
+
+# フリーズごとの自動切り抜き所要時間・キャッシュ使用有無を記録する側路（get_or_extract_alpha
+# 参照）。render()の呼び出しごとにクリアされ、成功時にTIMING_JSON_NAMEへ書き出される
+# （ジョブサマリーでの内訳表示用。render()の戻り値やシグネチャは変えずに済むよう、
+# あえてモジュールレベルの一覧として持たせている）。
+_TIMING_LOG = []
 
 # 自動切り抜き（rembg）のアルファ品質チェック。実写フレームでは、照明や被写体との
 # コントラスト次第でモデルの出力が不安定になり、画面のほぼ全体（または逆にほぼ皆無）が
@@ -1014,6 +1022,7 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
             alpha = data["alpha"]
             if alpha.shape == (H, W):
                 log(f"  切り抜きキャッシュを使用します: {cache_file}")
+                _TIMING_LOG.append({"time": round(t, 3), "cache_used": True, "extract_seconds": None})
                 return alpha
             warn(f"切り抜きキャッシュのサイズが現在の出力解像度と一致しないため再計算します: {cache_file}")
         except Exception as exc:  # noqa: BLE001 - 壊れたキャッシュ等は再計算にフォールバック
@@ -1035,6 +1044,7 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
         rgba_img = rgba_img.resize((W, H), Image.LANCZOS)
     alpha = np.array(rgba_img)[:, :, 3]
     log(f"  自動切り抜き完了: {elapsed:.2f}秒（モデル={model}, refine={refine}, decontaminate={decontaminate}）")
+    _TIMING_LOG.append({"time": round(t, 3), "cache_used": False, "extract_seconds": round(elapsed, 2)})
 
     alpha = postprocess_auto_alpha(alpha)
     ratio = validate_auto_alpha(alpha, f"t={t:.2f}s")
@@ -2438,8 +2448,39 @@ def write_wav(path, samples, sr=AUDIO_SR):
 # メイン処理
 # ---------------------------------------------------------------------------
 
+def _write_timing_summary(render_seconds):
+    """
+    フリーズごとの自動切り抜き所要時間・キャッシュ使用有無（_TIMING_LOG）と、
+    render()全体の所要時間をTIMING_JSON_NAME（cwd基準）へ書き出す（ジョブサマリー表示用。
+    render.ymlがこのJSONを読んで内訳をまとめる）。
+    color_source/shadow.sourceが両方"auto"の同じフリーズでは、get_or_extract_alphaが
+    2回（色用・影用）呼ばれることがあるため、同じ時刻のエントリは実際に抽出が
+    走った方（cache_used=False）を優先して1件にまとめる。
+    書き出しに失敗してもレンダリング自体の成功を妨げないよう、例外は握りつぶしてwarnする。
+    """
+    try:
+        merged = {}
+        for entry in _TIMING_LOG:
+            key = entry["time"]
+            if key not in merged or not entry["cache_used"]:
+                merged[key] = entry
+        freezes = sorted(merged.values(), key=lambda e: e["time"])
+        extract_total = sum(e["extract_seconds"] or 0 for e in freezes)
+        summary = {
+            "freezes": freezes,
+            "extract_seconds_total": round(extract_total, 2),
+            "render_seconds": round(render_seconds, 2),
+        }
+        with open(TIMING_JSON_NAME, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001 - 内訳の書き出し失敗はレンダリング成功を妨げない
+        warn(f"所要時間の内訳（{TIMING_JSON_NAME}）の書き出しに失敗しました: {exc}")
+
+
 def render(project, json_path, video_path, out_path, preview_path=None):
     """プロジェクト定義に従って1本のMP4（または確認用PNG）を作る"""
+    _TIMING_LOG.clear()
+    render_start = time.time()
     json_dir = os.path.dirname(os.path.abspath(json_path))
     info = probe_video(video_path)
 
@@ -2600,6 +2641,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
         if writer.returncode != 0:
             raise RuntimeError("ffmpeg のエンコードに失敗しました。")
         log(f"完成: {out_path}  ({written} フレーム / {written / fps:.2f} 秒)")
+        _write_timing_summary(time.time() - render_start)
         return out_path
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

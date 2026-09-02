@@ -275,24 +275,27 @@ function makeConfirmMockRouter(mock) {
       });
     }
 
-    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/501`) {
+    // GET .../contents/preview.png?ref=<tag> … job-confirm-<tag>ブランチにコミットされた
+    // preview.pngの中身を取得する（Contents API。非公開Releaseアセットの実体は
+    // release-assets.githubusercontent.comへの302リダイレクトで返り、そのリダイレクト先が
+    // CORS非対応でブラウザから読み取れないため、ブランチへのコミット＋Contents APIに
+    // 切り替えた。ghDownloadBranchFile参照）
+    if (method === "GET" && pathname === `/repos/${owner}/${repo}/contents/preview.png`) {
       mock.downloadAssetCalls++;
-      await route.fulfill({
-        status: 200,
-        headers: { ...CONFIRM_CORS_HEADERS, "content-type": "image/png" },
-        body: TEST_PREVIEW_PNG,
+      return json(200, {
+        name: "preview.png", path: "preview.png", sha: "preview-blob-sha",
+        content: TEST_PREVIEW_PNG.toString("base64"), encoding: "base64",
       });
-      return;
     }
 
-    if (method === "GET" && pathname === `/repos/${owner}/${repo}/releases/assets/502`) {
+    const cacheContentMatch = /^\/repos\/[^/]+\/[^/]+\/contents\/(video_[\d.]+\.npz)$/.exec(pathname);
+    if (method === "GET" && cacheContentMatch) {
       mock.downloadAssetCalls++;
-      await route.fulfill({
-        status: 200,
-        headers: { ...CONFIRM_CORS_HEADERS, "content-type": "application/octet-stream" },
-        body: Buffer.from([0, 1, 2, 3]), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+      return json(200, {
+        name: cacheContentMatch[1], path: cacheContentMatch[1], sha: "cache-blob-sha",
+        content: Buffer.from([0, 1, 2, 3]).toString("base64"), // 中身は無関係（treeエントリに載るかどうかだけを見る）
+        encoding: "base64",
       });
-      return;
     }
 
     console.log("  [警告] モックされていない確認フローAPIリクエスト: " + method + " " + pathname);
@@ -422,7 +425,7 @@ async function main() {
     && confirmMock.treePayload.tree.some((e) => e.path === "params.json"),
     "treeにframe.jpgとparams.jsonが含まれる: " + JSON.stringify(confirmMock.treePayload && confirmMock.treePayload.tree));
   check(confirmMock.dispatchCalls === 1, "render.ymlではなくextract.ymlがdispatchされる（モックのURLパターンが一致）: " + confirmMock.dispatchCalls);
-  check(confirmMock.downloadAssetCalls >= 1, "Releaseアセット（preview.png）を認証付きでダウンロードする");
+  check(confirmMock.downloadAssetCalls >= 1, "job-confirm-<tag>ブランチのpreview.pngをContents API経由で認証付きで取得する");
   const confirmedAlphaOnDraft = await page.evaluate(() => draft.confirmedAlpha);
   check(!!confirmedAlphaOnDraft && confirmedAlphaOnDraft.tag === confirmMock.tag,
     "確認完了後、draft.confirmedAlphaに確認結果（タグ等）が記録される（本番レンダリング時の再利用用）: " +

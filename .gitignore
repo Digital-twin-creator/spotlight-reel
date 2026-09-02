@@ -10,5 +10,8 @@ __pycache__/
 # render.py が自動切り抜き（mask: "auto"/"auto+brush"）のアルファをキャッシュするディレクトリ
 cache/
 
+# render.py が成功時に書き出す所要時間の内訳（render.yml のジョブサマリー用）
+render_timing.json
+
 # `npm install --no-save playwright-core` でPlaywright回帰テストを実行した際に生成される
 node_modules/
