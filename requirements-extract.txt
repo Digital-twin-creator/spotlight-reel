@@ -8,6 +8,16 @@ pillow
 # --extra-index-urlでCPU専用ビルド（数百MB）を優先的に解決させる。
 # torchvisionはRVMのモデルコード（mobilenetv3.py）がエンコーダの実装に使っている
 # （実Actionsジョブでの検証で発覚：torch.hub.load()時にModuleNotFoundErrorで判明）。
+#
+# torch/torchvisionはバージョンを固定する（最新版を素朴にインストールしない）。
+# RVM本体（PeterL1n/RobustVideoMatting）はtorchvision.models.mobilenetv3の非公開の
+# 内部クラス（InvertedResidualConfig等）に直接依存しており、リポジトリ自体は
+# torch==1.9.0 / torchvision==0.10.0（2021年当時）でのみ動作確認されている。
+# 実Actionsジョブでの検証で、最新のtorch/torchvisionを組み合わせるとRVMの推論結果
+# （アルファ）が常に0になる（＝内部で使われるtorchvision APIの変化により
+# エンコーダの特徴量が壊れている）不具合を確認した。1.9.0/0.10.0はPython 3.12の
+# ホイールが無いため、Python 3.12に対応する範囲でできるだけ近い組み合わせとして
+# 2.2.2 / 0.17.2（2024年初頭のペア）に固定する。
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
+torch==2.2.2
+torchvision==0.17.2
