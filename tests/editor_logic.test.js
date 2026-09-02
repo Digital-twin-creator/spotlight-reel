@@ -694,12 +694,34 @@ test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }
   }));
   assert.deepStrictEqual(withLogo.logo,
-    { image: "logo.png", at: "last_freeze", background: "auto", duration_sec: 1.2, sfx: "don" });
+    { image: "logo.png", at: "last_freeze", background: "auto",
+      start_width_ratio: core.DEFAULT_LOGO_START_WIDTH_RATIO,
+      hold_big_sec: core.DEFAULT_LOGO_HOLD_BIG_SEC,
+      shrink_sec: core.DEFAULT_LOGO_SHRINK_SEC,
+      settle_sec: core.DEFAULT_LOGO_SETTLE_SEC,
+      duration_sec: 1.2, sfx: "don" });
 
   const withoutLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageFile: null, imageName: "", at: "end", background: "auto", durationSec: 1.2, sfx: "don" }
   }));
   assert.strictEqual(withoutLogo.logo, undefined);
+});
+
+test("buildProjectJSON/parseProjectJSON: start_width_ratio/hold_big_sec/shrink_sec/settle_secが往復する", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "auto",
+            startWidthRatio: 2.1, holdBigSec: 0.3, shrinkSec: 0.8, settleSec: 0.25, durationSec: 1.2, sfx: "don" }
+  }));
+  assert.strictEqual(project.logo.start_width_ratio, 2.1);
+  assert.strictEqual(project.logo.hold_big_sec, 0.3);
+  assert.strictEqual(project.logo.shrink_sec, 0.8);
+  assert.strictEqual(project.logo.settle_sec, 0.25);
+
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.logo.startWidthRatio, 2.1);
+  assert.strictEqual(loaded.logo.holdBigSec, 0.3);
+  assert.strictEqual(loaded.logo.shrinkSec, 0.8);
+  assert.strictEqual(loaded.logo.settleSec, 0.25);
 });
 
 test("buildProjectJSON: logo.atが'last_freeze'以外なら'end'に、sfx未設定ならsfxキー省略、backgroundは既定でauto", () => {
@@ -744,6 +766,10 @@ test("parseProjectJSON: 新しいstyleキー・style.shadow・logo(background込
   assert.strictEqual(loaded.shadowBlurRatio, 0.02);
   assert.deepStrictEqual(loaded.logo, {
     imageFile: null, imageName: "store_logo.png", at: "last_freeze", background: "#00C8FF",
+    startWidthRatio: core.DEFAULT_LOGO_START_WIDTH_RATIO,
+    holdBigSec: core.DEFAULT_LOGO_HOLD_BIG_SEC,
+    shrinkSec: core.DEFAULT_LOGO_SHRINK_SEC,
+    settleSec: core.DEFAULT_LOGO_SETTLE_SEC,
     durationSec: 1.2, sfx: "don", sfxLibraryId: null, sfxAlign: "start_at_landing", sfxMissingFile: "",
     autoColorHex: ""
   });
@@ -842,19 +868,25 @@ test("DEFAULT_LOGO_DURATION_SEC は着地からの表示時間として2.2秒（
   assert.strictEqual(core.DEFAULT_LOGO_DURATION_SEC, 2.2);
 });
 
-test("logoLandingScale/logoLandingEase: t=0で初期スケール(LOGO_PREVIEW_SCALE_FROM)・不透明度0、t=1で100%・不透明度1", () => {
-  assert.strictEqual(core.logoLandingScale(0), core.LOGO_PREVIEW_SCALE_FROM);
-  assert.strictEqual(core.logoLandingScale(1), 1);
-  assert.strictEqual(core.logoLandingEase(0), 0);
-  assert.strictEqual(core.logoLandingEase(1), 1);
+test("logoLandingScale: タメ→縮小→セトルの3段階（render.pyのlogo_landing_scaleと同じ挙動）", () => {
+  const holdBig = 0.15, shrink = 0.5, settle = 0.15, scaleFrom = 2.0;
+  const minScale = core.LOGO_PREVIEW_MIN_SCALE;
+  // タメ区間：scaleFromのまま
+  assert.strictEqual(core.logoLandingScale(0, holdBig, shrink, settle, scaleFrom), scaleFrom);
+  assert.strictEqual(core.logoLandingScale(holdBig - 0.001, holdBig, shrink, settle, scaleFrom), scaleFrom);
+  // 縮小終わり（＝着地の瞬間）：最小サイズに到達
+  assert.ok(Math.abs(core.logoLandingScale(holdBig + shrink, holdBig, shrink, settle, scaleFrom) - minScale) < 1e-9);
+  // セトル終わり：100%
+  assert.strictEqual(core.logoLandingScale(holdBig + shrink + settle, holdBig, shrink, settle, scaleFrom), 1);
 });
 
-test("LOGO_PREVIEW_SCALE_FROM: 「画面幅の105%」÷LOGO_PREVIEW_WIDTH_RATIO(0.62)から算出される", () => {
-  const expected = core.LOGO_PREVIEW_START_WIDTH_RATIO / core.LOGO_PREVIEW_WIDTH_RATIO;
-  assert.ok(Math.abs(core.LOGO_PREVIEW_SCALE_FROM - expected) < 1e-9);
+test("DEFAULT_LOGO_START_WIDTH_RATIO/HOLD_BIG_SEC/SHRINK_SEC/SETTLE_SEC: render.pyのLOGO_*_DEFAULTと同じ既定値", () => {
+  assert.strictEqual(core.DEFAULT_LOGO_START_WIDTH_RATIO, 1.6);
+  assert.strictEqual(core.DEFAULT_LOGO_HOLD_BIG_SEC, 0.15);
+  assert.strictEqual(core.DEFAULT_LOGO_SHRINK_SEC, 0.5);
+  assert.strictEqual(core.DEFAULT_LOGO_SETTLE_SEC, 0.15);
   assert.strictEqual(core.LOGO_PREVIEW_WIDTH_RATIO, 0.62);
-  assert.strictEqual(core.LOGO_PREVIEW_START_WIDTH_RATIO, 1.05);
-  assert.strictEqual(core.LOGO_PREVIEW_LANDING_SEC, 0.6);
+  assert.strictEqual(core.LOGO_PREVIEW_MIN_SCALE, 0.98);
 });
 
 test("buildProjectJSON/parseProjectJSON: shadowを含めて往復できる", () => {

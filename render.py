@@ -120,28 +120,40 @@ LOGO_CROP_DENOISE_KERNEL_PX = 5   # 「内容」判定マスクにかけるモ�
                                   # 背景側にノイズで紛れ込んだ孤立画素を、外接矩形を求める前に除去する。
 
 # ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
-# scale_from/landing_sec/sweep_start_sec/sweep_sec/flash_strength/shake_sec/shake_amplitude/
-# duration_sec/fade_sec/sfx_tail は logo{} 配下でJSON上書き可能（resolve_logo_paramsで読み取る）。
-# それ以外（フラッシュの長さ・スイープ帯の幅比率・保持中に拡大する先・
-# last_freezeのクロスフェード時間・SFXテールの長さ）は固定値。
-LOGO_START_WIDTH_RATIO_DEFAULT = 1.05  # ロゴの初期表示幅（出力幅に対する比率）。画面幅の105%＝
-                                        # 画面いっぱいからわずかにはみ出す状態で表示を始める。
-                                        # scale_fromは指定が無ければ、この値をwidth_ratioで割って
-                                        # 逆算する（resolve_logo_params参照）。
-LOGO_SCALE_FROM_DEFAULT = 1.6     # scale_from省略時のフォールバック（width_ratio未解決の場合のみ使用）
-LOGO_LANDING_SEC_DEFAULT = 0.6    # 着地（縮小＋フェードイン）にかかる時間（以前は0.45秒、その前は0.15秒）
-LOGO_LANDING_ANTICIPATION_RATIO = 0.6  # 着地アニメのうち「ゆっくり入って一気に落ちる」区間の割合（残りが沈み込み→セトル）
-LOGO_LANDING_DIP_DEFAULT = 0.02   # 着地の沈み込み量（スケール絶対値。セトル時に100%を一瞬下回る量）
-LOGO_FLASH_SEC = 0.05             # 着地直後の白フラッシュの長さ（固定）
+# start_width_ratio/hold_big_sec/shrink_sec/settle_sec/sweep_start_sec/sweep_sec/
+# flash_strength/shake_sec/shake_amplitude/duration_sec/fade_sec/sfx_tail は
+# logo{} 配下でJSON上書き可能（resolve_logo_paramsで読み取る）。それ以外
+# （フラッシュの長さ・最小サイズへの沈み込み量・スイープ帯の幅比率・
+# 保持中に拡大する先・暗転経由のカットつなぎの長さ・SFXテールの長さ）は固定値。
+#
+# 着地演出は3段階（タメ→縮小→セトル）で構成する:
+#   タメ(hold_big_sec)  : start_width_ratio のまま静止（開始インパクトを強調する「間」）
+#   縮小(shrink_sec)    : start_width_ratio から最小サイズ（width_ratio×(1-LOGO_LANDING_DIP_DEFAULT)）
+#                         までEase-In（ゆっくり入って終盤に加速→急停止）で縮む
+#   セトル(settle_sec)  : 最小サイズから最終サイズ(width_ratio)までEase-Outで戻る
+# 「着地の瞬間」＝最小サイズに到達する瞬間（タメ+縮小の終わり）で、SE・白フラッシュ・
+# 画面の揺れ・logo.sfxのpeak_at_landingはすべてこの瞬間に揃える。
+LOGO_START_WIDTH_RATIO_DEFAULT = 1.6  # logo.start_width_ratio の既定値（出力幅に対する比率）。
+                                       # 160%＝両端が画面外に見切れた状態から表示を始める
+                                       # （以前は105%固定だった。実機での「インパクトが弱い」
+                                       # という指摘への対応）。
+LOGO_HOLD_BIG_SEC_DEFAULT = 0.15  # タメ：start_width_ratioのまま見せる時間
+LOGO_SHRINK_SEC_DEFAULT = 0.5     # 縮小：start_width_ratioから最小サイズまで縮む時間
+LOGO_SETTLE_SEC_DEFAULT = 0.15    # セトル：最小サイズから最終サイズ(width_ratio)へ戻る時間
+LOGO_LANDING_DIP_DEFAULT = 0.02   # 着地の沈み込み量（スケール比率。最小サイズ＝width_ratio×(1-これ)）
+LOGO_FLASH_SEC = 0.05             # 着地の瞬間の白フラッシュの長さ（固定）
 LOGO_FLASH_STRENGTH_DEFAULT = 0.35  # 白フラッシュの強さ（screen合成、0〜1。以前は0.6）
 LOGO_SHAKE_SEC_DEFAULT = 0.25         # 着地の瞬間に画面全体をわずかに揺らす時間
 LOGO_SHAKE_AMPLITUDE_RATIO_DEFAULT = 0.004  # 揺れの振幅（出力幅に対する比率）
-LOGO_SWEEP_START_SEC_DEFAULT = 0.35   # 着地完了から光彩スイープ開始までの時間
+LOGO_SWEEP_START_SEC_DEFAULT = 0.35   # 着地演出完了（タメ+縮小+セトル終わり）から光彩スイープ開始までの時間
 LOGO_SWEEP_SEC_DEFAULT = 0.70     # 光彩スイープにかかる時間（以前は0.3秒）
 LOGO_SWEEP_WIDTH_RATIO = 0.25     # 光彩帯の幅（ロゴ幅に対する比率、固定）
 LOGO_GROW_TO = 1.03               # 保持中にゆっくり拡大する先（103%、固定）
 LOGO_FADE_TO_BG_SEC_DEFAULT = 0.4  # 終了直前、背景色へ暗転する時間（以前は0.3秒→0.6秒→0.4秒）
-LOGO_BG_CROSSFADE_SEC = 0.15      # last_freeze時、静止フレーム→背景色へのフェード時間（固定）
+LOGO_CUT_BLACKOUT_SEC = 0.1       # 直前のシーンから0.1秒かけて暗転し、そこでカットしてロゴ演出へ
+                                   # 切り替わる（クロスフェードではなくカットつなぎ。logo.at="end"/
+                                   # "last_freeze"のどちらも、また logo.background の指定によらず
+                                   # 常にこの暗転を挟む。固定値）。
 LOGO_DURATION_SEC_DEFAULT = 2.2   # 着地からの表示時間の既定値（以前は1.2秒）
 LOGO_SFX_TAIL_SEC = 0.6           # logo.sfx_tail=true（既定）のときに付ける減衰ディレイの長さ（固定）
 
@@ -1406,40 +1418,27 @@ def ease_in_cubic(t):
     return t ** 3
 
 
-def logo_landing_curve(t, scale_from):
+def logo_landing_scale(t, hold_big_sec, shrink_sec, settle_sec, scale_from, min_scale):
     """
-    ロゴ着地の「アンティシペーション＋セトル」イージング。
-    --preview / ダミーレンダリングで単純なEase-Out Quart（旧実装）と見比べた結果、
-    「ゆっくり入って途中から一気に落ち、100%をわずかに沈み込んでから戻る」動きの方が
-    重厚感・弾力が出て良かったため、こちらを採用した。
-
-    区間1（t: 0〜LOGO_LANDING_ANTICIPATION_RATIO）：Ease-In Cubicで、ゆっくり入って
-      終盤に一気にscale_fromから沈み込み目標（100%よりLOGO_LANDING_DIP_DEFAULTだけ下）へ落ちる
-    区間2（残り）：Ease-Out Cubicで、沈み込んだ位置から100%へ滑らかに戻る（セトル）
-    戻り値はスケール値そのもの（scale_from→一時的に1.0を下回る→1.0）。
+    ロゴ着地演出（タメ→縮小→セトル）のスケールを、着地開始(t=0)からの経過秒数tで返す。
+      タメ  (0〜hold_big_sec)                         : scale_fromのまま静止
+      縮小  (hold_big_sec〜+shrink_sec)                : Ease-Inでscale_fromからmin_scaleへ
+                                                          （ゆっくり入って終盤に加速し、
+                                                          減速せずそのまま急停止する）
+      セトル(hold_big_sec+shrink_sec〜+settle_sec)     : Ease-Outでmin_scaleから1.0へ戻る
+    区間外（t<0 または 着地演出終了後）はクランプする。
     """
-    t = float(np.clip(t, 0.0, 1.0))
-    span = scale_from - 1.0
-    overshoot = (LOGO_LANDING_DIP_DEFAULT / span) if span > 1e-6 else 0.0
-    p = LOGO_LANDING_ANTICIPATION_RATIO
-    if t < p:
-        local = t / p
-        eased = ease_in_cubic(local) * (1.0 + overshoot)
-    else:
-        local = (t - p) / (1.0 - p)
-        eased = (1.0 + overshoot) - overshoot * ease_out_cubic(local)
-    return scale_from + (1.0 - scale_from) * eased
-
-
-def logo_landing_opacity(t):
-    """
-    着地アニメーション中の不透明度カーブ。scaleのセトル(logo_landing_curve)による
-    わずかな行き過ぎに引っ張られて明滅しないよう、沈み込み区間の開始時点
-    （LOGO_LANDING_ANTICIPATION_RATIO）までにEase-Out Cubicで先に完全不透明へ到達させる。
-    """
-    p = LOGO_LANDING_ANTICIPATION_RATIO
-    local = float(np.clip(t, 0.0, 1.0)) / p if p > 0 else 1.0
-    return float(np.clip(ease_out_cubic(min(local, 1.0)), 0.0, 1.0))
+    if t < hold_big_sec:
+        return scale_from
+    t2 = t - hold_big_sec
+    if t2 < shrink_sec:
+        local = t2 / shrink_sec if shrink_sec > 1e-9 else 1.0
+        return scale_from + (min_scale - scale_from) * ease_in_cubic(local)
+    t3 = t2 - shrink_sec
+    if settle_sec > 1e-9 and t3 < settle_sec:
+        local = t3 / settle_sec
+        return min_scale + (1.0 - min_scale) * ease_out_cubic(local)
+    return 1.0
 
 
 def logo_corner_avg_color(logo_bgr, patch_px=LOGO_CROP_CORNER_PATCH_PX):
@@ -1560,17 +1559,20 @@ def resolve_logo_background_color(bg_spec, logo_bgr):
 def resolve_logo_params(logo_cfg):
     """
     logo{} 配下のアニメーション上書きパラメータ（未指定なら既定値）をまとめて返す。
-    scale_from（着地アニメ開始時のスケール）は、指定が無ければ
-    「LOGO_START_WIDTH_RATIO_DEFAULT（画面幅比、既定105%）÷ width_ratio（着地後の画面幅比）」
-    から逆算する。こうすることで、width_ratioをJSON側で変えても、着地アニメの
-    開始時サイズは常に「画面幅の105%＝画面いっぱい」から揃う（scale_from自体を
-    明示指定すれば、従来どおりそちらが優先される）。
+    scale_from（着地演出「タメ」区間のスケール）は、start_width_ratio（画面幅比、
+    logo.start_width_ratio。既定LOGO_START_WIDTH_RATIO_DEFAULT）をwidth_ratio
+    （着地後の画面幅比）で割って求める。こうすることで、width_ratioをJSON側で
+    変えても、開始時サイズは常に「画面幅のstart_width_ratio比率」から揃う。
     """
     width_ratio = max(0.01, float(logo_cfg.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT)))
-    default_scale_from = LOGO_START_WIDTH_RATIO_DEFAULT / width_ratio if width_ratio > 1e-6 else LOGO_SCALE_FROM_DEFAULT
+    start_width_ratio = max(1.0, float(logo_cfg.get("start_width_ratio", LOGO_START_WIDTH_RATIO_DEFAULT)))
+    scale_from = start_width_ratio / width_ratio if width_ratio > 1e-6 else start_width_ratio
     return {
-        "scale_from": float(logo_cfg.get("scale_from", default_scale_from)),
-        "landing_sec": max(1e-3, float(logo_cfg.get("landing_sec", LOGO_LANDING_SEC_DEFAULT))),
+        "scale_from": scale_from,
+        "min_scale": 1.0 - LOGO_LANDING_DIP_DEFAULT,
+        "hold_big_sec": max(0.0, float(logo_cfg.get("hold_big_sec", LOGO_HOLD_BIG_SEC_DEFAULT))),
+        "shrink_sec": max(1e-3, float(logo_cfg.get("shrink_sec", LOGO_SHRINK_SEC_DEFAULT))),
+        "settle_sec": max(0.0, float(logo_cfg.get("settle_sec", LOGO_SETTLE_SEC_DEFAULT))),
         "sweep_start_sec": max(0.0, float(logo_cfg.get("sweep_start_sec", LOGO_SWEEP_START_SEC_DEFAULT))),
         "sweep_sec": max(1e-3, float(logo_cfg.get("sweep_sec", LOGO_SWEEP_SEC_DEFAULT))),
         "flash_strength": float(np.clip(logo_cfg.get("flash_strength", LOGO_FLASH_STRENGTH_DEFAULT), 0.0, 1.0)),
@@ -1580,12 +1582,31 @@ def resolve_logo_params(logo_cfg):
         "fade_sec": max(0.0, float(logo_cfg.get("fade_sec", LOGO_FADE_TO_BG_SEC_DEFAULT))),
         "sfx_tail": bool(logo_cfg.get("sfx_tail", True)),
         "width_ratio": width_ratio,
+        "start_width_ratio": start_width_ratio,
     }
 
 
+def logo_landing_total_sec(params):
+    """着地演出全体（タメ+縮小+セトル）の長さ（秒）"""
+    return params["hold_big_sec"] + params["shrink_sec"] + params["settle_sec"]
+
+
+def logo_landing_instant_sec(params):
+    """
+    「着地の瞬間」＝ロゴが最小サイズに到達する時刻（タメ+縮小の終わり、着地開始からの秒数）。
+    SE・白フラッシュ・画面の揺れ・logo.sfxのpeak_at_landingは、すべてこの瞬間に揃える。
+    """
+    return params["hold_big_sec"] + params["shrink_sec"]
+
+
+def logo_blackout_frames_for(fps):
+    """直前のシーンから暗転してカットするまでのフレーム数（LOGO_CUT_BLACKOUT_SEC・固定）"""
+    return max(1, int(round(LOGO_CUT_BLACKOUT_SEC * fps)))
+
+
 def logo_total_frames_for(logo_params, fps):
-    """着地開始から終了までの合計フレーム数（＝landing_sec + duration_sec 分）"""
-    return max(1, int(round((logo_params["landing_sec"] + logo_params["duration_sec"]) * fps)))
+    """着地開始から終了までの合計フレーム数（＝着地演出(タメ+縮小+セトル) + duration_sec 分）"""
+    return max(1, int(round((logo_landing_total_sec(logo_params) + logo_params["duration_sec"]) * fps)))
 
 
 def build_logo_luminance_mask(logo_bgr, logo_alpha):
@@ -1668,28 +1689,32 @@ def logo_animation_state(elapsed_sec, params):
     """
     着地開始(t=0、スタンバイ状態)からの経過秒数 elapsed_sec における、ロゴ演出の状態を返す。
       scale       : ロゴの表示スケール
-      opacity     : ロゴ自体の不透明度（着地中のフェードイン用）
+      opacity     : ロゴ自体の不透明度（常に1.0。フェードインはしない）
       flash_amt   : 画面全体に乗せる白フラッシュの強さ(0〜1)
       shake_dx/dy : 画面全体のわずかな揺れ（出力幅に対する比率）
       sweep_t     : 光彩スイープの進行度(0〜1)。スイープ区間外は None
       fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
-    タイムライン（既定値の場合。より重厚でゆっくりした着地にするため、旧バージョンより
-    全体的に間を長く取っている）:
-      0.00-0.60  着地（アンティシペーション＋セトル：ゆっくり入って一気に落ち、
-                 着地後サイズを2%だけ沈み込んでから戻る。scale ≒画面幅105%相当
-                 （＝画面いっぱい）→着地後の基準サイズ（width_ratio）・不透明度0→1）
-      0.60-0.65  白フラッシュ（着地の瞬間に発火、0.05秒で減衰）
-      0.60-0.85  画面全体のわずかな揺れ（振幅0.4%、0.25秒で減衰）
-      0.95-1.65  光彩スイープ（着地から0.35秒後に開始、0.70秒かける）
-      1.65-終了  ゆっくり103%まで拡大、最後の0.4秒で背景色へ暗転
+    タイムライン（既定値の場合）:
+      0.00-0.15  タメ：start_width_ratioのまま静止（不透明度は最初から1.0）
+      0.15-0.65  縮小：Ease-Inで最小サイズ（width_ratio×98%）まで縮む。ゆっくり入って
+                 終盤に加速し、減速せずそのまま急停止する
+      0.65       着地の瞬間（最小サイズに到達）：SE・白フラッシュ・画面の揺れが発火
+      0.65-0.80  セトル：Ease-Outで最小サイズから最終サイズ(width_ratio)へ戻る
+      1.15-1.85  光彩スイープ（着地演出完了から0.35秒後に開始、0.70秒かける）
+      1.85-終了  ゆっくり103%まで拡大、最後の0.4秒で背景色へ暗転
     """
-    landing = params["landing_sec"]
+    hold_big_sec = params["hold_big_sec"]
+    shrink_sec = params["shrink_sec"]
+    settle_sec = params["settle_sec"]
+    landing = logo_landing_total_sec(params)          # 着地演出全体（タメ+縮小+セトル）の長さ
+    landing_instant = logo_landing_instant_sec(params)  # 最小サイズに到達する瞬間（SE等の起点）
     flash_sec = LOGO_FLASH_SEC
     shake_sec = params["shake_sec"]
     shake_amplitude = params["shake_amplitude"]
     sweep_sec = params["sweep_sec"]
     duration_sec = params["duration_sec"]
     scale_from = params["scale_from"]
+    min_scale = params["min_scale"]
     fade_sec = params["fade_sec"]
 
     seg_end = landing + duration_sec
@@ -1701,25 +1726,22 @@ def logo_animation_state(elapsed_sec, params):
     t = float(np.clip(elapsed_sec, 0.0, seg_end))
 
     if t < landing:
-        tn = t / landing
-        scale = logo_landing_curve(tn, scale_from)
-        opacity = logo_landing_opacity(tn)
+        scale = logo_landing_scale(t, hold_big_sec, shrink_sec, settle_sec, scale_from, min_scale)
     elif t < hold_start:
         scale = 1.0
-        opacity = 1.0
     else:
         grow_span = max(seg_end - hold_start, 1e-6)
         gp = float(np.clip((t - hold_start) / grow_span, 0.0, 1.0))
         scale = 1.0 + (LOGO_GROW_TO - 1.0) * gp
-        opacity = 1.0
+    opacity = 1.0  # 開始時からフェードインなし（要件どおり常に完全不透明）
 
-    if landing <= t < landing + flash_sec:
-        flash_amt = params["flash_strength"] * (1.0 - (t - landing) / flash_sec)
+    if landing_instant <= t < landing_instant + flash_sec:
+        flash_amt = params["flash_strength"] * (1.0 - (t - landing_instant) / flash_sec)
     else:
         flash_amt = 0.0
 
-    if shake_sec > 0 and landing <= t < landing + shake_sec:
-        shake_t = (t - landing) / shake_sec
+    if shake_sec > 0 and landing_instant <= t < landing_instant + shake_sec:
+        shake_t = (t - landing_instant) / shake_sec
         decay = 1.0 - shake_t  # 線形減衰（急停止ではなく徐々に収まる）
         shake_dx = shake_amplitude * math.sin(shake_t * 2.0 * math.pi * 3.0) * decay
         shake_dy = shake_amplitude * math.sin(shake_t * 2.0 * math.pi * 3.0 + math.pi / 2.0) * decay * 0.6
@@ -1870,7 +1892,7 @@ def resolve_sfx_spec(sfx_value, json_dir, valid_aligns, context_label):
 
 
 def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
-                  logo_total_frames=0, logo_crossfade_frames=0):
+                  logo_total_frames=0, logo_blackout_frames=0):
     """
     各フリーズについて、挿入位置（フレーム番号）と各フェーズのフレーム数を決める。
     フェーズ順: pre(出現前の静止・固定0.3秒) → reveal(①塗り) →
@@ -1880,8 +1902,8 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
     reveal_sec/slide_sec/hold_secはそれぞれ独立に指定できる秒数で、
     （旧freeze_secのような）全体予算による比例縮小は行わない。
     logo_at=='last_freeze' の場合、時刻が一番遅いフリーズの③静止（hold）フェーズを、
-    （logo.backgroundが背景色を敷くモードなら）静止フレーム→背景色のクロスフェード分
-    (logo_crossfade_frames) ＋ ロゴの着地〜表示終了分(logo_total_frames) を確保できるよう延長する。
+    静止フレームからの暗転経由のカットつなぎ分(logo_blackout_frames) ＋
+    ロゴの着地〜表示終了分(logo_total_frames) を確保できるよう延長する。
     """
     plans = []
     for fz in freezes:
@@ -1918,7 +1940,7 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
             "n_total": n_pre + n_reveal + n_slide_in + n_hold + n_slide_back,
             "sfx": sfx_spec,
             "show_logo": False,
-            "logo_crossfade_frames": 0,
+            "logo_blackout_frames": 0,
             "logo_total_frames": 0,
             "mask_mode": mask_mode,
             "reveal": reveal,
@@ -1929,14 +1951,14 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
     if logo and logo_at == "last_freeze" and plans:
         last = plans[-1]
         last["show_logo"] = True
-        last["logo_crossfade_frames"] = logo_crossfade_frames
+        last["logo_blackout_frames"] = logo_blackout_frames
         last["logo_total_frames"] = logo_total_frames
         # このフリーズはロゴへ移るため、影を隠す元位置へのスライドバックは不要
         # （n_totalは変えず、reclaimしたぶんはholdへ回す）
         if last["n_slide_back"] > 0:
             last["n_hold"] += last["n_slide_back"]
             last["n_slide_back"] = 0
-        need_hold = max(1, logo_crossfade_frames + logo_total_frames)
+        need_hold = max(1, logo_blackout_frames + logo_total_frames)
         if last["n_hold"] < need_hold:
             extra = need_hold - last["n_hold"]
             last["n_hold"] += extra
@@ -2046,9 +2068,9 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         tail_mask = draw_stroke_mask(all_geo, W, H, max(all_total - tail_len, 0.0), all_total, shape)
         tail_paint_alpha = (tail_mask.astype(np.float32) / 255.0)[:, :, None]
 
-    crossfade_frames = plan.get("logo_crossfade_frames", 0)
+    blackout_frames = plan.get("logo_blackout_frames", 0)
     logo_seg_frames = plan.get("logo_total_frames", 0)
-    logo_start_in_hold = plan["n_hold"] - crossfade_frames - logo_seg_frames
+    logo_start_in_hold = plan["n_hold"] - blackout_frames - logo_seg_frames
     solid_bg_frame = None
     if plan["show_logo"] and logo_bg_color is not None:
         solid_bg_frame = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
@@ -2076,13 +2098,14 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         if plan["show_logo"]:
             rel = i - logo_start_in_hold
             if rel >= 0:
-                if crossfade_frames > 0 and rel < crossfade_frames:
-                    cf_t = (rel + 1) / float(crossfade_frames)
-                    target = np.array(logo_bg_color, dtype=np.float32)
-                    outf = out.astype(np.float32) * (1.0 - cf_t) + target * cf_t
+                if blackout_frames > 0 and rel < blackout_frames:
+                    # 直前のシーン（テロップ込みの静止フレーム）から0.1秒（LOGO_CUT_BLACKOUT_SEC）
+                    # かけて暗転し、そこでロゴ演出へカットする（クロスフェードではない）
+                    bt = (rel + 1) / float(blackout_frames)
+                    outf = out.astype(np.float32) * (1.0 - bt)
                     out = np.clip(outf, 0, 255).astype(np.uint8)
                 else:
-                    logo_elapsed = (rel - crossfade_frames) / float(fps)
+                    logo_elapsed = (rel - blackout_frames) / float(fps)
                     backdrop = solid_bg_frame if solid_bg_frame is not None else out
                     out = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
                                              W, H, logo_elapsed, logo_params, logo_bg_color)
@@ -2391,11 +2414,12 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         if plan["sfx"]:
             offset = frames_to_samples(landed_frame_offset, fps, sr)
             sfx_jobs.append((written + offset, plan["sfx"], False))
-        # ロゴがこのフリーズ中に表示される場合、着地の瞬間（クロスフェード後、landing_sec後）を基準にSEを鳴らす
+        # ロゴがこのフリーズ中に表示される場合、着地の瞬間（暗転カットの後、ロゴが最小サイズに
+        # 到達する瞬間）を基準にSEを鳴らす
         if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_spec and logo_params:
-            landing_frames = int(round(logo_params["landing_sec"] * fps))
+            landing_instant_frames = int(round(logo_landing_instant_sec(logo_params) * fps))
             logo_offset = frames_to_samples(
-                landed_frame_offset + plan.get("logo_crossfade_frames", 0) + landing_frames,
+                landed_frame_offset + plan.get("logo_blackout_frames", 0) + landing_instant_frames,
                 fps, sr)
             sfx_jobs.append((written + logo_offset, logo_sfx_spec, logo_params["sfx_tail"]))
         written += n_samples
@@ -2407,8 +2431,8 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         extra_samples = frames_to_samples(logo_extra_frames, fps, sr)
         pieces.append(np.zeros((extra_samples, ch), np.float32))
         if logo_sfx_spec and logo_params:
-            landing_frames = int(round(logo_params["landing_sec"] * fps))
-            landing_samples = frames_to_samples(landing_frames, fps, sr)
+            landing_instant_frames = logo_blackout_frames_for(fps) + int(round(logo_landing_instant_sec(logo_params) * fps))
+            landing_samples = frames_to_samples(landing_instant_frames, fps, sr)
             sfx_jobs.append((tail_start + landing_samples, logo_sfx_spec, logo_params["sfx_tail"]))
 
     out = np.concatenate(pieces) if pieces else np.zeros((0, ch), np.float32)
@@ -2519,7 +2543,7 @@ def render(project, json_path, video_path, out_path, preview_path=None):
         logo_extra_frames = 0
         logo_params = None
         logo_bg_color = None
-        logo_crossfade_frames = 0
+        logo_blackout_frames = 0
         logo_total_frames = 0
         if logo_cfg:
             logo_at = resolve_logo_at(logo_cfg.get("at"), bool(project["freezes"]))
@@ -2538,14 +2562,15 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                 logo_sfx_spec = resolve_sfx_spec(logo_cfg.get("sfx"), json_dir, SFX_ALIGNS_LOGO,
                                                   "logo")
                 logo_total_frames = logo_total_frames_for(logo_params, fps)
+                # 直前のシーンから暗転経由でカットしてロゴ演出へ切り替える（logo.at・
+                # logo.backgroundの指定によらず常に挟む。LOGO_CUT_BLACKOUT_SEC・固定）
+                logo_blackout_frames = logo_blackout_frames_for(fps)
                 if logo_at == "end":
-                    logo_extra_frames = logo_total_frames
-                elif logo_at == "last_freeze" and logo_bg_color is not None:
-                    logo_crossfade_frames = max(1, int(round(LOGO_BG_CROSSFADE_SEC * fps)))
+                    logo_extra_frames = logo_blackout_frames + logo_total_frames
 
         plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
-                              logo_crossfade_frames=logo_crossfade_frames)
+                              logo_blackout_frames=(logo_blackout_frames if logo_at == "last_freeze" else 0))
 
         # 自動切り抜き（mask="auto"/"auto+brush"）のアルファは、動画名＋フリーズ時刻をキーに
         # cwd基準の cache/ ディレクトリへキャッシュし、同じフレームの再レンダリング時は
@@ -2619,14 +2644,24 @@ def render(project, json_path, video_path, out_path, preview_path=None):
                     written += 1
 
             # logo.at=='end'：末尾に新しい区間としてロゴを書き足す。背景色を敷くモードなら
-            # 全面その色のフレーム、"video"モードなら最後に出力したフレームを背景にする
-            # （クロスフェードはlast_freezeのみで、endは背景色/映像への切り替えを挟まない）
+            # 全面その色のフレーム、"video"モードなら最後に出力したフレームを背景にする。
+            # 最後に出力したフレームから0.1秒（LOGO_CUT_BLACKOUT_SEC）かけて暗転し、
+            # そこでロゴ演出へカットする（クロスフェードではない）。
             if logo_at == "end" and logo_bgr is not None and last_out_frame is not None:
                 if logo_bg_color is not None:
                     backdrop = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
                 else:
                     backdrop = np.ascontiguousarray(last_out_frame)
-                for i in range(logo_extra_frames):
+                blackout_frames = logo_blackout_frames_for(fps)
+                last_frame_f32 = np.ascontiguousarray(last_out_frame).astype(np.float32)
+                for i in range(blackout_frames):
+                    bt = (i + 1) / float(blackout_frames)
+                    out_frame = np.clip(last_frame_f32 * (1.0 - bt), 0, 255).astype(np.uint8)
+                    writer.stdin.write(out_frame.tobytes())
+                    written += 1
+                    if written % 15 == 0:
+                        print(f"\r  {written}/{total_out} フレーム", end="", flush=True)
+                for i in range(logo_total_frames):
                     out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
                                                    W, H, i / float(fps), logo_params, logo_bg_color)
                     writer.stdin.write(out_frame.tobytes())

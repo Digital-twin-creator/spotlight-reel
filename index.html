@@ -666,7 +666,23 @@
         <span class="muted" id="logoColorHint">検出色</span>
       </div>
       <div class="field">
-        <label>duration_sec（着地からの表示時間） <span class="brush-slider-value" id="logoDurationValue">2.2秒</span></label>
+        <label>開始の大きさ start_width_ratio（画面外に見切れる大きさから始める） <span class="brush-slider-value" id="logoStartWidthRatioValue">1.60</span></label>
+        <input type="range" id="logoStartWidthRatioSlider" min="1.2" max="2.5" step="0.05" value="1.6">
+      </div>
+      <div class="field">
+        <label>タメ hold_big_sec（開始の大きさのまま静止する時間） <span class="brush-slider-value" id="logoHoldBigSecValue">0.15秒</span></label>
+        <input type="range" id="logoHoldBigSecSlider" min="0" max="1" step="0.05" value="0.15">
+      </div>
+      <div class="field">
+        <label>縮小時間 shrink_sec（開始の大きさから最小サイズまで縮む時間） <span class="brush-slider-value" id="logoShrinkSecValue">0.50秒</span></label>
+        <input type="range" id="logoShrinkSecSlider" min="0.1" max="2" step="0.05" value="0.5">
+      </div>
+      <div class="field">
+        <label>戻り時間 settle_sec（最小サイズから定位置へ戻る時間） <span class="brush-slider-value" id="logoSettleSecValue">0.15秒</span></label>
+        <input type="range" id="logoSettleSecSlider" min="0" max="1" step="0.05" value="0.15">
+      </div>
+      <div class="field">
+        <label>duration_sec（着地演出が終わってからの表示時間） <span class="brush-slider-value" id="logoDurationValue">2.2秒</span></label>
         <input type="range" id="logoDurationSlider" min="0.3" max="5" step="0.1" value="2.2">
       </div>
       <div class="field">
@@ -884,6 +900,11 @@ function easeOutCubic(t) {
   t = clamp01(t);
   return 1 - Math.pow(1 - t, 3);
 }
+/** Ease-In Cubic：t^3（t=0→0, t=1→1。render.pyのease_in_cubicと同じ）。ゆっくり入って終盤に一気に加速する */
+function easeInCubic(t) {
+  t = clamp01(t);
+  return t * t * t;
+}
 /** render.pyのAUTO_REVEAL_WIPE_SEC/AUTO_REVEAL_FADE_SECと同じ値（mask="auto"/"auto+brush"の出現時間・固定） */
 var AUTO_REVEAL_WIPE_SEC = 0.4;
 var AUTO_REVEAL_FADE_SEC = 0.3;
@@ -904,6 +925,10 @@ var FILM_COLOR_PRESETS = {
 var DEFAULT_LOGO_AT = "end";
 var DEFAULT_LOGO_DURATION_SEC = 2.2;
 var DEFAULT_LOGO_BACKGROUND = "auto";
+var DEFAULT_LOGO_START_WIDTH_RATIO = 1.6;  // render.pyのLOGO_START_WIDTH_RATIO_DEFAULTと同じ
+var DEFAULT_LOGO_HOLD_BIG_SEC = 0.15;      // render.pyのLOGO_HOLD_BIG_SEC_DEFAULTと同じ
+var DEFAULT_LOGO_SHRINK_SEC = 0.5;         // render.pyのLOGO_SHRINK_SEC_DEFAULTと同じ
+var DEFAULT_LOGO_SETTLE_SEC = 0.15;        // render.pyのLOGO_SETTLE_SEC_DEFAULTと同じ
 
 function round(n, decimals) {
   var p = Math.pow(10, decimals);
@@ -1182,6 +1207,10 @@ function buildProjectJSON(state) {
       image: state.logo.imageName,
       at: state.logo.at === "last_freeze" ? "last_freeze" : "end",
       background: state.logo.background || DEFAULT_LOGO_BACKGROUND,
+      start_width_ratio: round(numOr(state.logo.startWidthRatio, DEFAULT_LOGO_START_WIDTH_RATIO), 2),
+      hold_big_sec: round(numOr(state.logo.holdBigSec, DEFAULT_LOGO_HOLD_BIG_SEC), 2),
+      shrink_sec: round(numOr(state.logo.shrinkSec, DEFAULT_LOGO_SHRINK_SEC), 2),
+      settle_sec: round(numOr(state.logo.settleSec, DEFAULT_LOGO_SETTLE_SEC), 2),
       duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2)
     };
     if (state.logo.sfxLibraryId) {
@@ -1377,6 +1406,10 @@ function parseProjectJSON(json, sfxLibrary) {
       imageName: json.logo.image,
       at: json.logo.at === "last_freeze" ? "last_freeze" : "end",
       background: json.logo.background || DEFAULT_LOGO_BACKGROUND,
+      startWidthRatio: numOr(json.logo.start_width_ratio, DEFAULT_LOGO_START_WIDTH_RATIO),
+      holdBigSec: numOr(json.logo.hold_big_sec, DEFAULT_LOGO_HOLD_BIG_SEC),
+      shrinkSec: numOr(json.logo.shrink_sec, DEFAULT_LOGO_SHRINK_SEC),
+      settleSec: numOr(json.logo.settle_sec, DEFAULT_LOGO_SETTLE_SEC),
       durationSec: numOr(json.logo.duration_sec, DEFAULT_LOGO_DURATION_SEC),
       sfx: logoSfxFields.sfx,
       sfxLibraryId: logoSfxFields.sfxLibraryId,
@@ -1857,23 +1890,29 @@ function measureTitleLines(ctx, lines, baseSizePx, fontKey) {
 }
 
 /**
- * ラストロゴの「着地」演出の簡易プレビュー用イージング（render.pyのLOGO_*_DEFAULTと
- * 同じ値。厳密な揺れ・フラッシュ・SFXテールまでは簡易プレビューでは再現しない）。
- * 「画面幅の105%（画面いっぱい）」で表示を始め、着地後の基準表示幅（0.62、
- * render.pyのLOGO_WIDTH_RATIO_DEFAULTと同じ）まで縮小する。
+ * ラストロゴの「着地」演出（タメ→縮小→セトル）の簡易プレビュー用計算
+ * （render.pyのlogo_landing_scale/LOGO_*_DEFAULTと同じロジック・値。厳密な揺れ・
+ * フラッシュ・SFXテール・暗転経由のカットつなぎまでは簡易プレビューでは再現しない）。
+ * 着地後の基準表示幅（0.62、render.pyのLOGO_WIDTH_RATIO_DEFAULTと同じ）は
+ * エディタで編集できないため固定値のまま。開始の大きさ・タメ・縮小・戻りの各時間は
+ * appState.logoのスライダー値（未設定ならDEFAULT_LOGO_*）を使う。
  */
 var LOGO_PREVIEW_WIDTH_RATIO = 0.62;
-var LOGO_PREVIEW_START_WIDTH_RATIO = 1.05;
-var LOGO_PREVIEW_SCALE_FROM = LOGO_PREVIEW_START_WIDTH_RATIO / LOGO_PREVIEW_WIDTH_RATIO;
-var LOGO_PREVIEW_LANDING_SEC = 0.6;
+var LOGO_PREVIEW_MIN_SCALE = 0.98;   // render.pyのLOGO_LANDING_DIP_DEFAULT(0.02)と同じ沈み込み量
 var LOGO_PREVIEW_SWEEP_SEC = 0.70;
-function logoLandingEase(t) {
-  t = clamp01(t);
-  return 1.0 - Math.pow(1.0 - t, 4);
-}
-function logoLandingScale(t) {
-  var eased = logoLandingEase(t);
-  return LOGO_PREVIEW_SCALE_FROM + (1.0 - LOGO_PREVIEW_SCALE_FROM) * eased;
+function logoLandingScale(t, holdBigSec, shrinkSec, settleSec, scaleFrom) {
+  if (t < holdBigSec) return scaleFrom;
+  var t2 = t - holdBigSec;
+  if (t2 < shrinkSec) {
+    var local = shrinkSec > 1e-9 ? t2 / shrinkSec : 1;
+    return scaleFrom + (LOGO_PREVIEW_MIN_SCALE - scaleFrom) * easeInCubic(local);
+  }
+  var t3 = t2 - shrinkSec;
+  if (settleSec > 1e-9 && t3 < settleSec) {
+    var local2 = t3 / settleSec;
+    return LOGO_PREVIEW_MIN_SCALE + (1.0 - LOGO_PREVIEW_MIN_SCALE) * easeOutCubic(local2);
+  }
+  return 1.0;
 }
 
 /** render.py の make_background と同じ計算（1画素分） */
@@ -2338,12 +2377,14 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_LOGO_AT: DEFAULT_LOGO_AT,
     DEFAULT_LOGO_DURATION_SEC: DEFAULT_LOGO_DURATION_SEC,
     DEFAULT_LOGO_BACKGROUND: DEFAULT_LOGO_BACKGROUND,
+    DEFAULT_LOGO_START_WIDTH_RATIO: DEFAULT_LOGO_START_WIDTH_RATIO,
+    DEFAULT_LOGO_HOLD_BIG_SEC: DEFAULT_LOGO_HOLD_BIG_SEC,
+    DEFAULT_LOGO_SHRINK_SEC: DEFAULT_LOGO_SHRINK_SEC,
+    DEFAULT_LOGO_SETTLE_SEC: DEFAULT_LOGO_SETTLE_SEC,
     LOGO_PREVIEW_WIDTH_RATIO: LOGO_PREVIEW_WIDTH_RATIO,
-    LOGO_PREVIEW_START_WIDTH_RATIO: LOGO_PREVIEW_START_WIDTH_RATIO,
-    LOGO_PREVIEW_SCALE_FROM: LOGO_PREVIEW_SCALE_FROM,
-    LOGO_PREVIEW_LANDING_SEC: LOGO_PREVIEW_LANDING_SEC,
+    LOGO_PREVIEW_MIN_SCALE: LOGO_PREVIEW_MIN_SCALE,
     LOGO_PREVIEW_SWEEP_SEC: LOGO_PREVIEW_SWEEP_SEC,
-    logoLandingEase: logoLandingEase,
+    easeInCubic: easeInCubic,
     logoLandingScale: logoLandingScale,
     round: round,
     clamp01: clamp01,
@@ -2619,7 +2660,7 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" }
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" }
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -2754,6 +2795,10 @@ function init() {
     "outputModeSelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
+    "logoStartWidthRatioSlider", "logoStartWidthRatioValue",
+    "logoHoldBigSecSlider", "logoHoldBigSecValue",
+    "logoShrinkSecSlider", "logoShrinkSecValue",
+    "logoSettleSecSlider", "logoSettleSecValue",
     "logoDurationSlider", "logoDurationValue",
     "logoSfxSelect", "logoSfxAlignSelect", "clearLogoBtn",
     "sfxLibraryFileInput", "sfxLibraryStatus", "sfxLibraryList",
@@ -2983,6 +3028,26 @@ function init() {
       appState.logo.background = els.logoColorInput.value;
       saveToLocalStorage();
     }
+  });
+  els.logoStartWidthRatioSlider.addEventListener("input", function () {
+    appState.logo.startWidthRatio = Number(els.logoStartWidthRatioSlider.value);
+    els.logoStartWidthRatioValue.textContent = appState.logo.startWidthRatio.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.logoHoldBigSecSlider.addEventListener("input", function () {
+    appState.logo.holdBigSec = Number(els.logoHoldBigSecSlider.value);
+    els.logoHoldBigSecValue.textContent = appState.logo.holdBigSec.toFixed(2) + "秒";
+    saveToLocalStorage();
+  });
+  els.logoShrinkSecSlider.addEventListener("input", function () {
+    appState.logo.shrinkSec = Number(els.logoShrinkSecSlider.value);
+    els.logoShrinkSecValue.textContent = appState.logo.shrinkSec.toFixed(2) + "秒";
+    saveToLocalStorage();
+  });
+  els.logoSettleSecSlider.addEventListener("input", function () {
+    appState.logo.settleSec = Number(els.logoSettleSecSlider.value);
+    els.logoSettleSecValue.textContent = appState.logo.settleSec.toFixed(2) + "秒";
+    saveToLocalStorage();
   });
   els.logoDurationSlider.addEventListener("input", function () {
     appState.logo.durationSec = Number(els.logoDurationSlider.value);
@@ -4853,24 +4918,29 @@ function startPreviewPlayback() {
     ctx.restore();
   }
 
+  var logoHoldBigSec = numOr(appState.logo && appState.logo.holdBigSec, DEFAULT_LOGO_HOLD_BIG_SEC);
+  var logoShrinkSec = numOr(appState.logo && appState.logo.shrinkSec, DEFAULT_LOGO_SHRINK_SEC);
+  var logoSettleSec = numOr(appState.logo && appState.logo.settleSec, DEFAULT_LOGO_SETTLE_SEC);
+  var logoStartWidthRatio = numOr(appState.logo && appState.logo.startWidthRatio, DEFAULT_LOGO_START_WIDTH_RATIO);
+  var logoScaleFrom = logoStartWidthRatio / LOGO_PREVIEW_WIDTH_RATIO;
+  var logoLandingSec = logoHoldBigSec + logoShrinkSec + logoSettleSec;
+
   function drawLogoIfReady(logoElapsedSec) {
     if (!logoImgEl || !logoImgEl.complete || !logoImgEl.naturalWidth) return;
-    var scale = 1, opacity = 1;
-    if (logoElapsedSec < LOGO_PREVIEW_LANDING_SEC) {
-      scale = logoLandingScale(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
-      opacity = logoLandingEase(logoElapsedSec / LOGO_PREVIEW_LANDING_SEC);
-    }
+    // 開始時から不透明度は常に1.0（フェードインはしない）
+    var scale = logoElapsedSec < logoLandingSec
+      ? logoLandingScale(logoElapsedSec, logoHoldBigSec, logoShrinkSec, logoSettleSec, logoScaleFrom)
+      : 1;
     var lw = W * LOGO_PREVIEW_WIDTH_RATIO * scale;
     var lh = lw * (logoImgEl.naturalHeight / logoImgEl.naturalWidth);
     var x = (W - lw) / 2, y = (H - lh) / 2;
     pctx.save();
-    pctx.globalAlpha = Math.min(1, Math.max(0, opacity));
     pctx.drawImage(logoImgEl, x, y, lw, lh);
     pctx.restore();
 
-    var sweepEnd = LOGO_PREVIEW_LANDING_SEC + LOGO_PREVIEW_SWEEP_SEC;
-    if (logoElapsedSec >= LOGO_PREVIEW_LANDING_SEC && logoElapsedSec < sweepEnd) {
-      var sweepT = (logoElapsedSec - LOGO_PREVIEW_LANDING_SEC) / LOGO_PREVIEW_SWEEP_SEC;
+    var sweepEnd = logoLandingSec + LOGO_PREVIEW_SWEEP_SEC;
+    if (logoElapsedSec >= logoLandingSec && logoElapsedSec < sweepEnd) {
+      var sweepT = (logoElapsedSec - logoLandingSec) / LOGO_PREVIEW_SWEEP_SEC;
       drawSweepBand(pctx, x, y, lw, lh, sweepT);
     }
   }
@@ -5288,7 +5358,7 @@ function cornerAverageColorHex(imgEl) {
 }
 
 function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
   els.logoFileInput.value = "";
   applyLogoSettingsToInputs();
   saveToLocalStorage();
@@ -5335,6 +5405,18 @@ function applyLogoSettingsToInputs() {
   els.logoAtSelect.value = logo.at === "last_freeze" ? "last_freeze" : "end";
   els.logoBackgroundSelect.value = logoBackgroundSelectMode(logo.background);
   updateLogoColorRow();
+  var startWidthRatio = numOr(logo.startWidthRatio, DEFAULT_LOGO_START_WIDTH_RATIO);
+  els.logoStartWidthRatioSlider.value = startWidthRatio;
+  els.logoStartWidthRatioValue.textContent = startWidthRatio.toFixed(2);
+  var holdBigSec = numOr(logo.holdBigSec, DEFAULT_LOGO_HOLD_BIG_SEC);
+  els.logoHoldBigSecSlider.value = holdBigSec;
+  els.logoHoldBigSecValue.textContent = holdBigSec.toFixed(2) + "秒";
+  var shrinkSec = numOr(logo.shrinkSec, DEFAULT_LOGO_SHRINK_SEC);
+  els.logoShrinkSecSlider.value = shrinkSec;
+  els.logoShrinkSecValue.textContent = shrinkSec.toFixed(2) + "秒";
+  var settleSec = numOr(logo.settleSec, DEFAULT_LOGO_SETTLE_SEC);
+  els.logoSettleSecSlider.value = settleSec;
+  els.logoSettleSecValue.textContent = settleSec.toFixed(2) + "秒";
   var durationSec = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
   els.logoDurationSlider.value = durationSec;
   els.logoDurationValue.textContent = durationSec.toFixed(1) + "秒";
@@ -5463,6 +5545,10 @@ function buildLocalStoragePayload(dropThumbs) {
       imageName: appState.logo.imageName,
       at: appState.logo.at,
       background: appState.logo.background,
+      startWidthRatio: appState.logo.startWidthRatio,
+      holdBigSec: appState.logo.holdBigSec,
+      shrinkSec: appState.logo.shrinkSec,
+      settleSec: appState.logo.settleSec,
       durationSec: appState.logo.durationSec,
       sfx: appState.logo.sfx,
       sfxLibraryId: appState.logo.sfxLibraryId || null,
@@ -5517,12 +5603,16 @@ function loadFromLocalStorage(videoFileName) {
       imageName: data.logo.imageName,
       at: data.logo.at === "last_freeze" ? "last_freeze" : "end",
       background: data.logo.background || DEFAULT_LOGO_BACKGROUND,
+      startWidthRatio: numOr(data.logo.startWidthRatio, DEFAULT_LOGO_START_WIDTH_RATIO),
+      holdBigSec: numOr(data.logo.holdBigSec, DEFAULT_LOGO_HOLD_BIG_SEC),
+      shrinkSec: numOr(data.logo.shrinkSec, DEFAULT_LOGO_SHRINK_SEC),
+      settleSec: numOr(data.logo.settleSec, DEFAULT_LOGO_SETTLE_SEC),
       durationSec: numOr(data.logo.durationSec, DEFAULT_LOGO_DURATION_SEC),
       sfx: data.logo.sfx || "",
       sfxLibraryId: data.logo.sfxLibraryId || null,
       sfxAlign: resolveSfxAlign(data.logo.sfxAlign, SFX_ALIGNS_LOGO),
       autoColorHex: ""
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
     return true;
   } catch (e) {
     return false;
@@ -6224,7 +6314,7 @@ function handleJsonFileChange(e) {
       appState.shadowSource = loaded.shadowSource;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();

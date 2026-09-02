@@ -568,8 +568,8 @@ def make_sample_json(video_filename):
             "at": "last_freeze",
             "background": "auto",          # ロゴの四隅平均色（このダミーロゴは黒背景なので画面が黒くなる）
             "sfx": "impact",               # donより低く重い、ラストロゴ着地の既定SE
-            # duration_sec / scale_from / landing_sec / sweep_sec / flash_strength / width_ratio は
-            # 省略時の既定値のまま使う
+            # duration_sec / start_width_ratio / hold_big_sec / shrink_sec / settle_sec /
+            # sweep_sec / flash_strength / width_ratio は省略時の既定値のまま使う
         },
     }
     return project

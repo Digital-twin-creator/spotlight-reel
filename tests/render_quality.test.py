@@ -861,18 +861,27 @@ try:
     # 6.8) ラストロゴ演出「ゆっくり・重厚」への変更
     # ------------------------------------------------------------------
     print("")
-    print("=== ラストロゴ：既定値がよりゆっくり・重厚になっている ===")
+    print("=== ラストロゴ：既定値が「開始を大きく・タメ→縮小→セトル」になっている ===")
     default_logo_params = render.resolve_logo_params({})
-    expected_scale_from = 1.05 / 0.62
+    expected_scale_from = 1.6 / 0.62
+    check(abs(default_logo_params["start_width_ratio"] - 1.6) < 1e-9,
+          f"start_width_ratioの既定は1.6（画面外に見切れる大きさ。以前は105%固定）: "
+          f"{default_logo_params['start_width_ratio']}")
     check(abs(default_logo_params["scale_from"] - expected_scale_from) < 1e-9,
-          f"scale_fromの既定は「画面幅の105%」÷width_ratio(0.62)から逆算される（以前は1.6固定）: "
+          f"scale_fromはstart_width_ratio(1.6)÷width_ratio(0.62)から逆算される: "
           f"{default_logo_params['scale_from']}（期待値 {expected_scale_from}）")
-    check(abs(default_logo_params["landing_sec"] - 0.6) < 1e-9,
-          f"landing_secの既定は0.6秒（以前は0.45秒、その前は0.15秒）: {default_logo_params['landing_sec']}")
+    check(abs(default_logo_params["hold_big_sec"] - 0.15) < 1e-9,
+          f"hold_big_secの既定は0.15秒（タメ）: {default_logo_params['hold_big_sec']}")
+    check(abs(default_logo_params["shrink_sec"] - 0.5) < 1e-9,
+          f"shrink_secの既定は0.5秒（縮小）: {default_logo_params['shrink_sec']}")
+    check(abs(default_logo_params["settle_sec"] - 0.15) < 1e-9,
+          f"settle_secの既定は0.15秒（セトル）: {default_logo_params['settle_sec']}")
+    check(abs(default_logo_params["min_scale"] - 0.98) < 1e-9,
+          f"min_scaleの既定は0.98（最小サイズへの沈み込み量2%）: {default_logo_params['min_scale']}")
     check(abs(default_logo_params["flash_strength"] - 0.35) < 1e-9,
           f"flash_strengthの既定は0.35（以前は0.6）: {default_logo_params['flash_strength']}")
     check(abs(default_logo_params["sweep_start_sec"] - 0.35) < 1e-9,
-          f"sweep_start_secの既定は0.35秒（着地完了からスイープ開始まで）: {default_logo_params['sweep_start_sec']}")
+          f"sweep_start_secの既定は0.35秒（着地演出完了からスイープ開始まで）: {default_logo_params['sweep_start_sec']}")
     check(abs(default_logo_params["sweep_sec"] - 0.70) < 1e-9,
           f"sweep_secの既定は0.70秒（以前は0.30秒）: {default_logo_params['sweep_sec']}")
     check(abs(default_logo_params["shake_sec"] - 0.25) < 1e-9,
@@ -886,19 +895,29 @@ try:
     check(default_logo_params["sfx_tail"] is True, "sfx_tailの既定はTrue")
     check(abs(default_logo_params["width_ratio"] - 0.62) < 1e-9,
           f"width_ratioの既定は0.62（以前は0.55、その前は0.4固定）: {default_logo_params['width_ratio']}")
+    actual_start_width_ratio = default_logo_params["scale_from"] * default_logo_params["width_ratio"]
+    check(actual_start_width_ratio > 1.0,
+          f"既定設定では開始時のロゴ実効幅が出力幅を超え、画面外に見切れた状態から始まる: "
+          f"scale_from×width_ratio={actual_start_width_ratio:.3f}（出力幅の{actual_start_width_ratio*100:.0f}%）")
+    check(abs(actual_start_width_ratio - 1.6) < 1e-6,
+          "その実効幅はstart_width_ratio(1.6)と一致する（width_ratioの値によらず開始サイズは常に揃う）")
 
     custom_logo_cfg = {
-        "scale_from": 1.3, "landing_sec": 0.2, "sweep_start_sec": 0.1, "sweep_sec": 0.4,
+        "start_width_ratio": 2.0, "hold_big_sec": 0.1, "shrink_sec": 0.3, "settle_sec": 0.1,
+        "sweep_start_sec": 0.1, "sweep_sec": 0.4,
         "flash_strength": 0.5, "shake_sec": 0.1, "shake_amplitude": 0.01,
         "duration_sec": 1.0, "fade_sec": 0.2, "sfx_tail": False, "width_ratio": 0.7,
     }
     custom_logo_params = render.resolve_logo_params(custom_logo_cfg)
     check(all(abs(custom_logo_params[k] - custom_logo_cfg[k]) < 1e-9
-              for k in ("scale_from", "landing_sec", "sweep_start_sec", "sweep_sec",
+              for k in ("start_width_ratio", "hold_big_sec", "shrink_sec", "settle_sec",
+                        "sweep_start_sec", "sweep_sec",
                         "flash_strength", "shake_sec", "shake_amplitude", "duration_sec",
                         "fade_sec", "width_ratio")),
           f"logo{{}}配下で全パラメータを上書きできる: {custom_logo_params}")
     check(custom_logo_params["sfx_tail"] is False, "sfx_tail: false も上書きできる")
+    check(abs(custom_logo_params["scale_from"] - 2.0 / 0.7) < 1e-9,
+          "scale_fromは上書きしたstart_width_ratio/width_ratioから再計算される")
 
     # ------------------------------------------------------------------
     # 6.9) ラストロゴの自動クロップ：黒背景・アルファ無しの実ロゴ画像で効いているか
@@ -977,11 +996,11 @@ try:
           f"content_width={early_width_px}px / frame_width={LW}px "
           f"({early_width_px / LW * 100:.1f}%)")
 
-    # 着地直後(t=landing_sec)は白フラッシュ・画面の揺れがまだ発火中で画面全体の色が
-    # 動いてしまうため、それらが収まった少し後（+0.3秒。スイープ開始前）で計測する
+    # 着地の瞬間は白フラッシュ・画面の揺れがまだ発火中で画面全体の色が
+    # 動いてしまうため、それらが収まった少し後（着地演出完了+0.3秒。スイープ開始前）で計測する
     landed_frame = render.render_logo_frame(
         backdrop, cropped_bgr, cropped_alpha, logo_luma, LW, LH,
-        logo_params_default["landing_sec"] + 0.3, logo_params_default, logo_bg_color)
+        render.logo_landing_total_sec(logo_params_default) + 0.3, logo_params_default, logo_bg_color)
     landed_width_px = logo_content_width_px(landed_frame, (40, 40, 40))
     expected_landed_ratio = logo_params_default["width_ratio"]
     check(abs(landed_width_px / LW - expected_landed_ratio) < 0.08,
@@ -993,68 +1012,75 @@ try:
           f"開始直後={early_width_px}px → 着地完了={landed_width_px}px")
 
     print("")
-    print("=== ラストロゴ：着地タイミング（アンティシペーション＋セトル・揺れ・スイープ開始の遅延） ===")
+    print("=== ラストロゴ：着地タイミング（タメ→縮小→セトル・揺れ・スイープ開始の遅延） ===")
     check(render.ease_in_cubic(0.0) == 0.0 and render.ease_in_cubic(1.0) == 1.0,
           "ease_in_cubic: t=0で0、t=1で1")
     check(abs(render.ease_in_cubic(0.5) - 0.5 ** 3) < 1e-9,
           "ease_in_cubic: t=0.5で 0.5^3 になる")
-    # 着地カーブ（アンティシペーション＋セトル）：--preview/ダミーレンダリングで単純な
-    # Ease-Out Quart（旧実装）と見比べた結果、「ゆっくり入って一気に落ち、100%を
-    # わずかに沈み込んでから戻る」動きの方が重厚感が出て良かったため、こちらを採用した
-    # （render.logo_landing_curve、詳細はコード内コメント参照）。
-    scale_from = render.LOGO_SCALE_FROM_DEFAULT
-    check(abs(render.logo_landing_curve(0.0, scale_from) - scale_from) < 1e-6,
-          "logo_landing_curve: t=0はscale_from（スタンバイ時の初期スケール）のまま")
-    check(abs(render.logo_landing_curve(1.0, scale_from) - 1.0) < 1e-6,
-          "logo_landing_curve: t=1で100%に完全着地する")
-    dip_t = render.LOGO_LANDING_ANTICIPATION_RATIO
-    dip_scale = render.logo_landing_curve(dip_t, scale_from)
-    check(dip_scale < 1.0,
-          f"logo_landing_curve: 沈み込み区間の終わり(t={dip_t})では100%をわずかに下回っている"
-          f"（アンティシペーション＋セトル）: scale={dip_scale:.4f}")
-    check(1.0 - dip_scale < 0.05,
-          f"logo_landing_curve: 沈み込み量はわずか（数%程度）に留まる: dip={1.0 - dip_scale:.4f}")
-    mid_scale = render.logo_landing_curve(dip_t * 0.5, scale_from)
-    check(scale_from > mid_scale > dip_scale,
-          "logo_landing_curve: 沈み込み区間はscale_from→中間→沈み込み位置と単調に縮んでいく")
-    # 「ゆっくり入って一気に落ちる」：Ease-In Cubicの性質どおり、区間の後半のほうが
-    # 前半より速く動く（前半の変化量 < 後半の変化量）
+
+    hold_big = default_logo_params["hold_big_sec"]
+    shrink = default_logo_params["shrink_sec"]
+    settle = default_logo_params["settle_sec"]
+    scale_from = default_logo_params["scale_from"]
+    min_scale = default_logo_params["min_scale"]
+
+    def landing_scale(t):
+        return render.logo_landing_scale(t, hold_big, shrink, settle, scale_from, min_scale)
+
+    check(abs(landing_scale(0.0) - scale_from) < 1e-6,
+          "logo_landing_scale: t=0はscale_from（開始サイズ）のまま")
+    check(abs(landing_scale(hold_big * 0.5) - scale_from) < 1e-6,
+          "logo_landing_scale: タメ区間中はscale_fromのまま静止している（動かない）")
+    check(abs(landing_scale(hold_big + shrink) - min_scale) < 1e-6,
+          f"logo_landing_scale: タメ+縮小の終わり（着地の瞬間）で最小サイズ(min_scale={min_scale})に到達する")
+    check(abs(landing_scale(hold_big + shrink + settle) - 1.0) < 1e-6,
+          "logo_landing_scale: タメ+縮小+セトルの終わりで100%に完全着地する")
+
+    mid_scale = landing_scale(hold_big + shrink * 0.5)
+    check(scale_from > mid_scale > min_scale,
+          "logo_landing_scale: 縮小区間はscale_from→中間→最小サイズと単調に縮んでいく")
+    # 「ゆっくり入って終盤に加速して急停止する」：Ease-In Cubicの性質どおり、区間の
+    # 後半のほうが前半より速く動く（前半の変化量 < 後半の変化量）
     early_drop = scale_from - mid_scale
-    late_drop = mid_scale - dip_scale
+    late_drop = mid_scale - min_scale
     check(late_drop > early_drop,
-          f"logo_landing_curve: 沈み込み区間の前半(drop={early_drop:.4f})より後半(drop={late_drop:.4f})の"
-          "ほうが速く動く（ゆっくり入って一気に落ちる）")
+          f"logo_landing_scale: 縮小区間の前半(drop={early_drop:.4f})より後半(drop={late_drop:.4f})の"
+          "ほうが速く動く（ゆっくり入って終盤に加速→急停止）")
 
-    landing = default_logo_params["landing_sec"]
+    landing_instant = render.logo_landing_instant_sec(default_logo_params)
+    landing_total = render.logo_landing_total_sec(default_logo_params)
     state_start = render.logo_animation_state(0.0, default_logo_params)
-    check(abs(state_start["scale"] - default_logo_params["scale_from"]) < 1e-6 and state_start["opacity"] == 0.0,
-          f"t=0はスタンバイ状態（scale={default_logo_params['scale_from']}, opacity=0）: {state_start}")
-    state_landed = render.logo_animation_state(landing, default_logo_params)
+    check(abs(state_start["scale"] - scale_from) < 1e-6 and state_start["opacity"] == 1.0,
+          f"t=0は開始サイズのまま（scale={scale_from}）、不透明度は最初から1.0（フェードインなし）: {state_start}")
+    state_landing_instant = render.logo_animation_state(landing_instant, default_logo_params)
+    check(abs(state_landing_instant["scale"] - min_scale) < 1e-6 and abs(state_landing_instant["opacity"] - 1.0) < 1e-6,
+          f"着地の瞬間(t=hold_big_sec+shrink_sec)はscale=min_scale({min_scale}), opacity=1.0: {state_landing_instant}")
+    state_landed = render.logo_animation_state(landing_total, default_logo_params)
     check(abs(state_landed["scale"] - 1.0) < 1e-6 and abs(state_landed["opacity"] - 1.0) < 1e-6,
-          f"着地完了時点(t=landing_sec)はscale=1.0, opacity=1.0: {state_landed}")
+          f"着地演出完了時点(t=hold_big_sec+shrink_sec+settle_sec)はscale=1.0, opacity=1.0: {state_landed}")
 
-    state_mid_flash = render.logo_animation_state(landing + 0.01, default_logo_params)
+    state_mid_flash = render.logo_animation_state(landing_instant + 0.01, default_logo_params)
     check(state_mid_flash["flash_amt"] > 0.2,
-          f"着地直後はフラッシュが発火している: {state_mid_flash['flash_amt']:.3f}")
+          f"着地の瞬間の直後はフラッシュが発火している: {state_mid_flash['flash_amt']:.3f}")
 
-    state_mid_shake = render.logo_animation_state(landing + 0.05, default_logo_params)
+    state_mid_shake = render.logo_animation_state(landing_instant + 0.05, default_logo_params)
     check(abs(state_mid_shake["shake_dx"]) > 0 or abs(state_mid_shake["shake_dy"]) > 0,
-          f"着地直後は画面の揺れが発生している: dx={state_mid_shake['shake_dx']:.5f} dy={state_mid_shake['shake_dy']:.5f}")
+          f"着地の瞬間の直後は画面の揺れが発生している: dx={state_mid_shake['shake_dx']:.5f} dy={state_mid_shake['shake_dy']:.5f}")
     state_after_shake = render.logo_animation_state(
-        landing + default_logo_params["shake_sec"] + 0.01, default_logo_params)
+        landing_instant + default_logo_params["shake_sec"] + 0.01, default_logo_params)
     check(state_after_shake["shake_dx"] == 0.0 and state_after_shake["shake_dy"] == 0.0,
           "揺れはshake_sec経過後は収まる（振幅0に戻る）")
 
     just_before_sweep = render.logo_animation_state(
-        landing + default_logo_params["sweep_start_sec"] - 0.02, default_logo_params)
+        landing_total + default_logo_params["sweep_start_sec"] - 0.02, default_logo_params)
     check(just_before_sweep["sweep_t"] is None,
-          "スイープはsweep_start_sec経過前はまだ始まらない（着地直後にすぐ始まらない＝間を置く）")
+          "スイープはsweep_start_sec経過前はまだ始まらない（着地演出完了直後にすぐ始まらない＝間を置く）")
     just_after_sweep = render.logo_animation_state(
-        landing + default_logo_params["sweep_start_sec"] + 0.02, default_logo_params)
+        landing_total + default_logo_params["sweep_start_sec"] + 0.02, default_logo_params)
     check(just_after_sweep["sweep_t"] is not None and 0.0 <= just_after_sweep["sweep_t"] < 0.2,
           f"sweep_start_sec経過後にスイープが始まる: {just_after_sweep['sweep_t']}")
 
-    seg_end = landing + default_logo_params["duration_sec"]
+    seg_end = landing_total + default_logo_params["duration_sec"]
     state_near_end = render.logo_animation_state(seg_end - 0.01, default_logo_params)
     check(state_near_end["fade_amt"] > 0.9,
           f"終了直前はほぼ完全に背景色へ暗転している: {state_near_end['fade_amt']:.3f}")
@@ -1068,6 +1094,13 @@ try:
     check(np.array_equal(render.shake_translate(shake_test_img, 0.0, 0.0), shake_test_img),
           "揺れ量が0のときは元画像のまま変化しない")
     check(shaken.shape == shake_test_img.shape, "揺らしても画像サイズは変わらない")
+
+    print("")
+    print("=== ラストロゴ：直前のシーンから0.1秒の暗転を経てカットする（クロスフェードではない） ===")
+    check(render.logo_blackout_frames_for(30) == 3,
+          f"30fpsでは0.1秒=3フレームぶんの暗転を挟む: {render.logo_blackout_frames_for(30)}")
+    check(render.logo_blackout_frames_for(60) == 6,
+          f"60fpsでは0.1秒=6フレームぶんの暗転を挟む: {render.logo_blackout_frames_for(60)}")
 
     print("")
     print("=== ラストロゴ：sfx_tailで着地SEに減衰ディレイ（簡易リバーブ風テール）を付けられる ===")
@@ -1095,7 +1128,7 @@ try:
 
     plans_logo = render.plan_freezes(
         [logo_fz], fps, src_frames, ".", logo=logo_cfg_tail, logo_at="last_freeze",
-        logo_total_frames=render.logo_total_frames_for(logo_params_tail, fps), logo_crossfade_frames=0)
+        logo_total_frames=render.logo_total_frames_for(logo_params_tail, fps), logo_blackout_frames=0)
     plan0 = plans_logo[0]
     check(plan0["show_logo"], "テスト前提：このフリーズでラストロゴが表示される設定になっている")
 
@@ -1108,7 +1141,7 @@ try:
                                         logo_params=logo_params_no_tail)
 
     landed_frame_offset = plan0["n_pre"] + plan0["n_reveal"] + plan0.get("n_slide_in", 0)
-    landing_frames = int(round(logo_params_tail["landing_sec"] * fps))
+    landing_frames = int(round(render.logo_landing_instant_sec(logo_params_tail) * fps))
     sfx_start_sample = render.frames_to_samples(
         plan0["frame_index"] + landed_frame_offset + landing_frames, fps, render.AUDIO_SR)
     probe_start = sfx_start_sample + len(raw_don) + int(0.05 * render.AUDIO_SR)
@@ -1411,7 +1444,7 @@ try:
 
     plans_logo_peak = render.plan_freezes(
         [logo_fz_peak], fps, src_frames, sfx_json_dir, logo=logo_cfg_peak, logo_at="last_freeze",
-        logo_total_frames=render.logo_total_frames_for(logo_params_peak, fps), logo_crossfade_frames=0)
+        logo_total_frames=render.logo_total_frames_for(logo_params_peak, fps), logo_blackout_frames=0)
     plan0_peak = plans_logo_peak[0]
     check(plan0_peak["show_logo"], "テスト前提：このフリーズでラストロゴが表示される設定になっている")
 
@@ -1419,7 +1452,7 @@ try:
                                      logo_sfx_spec=logo_sfx_spec_peak, logo_at="last_freeze",
                                      logo_params=logo_params_peak)
     landed_frame_offset_peak = plan0_peak["n_pre"] + plan0_peak["n_reveal"] + plan0_peak.get("n_slide_in", 0)
-    landing_frames_peak = int(round(logo_params_peak["landing_sec"] * fps))
+    landing_frames_peak = int(round(render.logo_landing_instant_sec(logo_params_peak) * fps))
     logo_landing_sample = render.frames_to_samples(
         plan0_peak["frame_index"] + landed_frame_offset_peak + landing_frames_peak, fps, render.AUDIO_SR)
     search_window = audio_peak[max(0, logo_landing_sample - 200):logo_landing_sample + 200]

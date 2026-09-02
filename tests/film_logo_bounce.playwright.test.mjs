@@ -107,9 +107,25 @@ async function main() {
     "ロゴ未選択時の表示文言");
   check(await page.inputValue("#logoDurationSlider") === "2.2",
     "duration_secスライダーの既定値が2.2秒（以前は1.2秒）: " + (await page.inputValue("#logoDurationSlider")));
+  check(await page.inputValue("#logoStartWidthRatioSlider") === "1.6",
+    "start_width_ratioスライダーの既定値が1.6（画面外に見切れる大きさ）: " + (await page.inputValue("#logoStartWidthRatioSlider")));
+  check(await page.inputValue("#logoHoldBigSecSlider") === "0.15",
+    "hold_big_secスライダーの既定値が0.15秒: " + (await page.inputValue("#logoHoldBigSecSlider")));
+  check(await page.inputValue("#logoShrinkSecSlider") === "0.5",
+    "shrink_secスライダーの既定値が0.5秒: " + (await page.inputValue("#logoShrinkSecSlider")));
+  check(await page.inputValue("#logoSettleSecSlider") === "0.15",
+    "settle_secスライダーの既定値が0.15秒: " + (await page.inputValue("#logoSettleSecSlider")));
 
   await page.setInputFiles("#logoFileInput", logoPath);
   await page.selectOption("#logoAtSelect", "end");
+  await page.fill("#logoStartWidthRatioSlider", "2.1");
+  await page.dispatchEvent("#logoStartWidthRatioSlider", "input");
+  await page.fill("#logoHoldBigSecSlider", "0.3");
+  await page.dispatchEvent("#logoHoldBigSecSlider", "input");
+  await page.fill("#logoShrinkSecSlider", "0.8");
+  await page.dispatchEvent("#logoShrinkSecSlider", "input");
+  await page.fill("#logoSettleSecSlider", "0.25");
+  await page.dispatchEvent("#logoSettleSecSlider", "input");
   await page.fill("#logoDurationSlider", "2");
   await page.dispatchEvent("#logoDurationSlider", "input");
   await page.selectOption("#logoSfxSelect", "don");
@@ -120,6 +136,14 @@ async function main() {
     "logo.imageが固定名logo.<ext>になる（元ファイル名に依存しない）: " + (project.logo && project.logo.image));
   check(project.logo && project.logo.at === "end", "logo.atが選択どおりになる: " + (project.logo && project.logo.at));
   check(project.logo && project.logo.background === "auto", "logo.backgroundの既定値がauto: " + (project.logo && project.logo.background));
+  check(project.logo && project.logo.start_width_ratio === 2.1,
+    "logo.start_width_ratioがスライダー操作どおりになる: " + (project.logo && project.logo.start_width_ratio));
+  check(project.logo && project.logo.hold_big_sec === 0.3,
+    "logo.hold_big_secがスライダー操作どおりになる: " + (project.logo && project.logo.hold_big_sec));
+  check(project.logo && project.logo.shrink_sec === 0.8,
+    "logo.shrink_secがスライダー操作どおりになる: " + (project.logo && project.logo.shrink_sec));
+  check(project.logo && project.logo.settle_sec === 0.25,
+    "logo.settle_secがスライダー操作どおりになる: " + (project.logo && project.logo.settle_sec));
   check(project.logo && project.logo.duration_sec === 2, "logo.duration_secがスライダー操作どおりになる: " + (project.logo && project.logo.duration_sec));
   check(project.logo && project.logo.sfx === "don", "logo.sfxが選択どおりになる: " + (project.logo && project.logo.sfx));
 
