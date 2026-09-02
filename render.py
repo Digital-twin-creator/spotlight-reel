@@ -1115,6 +1115,21 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
     refine = opts.get("refine")
     decontaminate = bool(opts.get("decontaminate"))
 
+    if model == extract.APPLE_VISION_MODEL_NAME:
+        # Apple Vision（VNGenerateForegroundInstanceMaskRequest）はmacOS専用で、
+        # このrender.py自体（ubuntuランナー上で実行）は呼び出せない。事前に
+        # spotlight-jobsのextract-apple段（macos-14）がtools/apple-vision/subject_lift.swiftを
+        # 実行し、その結果をこの関数の先頭のキャッシュ判定が拾えるよう
+        # cache_path_for_alpha() と同じ命名でcache_dir配下に .npz として置いておく必要がある。
+        # ここに到達した時点でキャッシュが無いのは、そのプリ配置が行われなかった
+        # （＝ワークフロー構成の不具合）ことを意味するため、明確に失敗させる。
+        raise RuntimeError(
+            f"model={extract.APPLE_VISION_MODEL_NAME} のアルファキャッシュが見つかりません"
+            f"（{cache_file}）。Apple Visionモデルはrender.py（ubuntu）からは抽出できないため、"
+            "事前にmacOSランナー上のextract-apple段でtools/apple-vision/subject_lift.swiftを実行し、"
+            "結果をcache/に配置しておく必要があります。"
+        )
+
     if model == extract.RVM_MODEL_NAME:
         # 動画モード（RVM）：静止フレーム1枚ではなく、video_path・tから前後クリップを
         # 自前で切り出して時系列で推論する。ここでの引数のframe_bgrは、RVM自体の推論には
@@ -1141,6 +1156,75 @@ def get_or_extract_alpha(frame_bgr, video_path, t, W, H, cache_dir, mask_options
 
     np.savez_compressed(cache_file, alpha=alpha)
     return alpha
+
+
+def freeze_needs_model_extraction(fz, extract_module, model_name):
+    """
+    このフリーズが、実際に自動切り抜き（color_source/shadow.sourceのいずれかが
+    "auto"系）を使い、かつそのモデルがmodel_nameであれば True を返す。
+    build_mask_context（mask_mode in auto/auto+brush）・build_shadow_mask
+    （shadow.source=="auto"）がget_or_extract_alphaを呼ぶ条件と厳密に一致させる
+    （spotlight-jobsのprepare段が、本番と食い違わずに対象フリーズを判定するため）。
+    """
+    opts = fz.get("mask_options") or {}
+    model = opts.get("model") or extract_module.DEFAULT_MODEL
+    if model != model_name:
+        return False
+    if resolve_color_source(fz) in ("auto", "auto+brush"):
+        return True
+    shadow_cfg = resolve_shadow_config(fz)
+    return bool(shadow_cfg and shadow_cfg.get("source") == "auto")
+
+
+def extract_frames_for_model(project, video_path, W, H, fps, plans, model_name, out_dir):
+    """
+    model_nameでの自動切り抜きを必要とするフリーズだけ、本番レンダリングの主ループ
+    （iter_frames）と全く同じデコード経路でframe_bgr（出力解像度、回転補正済み）を
+    取り出しPNGとして書き出す（<time:.3f>.png）。
+
+    grab_frame_at（--preview用。-ss高速シークによる近似取得）ではなくシーケンシャル
+    デコードを使うのは、本番レンダリング時にget_or_extract_alphaへ渡される
+    frame_bgrとビット単位で一致させるため（Apple Visionのマスクと実際に合成される
+    フレームが後からずれないようにする）。
+
+    対象フリーズが無ければ動画を一切デコードせずに空リストを返す。対象がある場合も、
+    最後に必要なフリーズのフレームまで読んだ時点でデコードを打ち切る
+    （Apple VisionはmacOSランナー分のコストが高いため、無駄なデコード時間を避ける）。
+    戻り値: [{"time": float, "path": "<basename>.png"}, ...]（time昇順）
+    """
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+    import extract as extract_module  # 遅延import（extract.pyのDEFAULT_MODEL参照のため）
+
+    targets = {}  # frame_index -> time
+    for fz, plan in zip(project["freezes"], plans):
+        if freeze_needs_model_extraction(fz, extract_module, model_name):
+            targets[plan["frame_index"]] = float(fz["time"])
+    os.makedirs(out_dir, exist_ok=True)
+    if not targets:
+        return []
+
+    max_index = max(targets.keys())
+    written = []
+    reader = open_frame_reader(video_path, W, H, fps)
+    try:
+        for i, frame in enumerate(iter_frames(reader, W, H)):
+            if i in targets:
+                t = targets[i]
+                name = f"{t:.3f}.png"
+                cv2.imwrite(os.path.join(out_dir, name), frame)
+                written.append({"time": t, "path": name})
+            if i >= max_index:
+                break
+    finally:
+        try:
+            reader.terminate()
+        except Exception:  # noqa: BLE001 - 後片付けなので失敗しても無視する
+            pass
+        reader.stdout.close()
+        reader.wait()
+    written.sort(key=lambda w: w["time"])
+    return written
 
 
 def build_mask_context(fz, frame, W, H, cache_dir, video_path):
@@ -2578,7 +2662,8 @@ def _write_timing_summary(render_seconds):
         warn(f"所要時間の内訳（{TIMING_JSON_NAME}）の書き出しに失敗しました: {exc}")
 
 
-def render(project, json_path, video_path, out_path, preview_path=None):
+def render(project, json_path, video_path, out_path, preview_path=None,
+           extract_frames_for=None, extract_frames_out=None):
     """プロジェクト定義に従って1本のMP4（または確認用PNG）を作る"""
     _TIMING_LOG.clear()
     render_start = time.time()
@@ -2653,6 +2738,19 @@ def render(project, json_path, video_path, out_path, preview_path=None):
         # cwd基準の cache/ ディレクトリへキャッシュし、同じフレームの再レンダリング時は
         # 再計算しない。
         cache_dir = os.path.join(os.getcwd(), CACHE_DIR_NAME)
+
+        # --- spotlight-jobsのprepare段用：指定モデルが必要なフリーズの静止フレームだけ
+        #     書き出して終了する（Apple Visionのように、このrender.py自身が実行できない
+        #     モデルの抽出をmacOSランナーへ委ねるための下ごしらえ）。 ---
+        if extract_frames_for:
+            written = extract_frames_for_model(project, video_path, W, H, fps, plans,
+                                                extract_frames_for, extract_frames_out)
+            manifest_path = os.path.join(extract_frames_out, "manifest.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump({"model": extract_frames_for, "output_width": W, "output_height": H,
+                           "frames": written}, f, ensure_ascii=False, indent=2)
+            log(f"model={extract_frames_for} が必要なフリーズのフレームを{len(written)}枚書き出しました: {extract_frames_out}")
+            return manifest_path
 
         # --- 確認用PNG（スライド前・スライド後の2枚）だけ出して終了 ---
         if preview_path:
@@ -2768,6 +2866,12 @@ def main(argv=None):
     parser.add_argument("--preview", nargs="?", const="", default=None,
                         metavar="PNG",
                         help="最初のフリーズの「影スライド前」「スライド後」をPNG2枚（_before/_after）出力して終了")
+    parser.add_argument("--extract-apple-frames", metavar="MODEL",
+                         help="指定モデル（例: apple-vision）を使うフリーズの静止フレームだけを"
+                              "--extract-apple-frames-out へ書き出して終了する"
+                              "（spotlight-jobsのprepare段が使う。動画の合成・エンコードは行わない）")
+    parser.add_argument("--extract-apple-frames-out", default="apple_frames",
+                         help="--extract-apple-frames の出力先ディレクトリ（既定: apple_frames）")
     args = parser.parse_args(argv)
 
     project = load_project(args.project)
@@ -2784,10 +2888,12 @@ def main(argv=None):
     if args.preview is not None:
         preview_path = args.preview or (os.path.splitext(args.out)[0] + "_preview.png")
 
-    if not preview_path:
+    if not preview_path and not args.extract_apple_frames:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
 
-    render(project, args.project, video, args.out, preview_path)
+    render(project, args.project, video, args.out, preview_path,
+           extract_frames_for=args.extract_apple_frames,
+           extract_frames_out=args.extract_apple_frames_out)
     return 0
 
 

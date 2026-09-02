@@ -574,7 +574,9 @@
           <option value="rvm-mobilenetv3">動画（安定・推奨）</option>
           <option value="isnet-general-use">標準（速い）</option>
           <option value="birefnet-portrait">高精度（遅い・約+1分）</option>
+          <option value="apple-vision">Apple Vision（macOS・高速）</option>
         </select>
+        <div class="muted" id="appleVisionHint" hidden style="margin-top:4px;">Apple Visionは非公開リポジトリではmacOS分の無料枠を10倍消費します。</div>
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="shadowEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
@@ -833,8 +835,10 @@ var MASK_MODES = ["brush", "auto", "auto+brush"];
 var COLOR_SOURCES = ["brush", "auto"];
 var SHADOW_SOURCES = ["same", "brush", "auto"];
 var REVEALS = ["wipe", "fade", "brush", "none"];
-/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる3種類のみ） */
-var MASK_MODELS = ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait"];
+/** extract.pyのAPPLE_VISION_MODEL_NAMEと同じ値。Apple Vision（macOS専用）モードの判定に使う */
+var APPLE_VISION_MODEL_NAME = "apple-vision";
+/** エディタで選べる自動切り抜きモデル（extract.pyのVALID_MODELSのうち、ユーザーに選ばせる4種類） */
+var MASK_MODELS = ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait", APPLE_VISION_MODEL_NAME];
 /**
  * mask_options.model省略時に読み替える既定値（＝render.py/extract.pyのDEFAULT_MODELと
  * 同じ"isnet-general-use"のまま。旧JSONとの後方互換のため変更しない）。
@@ -1156,6 +1160,12 @@ function buildProjectJSON(state) {
   var maskModel = resolveMaskModel(state.maskModel);
   if (maskModel !== DEFAULT_MASK_MODEL) {
     project.style.mask_options = { model: maskModel };
+    // include_held_objects（手に持った物の補完）はRVM専用の補正で、Apple Visionでは
+    // 意味を持たない（render.py側もmodel===RVM_MODEL_NAMEの時しか参照しない）ため、
+    // 既定でオフにしておく（無効な組み合わせに見えないようにするための明示）。
+    if (maskModel === APPLE_VISION_MODEL_NAME) {
+      project.style.mask_options.include_held_objects = false;
+    }
   }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
   // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
@@ -2417,6 +2427,7 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_MASK_MODEL: DEFAULT_MASK_MODEL,
     DEFAULT_MASK_MODEL_SELECTION: DEFAULT_MASK_MODEL_SELECTION,
     RVM_MODEL_NAME: RVM_MODEL_NAME,
+    APPLE_VISION_MODEL_NAME: APPLE_VISION_MODEL_NAME,
     MASK_PREVIEW_CLIP_PRE_SEC: MASK_PREVIEW_CLIP_PRE_SEC,
     MASK_PREVIEW_CLIP_FPS: MASK_PREVIEW_CLIP_FPS,
     resolveMaskModel: resolveMaskModel,
@@ -2790,7 +2801,7 @@ function init() {
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
-    "audioDuringFreezeSelect", "revealSelect", "maskModelSelect",
+    "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
     "shadowEnabledCheckbox", "shadowOptionsBody", "filmColorPresetRow",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
@@ -2970,6 +2981,7 @@ function init() {
   });
   els.maskModelSelect.addEventListener("change", function () {
     appState.maskModel = resolveMaskModel(els.maskModelSelect.value);
+    els.appleVisionHint.hidden = appState.maskModel !== APPLE_VISION_MODEL_NAME;
     saveToLocalStorage();
   });
   els.shadowEnabledCheckbox.addEventListener("change", function () {
@@ -5504,6 +5516,7 @@ function applySettingsToInputs() {
   els.audioDuringFreezeSelect.value = appState.audioDuringFreeze;
   els.revealSelect.value = resolveReveal(appState.reveal);
   els.maskModelSelect.value = resolveMaskModel(appState.maskModel);
+  els.appleVisionHint.hidden = resolveMaskModel(appState.maskModel) !== APPLE_VISION_MODEL_NAME;
   els.shadowEnabledCheckbox.checked = !!appState.shadowEnabled;
   els.shadowOptionsBody.hidden = !appState.shadowEnabled;
   els.shadowAlphaSlider.value = appState.shadowAlpha;

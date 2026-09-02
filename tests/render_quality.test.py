@@ -1257,6 +1257,105 @@ try:
     check(np.array_equal(render.merge_touching_component(no_base, isnet_alpha), no_base),
           "merge_touching_component：base側に前景が無ければ（人物を検出できていない）そのままbaseを返す")
 
+    print("")
+    print("=== get_or_extract_alpha：model=apple-visionはrender.py（ubuntu）からは抽出できずRuntimeErrorになる ===")
+    # Apple Visionの実抽出はmacOSランナー上のtools/apple-vision/subject_lift.swiftが担い、
+    # render.py（ubuntu）はcache/*.npzに事前配置された結果を読むだけ。キャッシュが無い状態で
+    # get_or_extract_alphaに到達したら、原因（ワークフロー構成の不具合）がわかる形で
+    # 明確に失敗するべきで、rembg/onnxruntime側の抽出を試みてはいけない。
+    apple_cache_dir = os.path.join(tmpdir, "apple_vision_cache")
+    dummy_frame = np.zeros((100, 100, 3), np.uint8)
+    try:
+        render.get_or_extract_alpha(dummy_frame, "/no/such/video.mp4", 1.0, 100, 100,
+                                     apple_cache_dir, {"model": "apple-vision"})
+        check(False, "get_or_extract_alpha：model=apple-visionでキャッシュが無ければRuntimeErrorになる")
+    except RuntimeError as e:
+        check("apple-vision" in str(e),
+              f"get_or_extract_alpha：model=apple-visionでキャッシュが無いとRuntimeErrorになる: {e}")
+
+    print("")
+    print("=== freeze_needs_model_extraction：build_mask_context/build_shadow_maskと同じ条件で対象フリーズを判定する ===")
+    import extract as extract_module
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "auto"},
+        extract_module, "apple-vision") is True,
+        "freeze_needs_model_extraction：model一致＋color_source=autoならTrue")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "brush"},
+        extract_module, "apple-vision") is False,
+        "freeze_needs_model_extraction：color_source=brushかつshadow指定が無ければFalse（既定shadowはsource='same'）")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "apple-vision"}, "color_source": "brush",
+         "shadow": {"source": "auto"}},
+        extract_module, "apple-vision") is True,
+        "freeze_needs_model_extraction：color_source=brushでもshadow.source=autoならTrue")
+    check(render.freeze_needs_model_extraction(
+        {"mask_options": {"model": "isnet-general-use"}, "color_source": "auto"},
+        extract_module, "apple-vision") is False,
+        "freeze_needs_model_extraction：modelが違えばFalse")
+    check(render.freeze_needs_model_extraction(
+        {"color_source": "auto"}, extract_module, "isnet-general-use") is True,
+        "freeze_needs_model_extraction：mask_options省略時はDEFAULT_MODEL(isnet-general-use)扱い")
+
+    print("")
+    print("=== extract_frames_for_model：対象フリーズが無ければ動画を一切デコードしない ===")
+    import json as json_mod2
+    no_target_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"freeze_sec": 1.0, "audio_during_freeze": "mute"},
+        "freezes": [{"time": 2.5, "name": "", "color_source": "brush"}],
+    }
+    no_target_json_path = os.path.join(tmpdir, "no_target_project.json")
+    with open(no_target_json_path, "w", encoding="utf-8") as f:
+        json_mod2.dump(no_target_project, f, ensure_ascii=False)
+    loaded_no_target = render.load_project(no_target_json_path)
+    no_target_out_dir = os.path.join(tmpdir, "apple_frames_no_target")
+    manifest_path_empty = render.render(loaded_no_target, no_target_json_path, video_path, "unused.mp4",
+                                         extract_frames_for="apple-vision",
+                                         extract_frames_out=no_target_out_dir)
+    with open(manifest_path_empty, encoding="utf-8") as f:
+        manifest_empty = json_mod2.load(f)
+    check(manifest_empty["frames"] == [], f"対象フリーズが無ければmanifest.jsonのframesは空になる: {manifest_empty}")
+
+    print("")
+    print("=== extract_frames_for_model：apple-vision指定のフリーズだけ本番と同じ解像度のフレームPNGを書き出す ===")
+    mixed_model_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"freeze_sec": 1.0, "audio_during_freeze": "mute"},
+        "freezes": [
+            {"time": 1.5, "name": "", "color_source": "auto",
+             "mask_options": {"model": "apple-vision"}},
+            {"time": 3.0, "name": "", "color_source": "auto",
+             "mask_options": {"model": "isnet-general-use"}},
+        ],
+    }
+    mixed_model_json_path = os.path.join(tmpdir, "mixed_model_project.json")
+    with open(mixed_model_json_path, "w", encoding="utf-8") as f:
+        json_mod2.dump(mixed_model_project, f, ensure_ascii=False)
+    loaded_mixed_model = render.load_project(mixed_model_json_path)
+    mixed_model_out_dir = os.path.join(tmpdir, "apple_frames_mixed")
+    manifest_path_mixed = render.render(loaded_mixed_model, mixed_model_json_path, video_path, "unused.mp4",
+                                         extract_frames_for="apple-vision",
+                                         extract_frames_out=mixed_model_out_dir)
+    with open(manifest_path_mixed, encoding="utf-8") as f:
+        manifest_mixed = json_mod2.load(f)
+    check(len(manifest_mixed["frames"]) == 1,
+          f"apple-visionを指定した1件だけが対象になる（isnet-general-use指定の方は含まれない）: {manifest_mixed['frames']}")
+    check(abs(manifest_mixed["frames"][0]["time"] - 1.5) < 1e-6,
+          f"対象フレームの時刻はapple-visionを指定したフリーズの time と一致する: {manifest_mixed['frames'][0]}")
+    check(manifest_mixed["output_width"] == W and manifest_mixed["output_height"] == H,
+          f"manifest.jsonのoutput_width/heightは本番の出力解像度と一致する: {manifest_mixed}")
+    frame_png_path = os.path.join(mixed_model_out_dir, manifest_mixed["frames"][0]["path"])
+    frame_img = cv2.imread(frame_png_path)
+    check(frame_img is not None and frame_img.shape[:2] == (H, W),
+          f"書き出されたPNGは本番と同じ出力解像度(HxW)になっている: {None if frame_img is None else frame_img.shape}")
+    reference_frame = render.grab_frame_at(video_path, 1.5, W, H, fps)
+    diff_ref = float(np.abs(frame_img.astype(np.int16) - reference_frame.astype(np.int16)).mean())
+    check(diff_ref < 5.0,
+          f"書き出されたPNGは同時刻のフレーム内容とほぼ一致する（シーケンシャルデコード起源であることの目視代わり、平均差分={diff_ref:.2f}）")
+
     has_rembg = False
     try:
         import rembg  # noqa: F401

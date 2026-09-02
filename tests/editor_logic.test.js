@@ -358,11 +358,13 @@ test("resolveMaskModel: 未知の値・未指定は既定モデル(isnet-general
   assert.strictEqual(core.DEFAULT_MASK_MODEL, "isnet-general-use");
 });
 
-test("resolveMaskModel: 選択可能な3種類（rvm-mobilenetv3/isnet-general-use/birefnet-portrait）はそのまま返る", () => {
+test("resolveMaskModel: 選択可能な4種類（rvm-mobilenetv3/isnet-general-use/birefnet-portrait/apple-vision）はそのまま返る", () => {
   assert.strictEqual(core.resolveMaskModel("rvm-mobilenetv3"), "rvm-mobilenetv3");
   assert.strictEqual(core.resolveMaskModel("isnet-general-use"), "isnet-general-use");
   assert.strictEqual(core.resolveMaskModel("birefnet-portrait"), "birefnet-portrait");
-  assert.deepStrictEqual(core.MASK_MODELS, ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait"]);
+  assert.strictEqual(core.resolveMaskModel("apple-vision"), "apple-vision");
+  assert.deepStrictEqual(core.MASK_MODELS, ["rvm-mobilenetv3", "isnet-general-use", "birefnet-portrait", "apple-vision"]);
+  assert.strictEqual(core.APPLE_VISION_MODEL_NAME, "apple-vision");
 });
 
 test("DEFAULT_MASK_MODEL_SELECTION: 新規プロジェクトの初期選択は動画（RVM）", () => {
@@ -386,6 +388,13 @@ test("buildProjectJSON: maskModelが高精度(birefnet-portrait)ならstyle.mask
   state.maskModel = "birefnet-portrait";
   const project = core.buildProjectJSON(state);
   assert.deepStrictEqual(project.style.mask_options, { model: "birefnet-portrait" });
+});
+
+test("buildProjectJSON: maskModelがApple Visionならstyle.mask_options.include_held_objectsを既定でfalseにする", () => {
+  const state = sampleState();
+  state.maskModel = "apple-vision";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.mask_options, { model: "apple-vision", include_held_objects: false });
 });
 
 test("parseProjectJSON: style.mask_options.modelを読み込んでmaskModelとして復元する", () => {

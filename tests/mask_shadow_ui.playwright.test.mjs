@@ -754,7 +754,18 @@ async function main() {
   const styleHqModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(styleHqModel.mask_options && styleHqModel.mask_options.model === "birefnet-portrait",
     "maskModelSelectを'高精度'にするとstyle.mask_options.modelが'birefnet-portrait'になる: " + JSON.stringify(styleHqModel.mask_options));
+  check(await page.isHidden("#appleVisionHint"), "高精度モデル選択中はAppleVisionの注記が非表示のまま");
+
+  await page.selectOption("#maskModelSelect", "apple-vision");
+  check(await page.isVisible("#appleVisionHint"), "Apple Vision選択中はmacOS無料枠消費の注記が表示される");
+  const styleAppleModel = (await page.evaluate(() => buildProjectJSON(appState))).style;
+  check(styleAppleModel.mask_options && styleAppleModel.mask_options.model === "apple-vision"
+    && styleAppleModel.mask_options.include_held_objects === false,
+    "maskModelSelectを'Apple Vision'にするとstyle.mask_options.model='apple-vision'・include_held_objects=falseになる: "
+    + JSON.stringify(styleAppleModel.mask_options));
+
   await page.selectOption("#maskModelSelect", "isnet-general-use");
+  check(await page.isHidden("#appleVisionHint"), "標準モデルに戻すとAppleVisionの注記が再び非表示になる");
 
   console.log("");
   console.log("=== RVM（動画モード）：サーバー確認でクリップ連番（clip_%04d.jpg）もアップロードする ===");

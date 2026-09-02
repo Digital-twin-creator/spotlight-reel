@@ -329,6 +329,42 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
 - エディタの自動切り抜きモデル選択では**動画（安定・推奨）**として選べ、
   新規プロジェクトの既定になっています（詳細は次項「`mask_options`」）。
 
+### Apple Vision モード（macOS）
+
+`extract.py`（Python）はrembg/onnxruntimeベースの静止画・RVMモデルのみを実行できますが、
+`model: "apple-vision"` を選ぶと、代わりにmacOS標準のVision framework
+（[`VNGenerateForegroundInstanceMaskRequest`](https://developer.apple.com/documentation/vision/vngenerateforegroundinstancemaskrequest)、
+macOS 14.0以降）による切り抜きが使われます。**macOSでしか実行できません**（Vision
+frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上の`extract.py`・`render.py`
+からは直接呼び出せません）。
+
+- 実体は `tools/apple-vision/subject_lift.swift`（Foundation・Vision・CoreImageのみに依存する
+  単体のSwiftファイル。`swiftc -O tools/apple-vision/subject_lift.swift -o subject_lift`
+  でビルドでき、Xcodeプロジェクトは不要）です。使い方：
+  ```bash
+  ./subject_lift <入力画像> <出力ディレクトリ>
+  ```
+  `VNGenerateForegroundInstanceMaskRequest` で検出した**全インスタンスを1つに合成**した
+  ソフトマスク（`generateScaledMaskForImage`、元画像と同じ解像度）を取得し、
+  `extract.py` の他モデルと同じ固定形式のファイル一式
+  （`subject-rgba.png` / `alpha.png` / `mask.png` / `preview.png` / `metadata.json`。
+  `metadata.extractor` は `"apple-vision"`）をこのツール単体で出力します
+  （RGB自体はモデルの予測ではなく元画像の画素をそのまま使う、他モデルと同じ方針）。
+  被写体を検出できなかった場合は**終了コード2**で終了します（それ以外の異常は
+  1=引数不正・3=macOSバージョン不足・4=画像読み込み失敗・5=Visionリクエスト失敗）。
+- `spotlight-jobs` 側では、render.py自身がこのモデルを実行することはありません
+  （`render.py --model apple-vision` 相当の抽出を試みると常に `RuntimeError` になります）。
+  代わりに、macOSランナー（`macos-14`）上で`subject_lift`を実行した結果を、
+  本番レンダリング前に `cache/` へ配置しておく3段構成のワークフローになっています
+  （`prepare` → `extract_apple`（`model=apple-vision`の時だけ実行）→ `render`。
+  詳細は[`spotlight-jobs` のREADME](https://github.com/Digital-twin-creator/spotlight-jobs#readme)参照）。
+- エディタの自動切り抜きモデル選択では**Apple Vision（macOS・高速）**として選べます。
+  **非公開リポジトリではmacOS分の無料枠を通常の10倍消費する**ため、選択時にその旨の
+  注記が表示されます。
+- `mask_options.include_held_objects` はRVM専用の補正（前項参照）のため、Apple Visionを
+  選んだ場合は既定で `false` がJSONに出力されます（Apple Vision自体が全インスタンスを
+  1つのマスクに合成するため、この補正を別途必要としません）。
+
 ## プロジェクトJSON契約
 
 ```json
@@ -500,11 +536,14 @@ python extract.py --model rvm-mobilenetv3 input.mp4 --out outdir/ \
   **動画（安定・推奨）**＝`rvm-mobilenetv3`（新規プロジェクトの既定。前後クリップから
   時間方向の情報を使って切り抜く。詳細は[「動画モード（RVM）」](#動画モードrvm-robust-video-matting)）、
   **標準（速い）**＝`isnet-general-use`（JSON契約上の既定・約3〜9秒/枚）、
-  **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）
-  の3種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
-  （完全後方互換）。動画（RVM）・高精度を選んだ場合は `mask_options.model` が明示的に
-  出力されます。
-  - `mask_options.include_held_objects`（`true`|`false`、**省略時は`true`**）：
+  **高精度（遅い・約+1分）**＝`birefnet-portrait`（GitHub Actions実測で約60〜70秒/枚）、
+  **Apple Vision（macOS・高速）**＝`apple-vision`（macOS専用。詳細は
+  [「Apple Vision モード（macOS）」](#apple-vision-モードmacos)）
+  の4種類から選べます。標準を選んだ場合のみJSONに `mask_options` キー自体を出力しません
+  （完全後方互換）。動画（RVM）・高精度・Apple Visionを選んだ場合は `mask_options.model` が
+  明示的に出力されます。
+  - `mask_options.include_held_objects`（`true`|`false`、**省略時は`true`**。ただし
+    エディタでApple Visionを選んだ場合のみ既定`false`でJSONに出力されます）：
     `model: "rvm-mobilenetv3"` の時だけ意味を持ちます。RVM（人物専用モデル）は
     手に持った物（スマホ・マイク・カバン等）を人物から切り離して除外してしまうことが
     あるため、既定では同じフレームに `isnet-general-use`（汎用の顕著物体検出）を
