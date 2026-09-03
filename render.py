@@ -72,8 +72,11 @@ DEFAULT_STYLE = {
                                    # 未指定(None)なら行の文字色の明るさから黒/白を自動選択する
     "text_backing": "outline",    # none | outline | shadow | box | band（行ごとにlines[].text_backing
                                    # で上書き可）。テロップの可読性を上げる背後の加工。詳細はresolve_text_backing参照
-    "auto_contrast": True,        # backing=outline適用時、文字色と背景の平均輝度のコントラスト比が
-                                   # 4.5未満ならその行だけ自動でboxに格上げする
+    "auto_contrast": False,       # backing=outline適用時、文字色と背景の平均輝度のコントラスト比が
+                                   # 4.5未満ならその行を自動で「太い縁取り＋ドロップシャドウ」へ格上げする。
+                                   # ただしtext_backingが明示指定されている（style/freeze/行のいずれかで
+                                   # 実際にJSONにキーがある）場合は一切格上げしない（座布団は常に明示選択のみ）。
+                                   # 実機で「座布団が意図せず表示される」不具合の再発防止のため既定はfalse
     # text_backing_optionsもここには持たせない（shadow/background_optionsと同じ理由。JSON側に
     # 無ければresolve_text_backing_options()がTEXT_BACKING_OPTIONS_DEFAULTSを補う）。
     # {"color": "#RRGGBB", "opacity": 0〜1, "radius": 文字高比, "padding": 文字高比}（box/bandで使用）
@@ -298,8 +301,13 @@ def load_project(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
         proj = json.load(f)
 
+    style_raw = proj.get("style") or {}
     style = dict(DEFAULT_STYLE)
-    style.update(proj.get("style") or {})
+    style.update(style_raw)
+    # text_backing が style（全体設定）で実際にJSONに指定されていたか。
+    # DEFAULT_STYLEからの補完だけでは「明示指定」とみなさない
+    # （auto_contrastによる座布団への自動格上げを許すかどうかの判定に使う）
+    style_backing_explicit = "text_backing" in style_raw
 
     freezes = []
     for fz in (proj.get("freezes") or []):
@@ -309,6 +317,9 @@ def load_project(json_path):
         merged["time"] = float(fz.get("time", 0.0))
         merged["name"] = fz.get("name", "")
         merged["sfx"] = fz.get("sfx")
+        # style または freeze のどちらかで text_backing が明示されていれば
+        # このfreezeの行はauto_contrastによる格上げの対象外にする
+        merged["text_backing_explicit"] = style_backing_explicit or ("text_backing" in fz)
         freezes.append(merged)
 
     # 必ず time 順に処理する
@@ -1805,9 +1816,13 @@ def resolve_title_lines(fz, json_dir=None):
     """
     default_color = validate_hex_color(fz.get("title_color"), DEFAULT_STYLE["title_color"], "title_color")
     default_backing = resolve_text_backing(fz.get("text_backing", DEFAULT_STYLE["text_backing"]))
+    # style/freeze側でtext_backingが明示指定されていたか（load_projectが設定する）。
+    # 行ごとの明示指定と合わせて、auto_contrastによる座布団への自動格上げを
+    # 抑止するかどうかの判定に使う（明示選択されたbackingは絶対に上書きしない）
+    default_backing_explicit = bool(fz.get("text_backing_explicit", False))
     empty_line = {"text": "", "size": 1.0, "underline": False, "color": default_color,
                   "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None,
-                  "backing": default_backing}
+                  "backing": default_backing, "backing_explicit": default_backing_explicit}
     name = fz.get("name")
     if isinstance(name, dict):
         lines_in = name.get("lines") or []
@@ -1837,18 +1852,21 @@ def resolve_title_lines(fz, json_dir=None):
                          "全体設定のtext_backingに従います。")
                     backing_raw = None
                 backing = backing_raw if backing_raw is not None else default_backing
+                backing_explicit = (backing_raw is not None) or default_backing_explicit
             else:
                 text = str(line)
                 size, underline, color, align_raw = 1.0, False, default_color, None
                 anim, anim_sec, delay_sec, sfx = None, None, 0.0, None
                 backing = default_backing
+                backing_explicit = default_backing_explicit
             lines.append({"text": text, "size": max(0.05, size), "underline": underline,
                           "color": color, "align": align_raw, "anim": anim, "anim_sec": anim_sec,
-                          "delay_sec": delay_sec, "sfx": sfx, "backing": backing})
+                          "delay_sec": delay_sec, "sfx": sfx, "backing": backing,
+                          "backing_explicit": backing_explicit})
         return lines or [dict(empty_line)]
     return [{"text": str(name or ""), "size": 1.0, "underline": False, "color": default_color,
              "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None,
-             "backing": default_backing}]
+             "backing": default_backing, "backing_explicit": default_backing_explicit}]
 
 
 def resolve_title_font_path(fz):
@@ -2095,8 +2113,13 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     line.get("backing")（resolve_title_lines()が解決済み）に従い、文字の背後に
     none/outline/shadow/box/bandのいずれかを敷く。backing="outline"かつauto_contrast=Trueの
     ときは、bg_bgr（このフリーズの背景画像。行の背後領域の平均輝度サンプルに使う）と
-    文字色のコントラスト比がTEXT_BACKING_AUTO_CONTRAST_MIN未満ならその行だけboxに格上げする
-    （bg_bgrが無ければコントラスト判定自体をスキップし、指定どおりoutlineのまま描く）。
+    文字色のコントラスト比がTEXT_BACKING_AUTO_CONTRAST_MIN未満なら、その行だけ内部専用の
+    「太い縁取り＋ドロップシャドウ」（outline_shadow。ユーザーが直接選べるbacking値ではない）
+    に格上げする（bg_bgrが無ければコントラスト判定自体をスキップし、指定どおりoutlineのまま
+    描く）。ただしline.get("backing_explicit")がTrue（style/freeze/行のいずれかでtext_backingが
+    実際にJSONで明示指定されていた）場合は、この自動格上げを一切行わない
+    （座布団=boxは常にユーザーの明示選択でのみ使われる。実機で「座布団が意図せず表示される」
+    不具合の再発防止のため）。
     """
     visible_lines = [line for line in (lines or []) if line.get("text")]
     if not visible_lines:
@@ -2126,6 +2149,7 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
             "outline_rgb": outline_color if outline_color is not None else auto_outline_rgb(text_rgb),
             "line_align": resolve_title_align(line_align_raw) if line_align_raw else None,
             "backing": resolve_text_backing(line.get("backing")),
+            "backing_explicit": bool(line.get("backing_explicit", False)),
         })
 
     align = resolve_title_align(align)
@@ -2203,10 +2227,16 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
         probe_bbox = probe.textbbox((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
 
         backing = li.get("backing") or DEFAULT_TEXT_BACKING
-        if backing == "outline" and auto_contrast and bg_bgr is not None:
+        if (backing == "outline" and auto_contrast and bg_bgr is not None
+                and not li.get("backing_explicit", False)):
+            # text_backingが明示指定されていない行のみが対象（座布団は常に明示選択のみ、
+            # という要件のため、自動格上げは「未指定でoutline既定になっている行」に限る）
             bg_mean_rgb = sample_bg_mean_rgb(bg_bgr, probe_bbox, W, H)
             if contrast_ratio(li["text_rgb"], bg_mean_rgb) < TEXT_BACKING_AUTO_CONTRAST_MIN:
-                backing = "box"   # コントラスト不足：文字だけでは読みにくいので座布団に格上げ
+                # コントラスト不足：文字だけでは読みにくいので、座布団(box)ではなく
+                # 「太い縁取り＋ドロップシャドウ」に格上げする（内部専用。ユーザーが
+                # text_backingとして直接選べる値ではない）
+                backing = "outline_shadow"
 
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
@@ -2227,6 +2257,20 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
             layer = Image.alpha_composite(layer, shadow_layer)
             draw = ImageDraw.Draw(layer)
             draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        elif backing == "outline_shadow":
+            # auto_contrastによる自動格上げ専用（座布団は使わない）：
+            # ドロップシャドウ（shadow分岐と同じ）に加え、通常のoutlineより太い縁取りを重ねる
+            shadow_offset = max(1, int(round(size_px * 0.06)))
+            shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            ImageDraw.Draw(shadow_layer).text(
+                (line_ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
+                anchor=anchor, fill=li["outline_rgb"] + (200,))
+            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(max(1.0, size_px * 0.05)))
+            layer = Image.alpha_composite(layer, shadow_layer)
+            draw = ImageDraw.Draw(layer)
+            stroke_width = max(1, int(round(size_px * 0.14)))
+            draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill,
+                      stroke_width=stroke_width, stroke_fill=li["outline_rgb"] + (shadow_alpha,))
         elif backing == "none":
             draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
         else:

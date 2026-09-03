@@ -234,11 +234,11 @@ try:
     # 2.5) テロップの複数行対応（title.lines契約：resolve_title_lines/render_telop_layer）
     # ------------------------------------------------------------------
     def title_line(text, size=1.0, underline=False, color="#FFFFFF", align=None, anim=None,
-                    anim_sec=None, delay_sec=0.0, sfx=None, backing="outline"):
+                    anim_sec=None, delay_sec=0.0, sfx=None, backing="outline", backing_explicit=False):
         """resolve_title_lines()が返す1行分の辞書を、テストで期待値として組み立てるヘルパー"""
         return {"text": text, "size": size, "underline": underline, "color": color, "align": align,
                 "anim": anim, "anim_sec": anim_sec, "delay_sec": delay_sec, "sfx": sfx,
-                "backing": backing}
+                "backing": backing, "backing_explicit": backing_explicit}
 
     print("")
     print("=== テロップの複数行対応：resolve_title_lines（JSON契約の正規化） ===")
@@ -2130,6 +2130,60 @@ try:
     check([l["backing"] for l in backing_lines] == ["shadow", "box", "shadow"],
           f"style既定(shadow)を継承・行2は明示box・行3は不正値でstyle既定にフォールバック: "
           f"{[l['backing'] for l in backing_lines]}")
+    check([l["backing_explicit"] for l in backing_lines] == [False, True, False],
+          f"resolve_title_linesへload_project経由でないfzを直接渡した場合、text_backing_explicit"
+          f"キーは無いためstyle既定はbacking_explicit=False。行2はtext_backingを行側で明示した"
+          f"ためbacking_explicit=True。行3は不正値でstyle既定にフォールバックしbacking_explicit=False: "
+          f"{[l['backing_explicit'] for l in backing_lines]}")
+
+    print("")
+    print("=== text_backing：load_project()がstyle/freezeでのtext_backing明示指定を伝搬する（backing_explicit） ===")
+    import json as json_mod_tb
+    tb_proj_explicit_style = {
+        "version": 1, "video": video_path,
+        "output": {"width": 200, "height": 100, "fps": 30},
+        "style": {"text_backing": "outline"},
+        "freezes": [{"time": 0.0, "name": "A行"}],
+    }
+    tb_explicit_style_path = os.path.join(tmpdir, "tb_explicit_style.json")
+    with open(tb_explicit_style_path, "w", encoding="utf-8") as f:
+        json_mod_tb.dump(tb_proj_explicit_style, f, ensure_ascii=False)
+    loaded_tb_explicit_style = render.load_project(tb_explicit_style_path)
+    check(loaded_tb_explicit_style["freezes"][0]["text_backing_explicit"] is True,
+          "style.text_backingが明示指定されていれば、freeze側で省略していてもtext_backing_explicit=True")
+    lines_explicit_style = render.resolve_title_lines(loaded_tb_explicit_style["freezes"][0])
+    check(lines_explicit_style[0]["backing_explicit"] is True,
+          "load_project経由で読んだfreezeをresolve_title_linesに渡すと、行にもbacking_explicit=Trueが伝わる")
+
+    tb_proj_implicit = {
+        "version": 1, "video": video_path,
+        "output": {"width": 200, "height": 100, "fps": 30},
+        "style": {},
+        "freezes": [{"time": 0.0, "name": "B行"}],
+    }
+    tb_implicit_path = os.path.join(tmpdir, "tb_implicit.json")
+    with open(tb_implicit_path, "w", encoding="utf-8") as f:
+        json_mod_tb.dump(tb_proj_implicit, f, ensure_ascii=False)
+    loaded_tb_implicit = render.load_project(tb_implicit_path)
+    check(loaded_tb_implicit["freezes"][0]["text_backing_explicit"] is False,
+          "style/freezeのどちらにもtext_backingが無ければtext_backing_explicit=False"
+          "（DEFAULT_STYLEからの補完だけでは明示指定とみなさない）")
+    lines_implicit = render.resolve_title_lines(loaded_tb_implicit["freezes"][0])
+    check(lines_implicit[0]["backing_explicit"] is False,
+          "text_backing_explicit=Falseのfreezeをresolve_title_linesに渡すと、行もbacking_explicit=False")
+
+    tb_proj_freeze_level = {
+        "version": 1, "video": video_path,
+        "output": {"width": 200, "height": 100, "fps": 30},
+        "style": {},
+        "freezes": [{"time": 0.0, "name": "C行", "text_backing": "box"}],
+    }
+    tb_freeze_level_path = os.path.join(tmpdir, "tb_freeze_level.json")
+    with open(tb_freeze_level_path, "w", encoding="utf-8") as f:
+        json_mod_tb.dump(tb_proj_freeze_level, f, ensure_ascii=False)
+    loaded_tb_freeze_level = render.load_project(tb_freeze_level_path)
+    check(loaded_tb_freeze_level["freezes"][0]["text_backing_explicit"] is True,
+          "styleでは未指定でも、freeze側でtext_backingを明示指定していればtext_backing_explicit=True")
 
     print("")
     print("=== text_backing：render_telop_line_layersでnone/outline/shadow/box/bandの見た目を検証 ===")
@@ -2170,7 +2224,7 @@ try:
           "shadow：noneと異なる見た目になる（ドロップシャドウが乗る）")
 
     print("")
-    print("=== text_backing：auto_contrastが低コントラスト背景でoutlineをboxへ自動格上げする ===")
+    print("=== text_backing：auto_contrastが低コントラスト背景でoutlineを「太い縁取り＋影」へ自動格上げする（座布団にはならない） ===")
     dark_bg = np.full((tb_h, tb_w, 3), (20, 20, 20), dtype=np.uint8)   # 黒背景＋白文字＝高コントラスト
     light_bg = np.full((tb_h, tb_w, 3), (235, 235, 235), dtype=np.uint8)  # 白背景＋白文字＝低コントラスト
     high_contrast_layer = render_single("outline", bg_bgr=dark_bg)
@@ -2178,10 +2232,31 @@ try:
     check(opaque_pixel_count(high_contrast_layer) == opaque_pixel_count(outline_layer),
           "高コントラスト背景ではoutlineのまま（bg_bgr省略時と同じ不透明画素数）")
     check(opaque_pixel_count(low_contrast_layer) > opaque_pixel_count(high_contrast_layer),
-          "低コントラスト背景ではboxに格上げされ、不透明画素数が明らかに増える")
+          "低コントラスト背景では「太い縁取り＋影」に格上げされ、不透明画素数が明らかに増える")
+    check(opaque_pixel_count(low_contrast_layer) < opaque_pixel_count(box_layer),
+          "格上げ先は座布団(box)ではないため、box_layerほどは不透明画素が増えない（座布団は常に明示選択のみ）")
     no_auto_layer = render_single("outline", bg_bgr=light_bg, auto_contrast=False)
     check(opaque_pixel_count(no_auto_layer) == opaque_pixel_count(outline_layer),
           "auto_contrast=Falseなら低コントラスト背景でも格上げされずoutlineのまま")
+
+    def render_single_explicit(backing, bg_bgr=None, auto_contrast=True, backing_explicit=False):
+        lines = tb_lines_for(backing)
+        lines[0]["backing_explicit"] = backing_explicit
+        layers = render.render_telop_line_layers(
+            lines, tb_w, tb_h, {}, font_path_default,
+            size_px_base, pos_ratio=(0.5, 0.5), backing_options=tb_opts,
+            auto_contrast=auto_contrast, bg_bgr=bg_bgr)
+        return layers[0]
+
+    explicit_no_escalate_layer = render_single_explicit(
+        "outline", bg_bgr=light_bg, auto_contrast=True, backing_explicit=True)
+    check(opaque_pixel_count(explicit_no_escalate_layer) == opaque_pixel_count(outline_layer),
+          "text_backingが明示指定（backing_explicit=True）の行は、低コントラスト背景でも一切格上げされない"
+          "（実機で「座布団が意図せず表示される」不具合の再発防止）")
+    implicit_escalate_layer = render_single_explicit(
+        "outline", bg_bgr=light_bg, auto_contrast=True, backing_explicit=False)
+    check(opaque_pixel_count(implicit_escalate_layer) == opaque_pixel_count(low_contrast_layer),
+          "backing_explicit=False（未指定）の行は従来どおり格上げされる")
 
     print("")
     print("=== text_backing：contrast_ratio（WCAG 2.0）の基本値を確認 ===")

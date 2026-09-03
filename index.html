@@ -2,6 +2,26 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<script>
+// GitHub Pages（CDN・ブラウザ双方のキャッシュ）が更新前のindex.htmlを配信し続け、
+// 「pushして直したはずの不具合が実機で再現し続ける」不具合の対策。このファイルを
+// 書き出した時点のビルドIDをURLのクエリ(?v=)に付け、既に同じ値が付いていなければ
+// 一度だけ付け直して再読み込みする。クエリ付きURLはキャッシュ上バージョン無しの
+// URLとは別エントリとして扱われるため、古いキャッシュを踏まず確実に最新を取得できる。
+// index.htmlを更新するたびにBUILD_IDを書き換える（コミット日時など、その時点で
+// 一意に決まる値であれば形式は問わない）。
+(function () {
+  "use strict";
+  var BUILD_ID = "20260903-1";
+  try {
+    var params = new URLSearchParams(location.search);
+    if (params.get("v") !== BUILD_ID) {
+      params.set("v", BUILD_ID);
+      location.replace(location.pathname + "?" + params.toString() + location.hash);
+    }
+  } catch (e) { /* URLSearchParams非対応環境等でも致命的ではないため何もしない */ }
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
 <title>人物スポットライト エディタ</title>
 <style>
@@ -177,6 +197,20 @@
   }
   .draw-hint.fade-out{ opacity:0; }
   .video-wrap:not(.editing) .draw-hint{ display:none; }
+
+  /* --- フリーズ編集中、映像の上に常時浮かべる「ブラシ／テロップ移動」切替バー ---
+     editorSectionまでスクロールしなくても、映像を見ながら指ですぐ切り替えられるようにする
+     （実機で「タッチがブラシ描画に取られてテロップを動かせない」不具合の対策）。 */
+  .telop-mode-toggle{
+    position:absolute; left:0; right:0; bottom:8px; z-index:4;
+    display:flex; gap:8px; justify-content:center; pointer-events:none;
+  }
+  .telop-mode-toggle button{
+    pointer-events:auto; min-height:38px; padding:6px 14px; font-size:13px;
+    background:rgba(11,13,18,.85); border:2px solid var(--line); color:#fff;
+  }
+  .telop-mode-toggle button.selected{ border-color:var(--accent); color:var(--accent); }
+  .video-wrap:not(.editing) .telop-mode-toggle{ display:none; }
 
   /* --- 描画モード中は映像エリアを画面上部に固定し、
      ページ本体はスクロールさせない（bodyのスクロールがiOSのアドレスバー
@@ -383,6 +417,10 @@
         <canvas id="telopCanvas"></canvas>
         <canvas id="previewCanvas"></canvas>
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
+        <div class="telop-mode-toggle" id="telopModeToggle" hidden>
+          <button type="button" class="mode-toggle-btn" id="telopModeBrushBtn" data-mode="brush">✏ ブラシ</button>
+          <button type="button" class="mode-toggle-btn" id="telopModeMoveBtn" data-mode="move">✥ テロップ移動</button>
+        </div>
       </div>
       <!-- 「▶ プレビュー」再生中だけ表示する、全画面表示から抜けるための閉じるボタン。
            再生中はvideoWrap自体が画面全体を覆うため、下の操作バー（previewBtn等）には
@@ -461,7 +499,7 @@
         <label><span class="step-badge">⑤</span>名前テロップ（複数行可）</label>
         <div id="titleLinesList"></div>
         <button type="button" class="small ghost" id="addTitleLineBtn" style="margin-top:6px;">＋ 行を追加</button>
-        <div class="muted" id="titleDragHint" style="margin-top:4px;">映像に表示されたテロップを指でドラッグすると位置を変えられます（複数行はまとめて動きます）</div>
+        <div class="muted" id="titleDragHint" style="margin-top:4px;">映像上部の「✥ テロップ移動」に切り替えると、指でドラッグしてテロップの位置を変えられます（複数行はまとめて動きます）</div>
       </div>
 
       <div class="row wrap">
@@ -509,6 +547,32 @@
             <option value="grain">grain（モノクロ＋粒状ノイズ）</option>
             <option value="gradient">gradient（縦グラデーション）</option>
           </select>
+          <!-- セレクトの直下に、選んだ種類に応じた色欄を必ず表示する（折りたたみやスクロールの
+               外に置かない。実機で「単色背景flatの色が選べない」不具合の再発防止） -->
+          <div id="freezeBackgroundOptionsBody" hidden style="margin-top:8px;">
+            <div class="field" id="freezeBackgroundBaseField" data-bg-modes="flat,gradient,halftone,stripes,grid">
+              <label>背景色（このフリーズだけ）</label>
+              <div class="row wrap" id="freezeBackgroundBaseColorRow"></div>
+              <input type="text" id="freezeBackgroundBaseColorInput" placeholder="#FFFFFF" inputmode="none" style="width:7em;margin-top:4px;">
+            </div>
+            <div class="field" id="freezeBackgroundAccentField" data-bg-modes="gradient,halftone,stripes,grid">
+              <label>アクセント色（このフリーズだけ）</label>
+              <div class="row wrap" id="freezeBackgroundAccentColorRow"></div>
+              <input type="text" id="freezeBackgroundAccentColorInput" placeholder="#000000" inputmode="none" style="width:7em;margin-top:4px;">
+            </div>
+            <div class="field" id="freezeBackgroundScaleField" data-bg-modes="halftone,stripes,grid">
+              <label>模様のスケール（このフリーズだけ） <span class="brush-slider-value" id="freezeBackgroundScaleValue">0.020</span></label>
+              <input type="range" id="freezeBackgroundScaleSlider" min="0.005" max="0.08" step="0.001" value="0.02">
+            </div>
+            <div class="field" id="freezeBackgroundAngleField" data-bg-modes="stripes,grid">
+              <label>模様の角度（このフリーズだけ） <span class="brush-slider-value" id="freezeBackgroundAngleValue">45°</span></label>
+              <input type="range" id="freezeBackgroundAngleSlider" min="0" max="180" step="1" value="45">
+            </div>
+            <div class="field" id="freezeBackgroundOpacityField" data-bg-modes="grain">
+              <label>グレインの強さ（このフリーズだけ） <span class="brush-slider-value" id="freezeBackgroundOpacityValue">1.00</span></label>
+              <input type="range" id="freezeBackgroundOpacitySlider" min="0" max="1" step="0.05" value="1">
+            </div>
+          </div>
         </div>
         <div class="field grow">
           <label>マスクの縁（このフリーズだけ全体設定を上書き）</label>
@@ -540,28 +604,13 @@
     <div class="muted" id="freezeListEmpty">まだフリーズがありません。動画の好きな位置で「＋ フリーズ追加」を押してください。</div>
   </section>
 
-  <!-- 6. 全体設定（影の色プリセットなど、既定で有効な演出の設定を含むため、既定で開いておく） -->
-  <details class="card" id="settingsSection" open>
-    <summary>全体設定</summary>
-    <div class="body stack">
+  <!-- 背景（全体既定）：折りたたみ（全体設定の<details>）やスクロールの外に隠れて選べなくなることが
+       無いよう、常時展開の独立カードにしている（実機で「単色背景flatの色が選べない」不具合の
+       再発防止。選んだ種類に応じた色欄をこのセレクトの直下に必ず表示する）。 -->
+  <section class="card" id="backgroundSection">
+    <h2>背景（人物以外の塗り方・全体既定） <span class="muted" style="font-weight:400;">フリーズごとに上書き可</span></h2>
+    <div class="stack">
       <div class="field">
-        <label>①塗り reveal_sec（カラー化にかける時間・秒。0で即時） <span class="brush-slider-value" id="revealSecValue">0.5秒</span></label>
-        <input type="range" id="revealSecSlider" min="0" max="3" step="0.1" value="0.5">
-      </div>
-      <div class="field">
-        <label>②ズレ slide_sec（人物がずれて影が現れる時間・秒） <span class="brush-slider-value" id="slideSecValue">0.5秒</span></label>
-        <input type="range" id="slideSecSlider" min="0.1" max="2" step="0.1" value="0.5">
-      </div>
-      <div class="field">
-        <label>③静止 hold_sec（ずれきった状態で保持する時間・秒） <span class="brush-slider-value" id="holdSecValue">2.0秒</span></label>
-        <input type="range" id="holdSecSlider" min="0.3" max="8" step="0.1" value="2">
-      </div>
-      <div class="field">
-        <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
-        <input type="range" id="monoContrastSlider" min="1" max="2" step="0.05" value="1">
-      </div>
-      <div class="field">
-        <label>background（背景（人物以外）の塗り方・全体既定） <span class="muted">フリーズごとに上書き可</span></label>
         <select id="backgroundModeSelect">
           <option value="mono">mono（モノクロ）</option>
           <option value="dark">dark（減光）</option>
@@ -596,6 +645,29 @@
           <label>グレインの強さ opacity <span class="brush-slider-value" id="backgroundOpacityValue">1.00</span></label>
           <input type="range" id="backgroundOpacitySlider" min="0" max="1" step="0.05" value="1">
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. 全体設定（影の色プリセットなど、既定で有効な演出の設定を含むため、既定で開いておく） -->
+  <details class="card" id="settingsSection" open>
+    <summary>全体設定</summary>
+    <div class="body stack">
+      <div class="field">
+        <label>①塗り reveal_sec（カラー化にかける時間・秒。0で即時） <span class="brush-slider-value" id="revealSecValue">0.5秒</span></label>
+        <input type="range" id="revealSecSlider" min="0" max="3" step="0.1" value="0.5">
+      </div>
+      <div class="field">
+        <label>②ズレ slide_sec（人物がずれて影が現れる時間・秒） <span class="brush-slider-value" id="slideSecValue">0.5秒</span></label>
+        <input type="range" id="slideSecSlider" min="0.1" max="2" step="0.1" value="0.5">
+      </div>
+      <div class="field">
+        <label>③静止 hold_sec（ずれきった状態で保持する時間・秒） <span class="brush-slider-value" id="holdSecValue">2.0秒</span></label>
+        <input type="range" id="holdSecSlider" min="0.3" max="8" step="0.1" value="2">
+      </div>
+      <div class="field">
+        <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
+        <input type="range" id="monoContrastSlider" min="1" max="2" step="0.05" value="1">
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="titleBounceCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
@@ -707,16 +779,16 @@
       <div class="field">
         <label>text_backing（テロップの可読性・全体既定） <span class="muted">行ごとに上書き可</span></label>
         <select id="textBackingDefaultSelect">
-          <option value="none">none（加工なし）</option>
-          <option value="outline">outline（縁取り・既定）</option>
-          <option value="shadow">shadow（ドロップシャドウ）</option>
-          <option value="box">box（座布団）</option>
-          <option value="band">band（帯）</option>
+          <option value="outline">縁取り（既定）</option>
+          <option value="shadow">影（ドロップシャドウ）</option>
+          <option value="box">座布団</option>
+          <option value="band">帯</option>
+          <option value="none">なし（加工しない）</option>
         </select>
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="autoContrastCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
-        <label style="margin:0;" for="autoContrastCheckbox">auto_contrast（outline適用時、背景とのコントラストが低い行は自動でboxに格上げする）</label>
+        <label style="margin:0;" for="autoContrastCheckbox">auto_contrast（縁取りが適用され、かつtext_backingを明示選択していない行のみが対象。背景とのコントラストが低い場合に自動で太い縁取り＋影に強化する。座布団にはならない）</label>
       </div>
       <div id="textBackingOptionsBody" hidden>
         <div class="field">
@@ -1130,7 +1202,10 @@ var DEFAULT_STYLE = {
   mask_options: null,
   mask_style: "solid",
   text_backing: "outline",
-  auto_contrast: true,
+  // 実機で「座布団（box）が意図せず表示される」不具合の再発防止のため既定はfalse。
+  // text_backingが明示指定されていない行のみが対象で、格上げ先もboxではなく
+  // 「太い縁取り＋ドロップシャドウ」（render.py側の内部専用backing）になる
+  auto_contrast: false,
   reveal: "wipe"
   // 影（フィルム色）演出はここに既定値を含めない（意図的。render.pyのDEFAULT_STYLEと同じ理由）。
   // JSON側に"shadow"キーが無ければ既定で有効（parseProjectJSON参照）。ここに既定値を
@@ -1214,15 +1289,15 @@ function resolveTextBacking(mode) {
 }
 /** text_backing種類<select>の選択肢（value/label） */
 var TEXT_BACKING_LABELS = [
-  { value: "none", label: "none（加工なし）" },
-  { value: "outline", label: "outline（縁取り・既定）" },
-  { value: "shadow", label: "shadow（ドロップシャドウ）" },
-  { value: "box", label: "box（座布団）" },
-  { value: "band", label: "band（帯）" }
+  { value: "outline", label: "縁取り（既定）" },
+  { value: "shadow", label: "影（ドロップシャドウ）" },
+  { value: "box", label: "座布団" },
+  { value: "band", label: "帯" },
+  { value: "none", label: "なし（加工しない）" }
 ];
 /** 行ごとの寄せ<select>と同じく、空文字＝全体設定を継承する行選択肢 */
-var TITLE_LINE_BACKING_LABELS = [{ value: "", label: "座布団：既定（全体設定）" }].concat(
-  TEXT_BACKING_LABELS.map(function (o) { return { value: o.value, label: "座布団：" + o.label }; }));
+var TITLE_LINE_BACKING_LABELS = [{ value: "", label: "背景装飾：既定（全体設定）" }].concat(
+  TEXT_BACKING_LABELS.map(function (o) { return { value: o.value, label: o.label }; }));
 /** text_backing_optionsが実際に意味を持つ種類（box/bandのみ使用） */
 var TEXT_BACKING_MODES_WITH_OPTIONS = ["box", "band"];
 /**
@@ -1575,6 +1650,19 @@ function freezeToJSON(fz, sfxLibrary) {
     brush_shape: resolveBrushShape(fz.brushShape),
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
+  // background_options（このフリーズだけの背景色上書き）：フリーズの色欄を実際に
+  // 操作した場合（fz.backgroundOptionsが実体化されている場合）のみ出力する。
+  // 未操作なら省略し、全体設定style.background_optionsを継承させる（後方互換）
+  if (fz.backgroundOptions) {
+    var fzBgOpts = resolveBackgroundOptions(fz.backgroundOptions);
+    out.background_options = {
+      base: fzBgOpts.base,
+      accent: fzBgOpts.accent,
+      scale: round(fzBgOpts.scale, 4),
+      angle: round(fzBgOpts.angle, 1),
+      opacity: round(fzBgOpts.opacity, 2)
+    };
+  }
   if (maskMode === "auto+brush") {
     // color_sourceには存在しない旧ハイブリッドモード（自動切り抜き＋ブラシ修正）。
     // 後方互換専用の"mask"キーのまま出力する
@@ -1904,6 +1992,7 @@ function parseProjectJSON(json, sfxLibrary) {
       sfxAlign: sfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
       sfxMissingFile: sfxFields.sfxMissingFile || "",
       background: fz.background !== undefined ? resolveBackgroundMode(fz.background) : styleBackgroundMode,
+      backgroundOptions: fz.background_options ? resolveBackgroundOptions(fz.background_options) : null,
       maskStyle: fz.mask_style !== undefined ? resolveMaskStyle(fz.mask_style) : styleMaskStyle,
       brushShape: resolveBrushShape(fz.brush_shape),
       maskMode: resolveColorSourceForFreeze(fz),
@@ -3813,6 +3902,7 @@ function init() {
     "videoStatusChip", "playStatusChip", "errorBanner", "errorBannerText", "errorBannerClose",
     "guideCard", "guideCloseBtn",
     "playerSection", "playerControls", "video", "videoWrap", "playerCanvas", "drawCanvas", "telopCanvas", "previewCanvas", "drawHint",
+    "telopModeToggle", "telopModeBrushBtn", "telopModeMoveBtn",
     "previewStopBtn",
     "seekBar", "timeReadout", "playPauseBtn", "addFreezeBtn",
     "editorSection", "editorTitle", "brushWidthSlider", "brushWidthValue",
@@ -3821,6 +3911,12 @@ function init() {
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
     "titleLinesList", "addTitleLineBtn", "freezeTitleFontSelect",
     "sfxSelect", "sfxAlignSelect", "backgroundSelect", "maskStyleSelect", "brushShapeSelect",
+    "freezeBackgroundOptionsBody",
+    "freezeBackgroundBaseField", "freezeBackgroundBaseColorRow", "freezeBackgroundBaseColorInput",
+    "freezeBackgroundAccentField", "freezeBackgroundAccentColorRow", "freezeBackgroundAccentColorInput",
+    "freezeBackgroundScaleField", "freezeBackgroundScaleSlider", "freezeBackgroundScaleValue",
+    "freezeBackgroundAngleField", "freezeBackgroundAngleSlider", "freezeBackgroundAngleValue",
+    "freezeBackgroundOpacityField", "freezeBackgroundOpacitySlider", "freezeBackgroundOpacityValue",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
@@ -3898,6 +3994,7 @@ function init() {
   initGuideCard();
   buildFilmColorControls();
   buildBackgroundColorControls();
+  buildFreezeBackgroundColorControls();
   buildMaskStyleColorControls();
   buildTextBackingColorControls();
   buildSubjectOutlineColorControls();
@@ -3972,17 +4069,58 @@ function init() {
     draft.brushShape = els.brushShapeSelect.value;
     redrawStrokesOverlay();
   });
+  els.backgroundSelect.addEventListener("change", function () {
+    if (!draft) return;
+    draft.background = els.backgroundSelect.value;
+    updateFreezeBackgroundOptionFieldVisibility();
+    applyFreezeBackgroundOptionsToInputs();
+  });
+  els.freezeBackgroundBaseColorInput.addEventListener("input", function () {
+    var v = els.freezeBackgroundBaseColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      ensureDraftBackgroundOptions().base = v.toUpperCase();
+      updateFreezeBackgroundColorPresetSelection();
+    }
+  });
+  els.freezeBackgroundAccentColorInput.addEventListener("input", function () {
+    var v = els.freezeBackgroundAccentColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      ensureDraftBackgroundOptions().accent = v.toUpperCase();
+      updateFreezeBackgroundColorPresetSelection();
+    }
+  });
+  els.freezeBackgroundScaleSlider.addEventListener("input", function () {
+    ensureDraftBackgroundOptions().scale = Number(els.freezeBackgroundScaleSlider.value);
+    els.freezeBackgroundScaleValue.textContent = draft.backgroundOptions.scale.toFixed(3);
+  });
+  els.freezeBackgroundAngleSlider.addEventListener("input", function () {
+    ensureDraftBackgroundOptions().angle = Number(els.freezeBackgroundAngleSlider.value);
+    els.freezeBackgroundAngleValue.textContent = draft.backgroundOptions.angle.toFixed(0) + "°";
+  });
+  els.freezeBackgroundOpacitySlider.addEventListener("input", function () {
+    ensureDraftBackgroundOptions().opacity = Number(els.freezeBackgroundOpacitySlider.value);
+    els.freezeBackgroundOpacityValue.textContent = draft.backgroundOptions.opacity.toFixed(2);
+  });
   els.maskModeSelect.addEventListener("change", function () {
     if (!draft) return;
     draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
     updateMaskModeUI();
     redrawStrokesOverlay();
+    // まだ名前を入力していない（＝テロップ移動への自動切り替えがまだ起きていない）間は、
+    // 切り抜き方法の変更に合わせてタッチ操作モードの既定を追従させる。「自動」はブラシが
+    // 不要なのでテロップ移動を既定にする。名前入力後（ユーザーが既に位置調整を始めている
+    // 可能性がある）は、ここでは上書きしない
+    if (!draftVisibleTitleLines().length) {
+      setTelopEditMode(draft.maskMode === "auto" ? "move" : "brush");
+    }
   });
   els.sfxSelect.addEventListener("change", function () {
     els.sfxAlignSelect.hidden = els.sfxSelect.value.indexOf("lib:") !== 0;
   });
   els.brushModeAddBtn.addEventListener("click", function () { setBrushEditMode("add"); });
   els.brushModeEraseBtn.addEventListener("click", function () { setBrushEditMode("erase"); });
+  els.telopModeBrushBtn.addEventListener("click", function () { setTelopEditMode("brush"); });
+  els.telopModeMoveBtn.addEventListener("click", function () { setTelopEditMode("move"); });
   els.addTitleLineBtn.addEventListener("click", function () {
     if (!draft) return;
     draft.titleLines = (draft.titleLines && draft.titleLines.length) ? draft.titleLines : normalizeTitleLines(draft.name);
@@ -4890,6 +5028,8 @@ function enterDrawMode() {
   els.sfxAlignSelect.value = resolveSfxAlign(draft.sfxAlign, SFX_ALIGNS_FREEZE);
   els.sfxAlignSelect.hidden = !draft.sfxLibraryId;
   els.backgroundSelect.value = draft.background || "mono";
+  updateFreezeBackgroundOptionFieldVisibility();
+  applyFreezeBackgroundOptionsToInputs();
   els.maskStyleSelect.value = resolveMaskStyle(draft.maskStyle);
   els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
   els.maskModeSelect.value = resolveMaskMode(draft.maskMode);
@@ -4911,12 +5051,19 @@ function enterDrawMode() {
   sizeFixedVideoWrap(); // video-wrapの実サイズを、canvasのレイアウト計算より先に確定させる
   setPlayStatus("フリーズ編集中");
 
+  // フリーズ編集画面のタッチ操作モード（ブラシ描画／テロップ移動）の既定を決める。
+  // 「切り抜き：自動」（maskMode="auto"）はブラシで塗る必要が無いフリーズなので、
+  // 最初からテロップ移動モードにしておく（実機で「タッチがブラシ描画に取られて
+  // テロップを動かせない」不具合の対策）。それ以外は従来どおりブラシが既定。
+  els.telopModeToggle.hidden = false;
+  setTelopEditMode(resolveMaskMode(draft.maskMode) === "auto" ? "move" : "brush");
+
   layoutOverlayCanvases();
   paintFrozenFrame();
   redrawStrokesOverlay();
   redrawTelopOverlay();
   preloadCurrentTitleFontAndRedraw();
-  showDrawHint();
+  if (draft.telopEditMode !== "move") showDrawHint();
   layoutFixedEditorArea();
 }
 
@@ -4949,6 +5096,7 @@ function exitDrawMode() {
     els.videoWrap.style.height = "";
     stopPreviewPlayback();
     hideDrawHint();
+    els.telopModeToggle.hidden = true;
     // 進行中のサーバー確認表示があれば、フリーズ編集を抜けるタイミングで必ずリセットする
     // （リセットせずに残ると、次に別のフリーズを編集した時に古い静止フレームの結果が
     // 表示され続けてしまう）
@@ -5279,6 +5427,20 @@ function setBrushEditMode(mode) {
   els.brushModeEraseBtn.classList.toggle("selected", draft.brushEditMode === "erase");
 }
 
+/**
+ * フリーズ編集画面のタッチ操作モードを切り替える（"brush"＝なぞって描く／
+ * "move"＝テロップブロックをドラッグで動かす）。moveの間はタッチが一切
+ * ストロークを描かず、どこを触っても唯一のテロップブロックを掴んで動かす
+ * （ブラシ描画とテロップ移動のタッチが競合する実機不具合の対策）。
+ */
+function setTelopEditMode(mode) {
+  if (!draft) return;
+  draft.telopEditMode = mode === "move" ? "move" : "brush";
+  els.telopModeBrushBtn.classList.toggle("selected", draft.telopEditMode === "brush");
+  els.telopModeMoveBtn.classList.toggle("selected", draft.telopEditMode === "move");
+  if (draft.telopEditMode === "move") hideDrawHint();
+}
+
 function wireDrawCanvasTouch() {
   var canvas = els.drawCanvas;
   // draft がある間（描画モード中）は touchmove/touchend の中身に関わらず
@@ -5287,7 +5449,7 @@ function wireDrawCanvasTouch() {
     if (!draft) return;
     e.preventDefault();
     var t = e.touches[0];
-    if (beginTelopDragIfHit(t.clientX, t.clientY)) return;
+    if (draft.telopEditMode === "move") { beginTelopDragForMove(t.clientX, t.clientY); return; }
     beginStroke(t.clientX, t.clientY);
   }, { passive: false });
 
@@ -5318,7 +5480,7 @@ function wireDrawCanvasTouch() {
   canvas.addEventListener("mousedown", function (e) {
     if (!draft) return;
     mouseDown = true;
-    if (beginTelopDragIfHit(e.clientX, e.clientY)) return;
+    if (draft.telopEditMode === "move") { beginTelopDragForMove(e.clientX, e.clientY); return; }
     beginStroke(e.clientX, e.clientY);
   });
   canvas.addEventListener("mousemove", function (e) {
@@ -5486,8 +5648,12 @@ function renderTitleLinesEditor() {
     textInput.placeholder = i === 0 ? "例：山田 太郎" : "例：エースストライカー";
     textInput.value = line.text || "";
     textInput.addEventListener("input", function () {
+      var wasEmpty = !draft.titleLines[i].text;
       draft.titleLines[i].text = textInput.value;
       draft.name = titleLinesToPlainText(draft.titleLines);
+      // 名前を入力した直後（空→入力あり）は、指でテロップの位置を決めやすいよう
+      // 自動でテロップ移動モードに切り替える
+      if (wasEmpty && textInput.value && draft.telopEditMode !== "move") setTelopEditMode("move");
       redrawTelopOverlay();
     });
 
@@ -5777,18 +5943,17 @@ function computeEditorTelopBox() {
 }
 
 /**
- * touchstart/mousedown位置がテロップの外接矩形内なら、ドラッグ移動モードへ入る。
- * （ブラシ描画と競合しないよう、テロップの上をタッチした時だけ移動モードにする要件）
- * 入った場合はtrueを返す（呼び出し側はストローク開始を行わない）。
+ * 「テロップ移動」モード中のtouchstart/mousedownで呼ぶ。ヒットテストは行わず、
+ * 触れた位置に関わらず必ず（唯一の）テロップブロックのドラッグを開始する
+ * （「ブロック外をタッチしても最も近いブロックを掴む」という要件のため。
+ * このモードでは一切ストロークを描かない＝ブラシ描画と競合しない）。
+ * テロップ未表示（名前未入力）の間は何も掴めないためfalseを返す。
  */
-function beginTelopDragIfHit(clientX, clientY) {
+function beginTelopDragForMove(clientX, clientY) {
   var info = computeEditorTelopBox();
   if (!info) return false;
   var rect = els.drawCanvas.getBoundingClientRect();
   var pt = ratioFromRect(clientX, clientY, rect);
-  var px = pt.x * overlaySize.width, py = pt.y * overlaySize.height;
-  var box = info.box;
-  if (px < box.left || px > box.right || py < box.top || py > box.bottom) return false;
   telopDragging = true;
   telopDragOffsetRatio = { x: pt.x - info.pos[0], y: pt.y - info.pos[1] };
   hideDrawHint();
@@ -6473,7 +6638,7 @@ function startPreviewPlayback() {
 
     bgCanvas = document.createElement("canvas");
     bgCanvas.width = W; bgCanvas.height = H;
-    buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background, appState.backgroundOptions);
+    buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background, currentFreezeBackgroundOptions());
     previewSessionCanvases.push(bgCanvas);
 
     geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
@@ -7341,6 +7506,87 @@ function updateBackgroundOptionFieldVisibility() {
     var modes = (field.dataset.bgModes || "").split(",");
     field.hidden = modes.indexOf(mode) < 0;
   });
+}
+
+/* ---------------- 背景（人物以外）の塗り色：フリーズ単位の上書き ----------------
+   draft.backgroundOptionsは既定でnull（＝全体設定を継承）。フリーズ側の色欄を実際に
+   操作した時だけ、その時点の実効値（継承中の全体設定か既存の上書き）をコピーして
+   draft.backgroundOptionsを実体化する（他の項目は上書きせず、触った項目だけ変わる）。 */
+
+/** draft.backgroundOptionsを（無ければ実効値から）実体化して返す */
+function ensureDraftBackgroundOptions() {
+  if (!draft) return null;
+  if (!draft.backgroundOptions) {
+    draft.backgroundOptions = Object.assign({}, currentFreezeBackgroundOptions());
+  }
+  return draft.backgroundOptions;
+}
+
+/** このフリーズに実際に効くbackground_options（上書きが無ければ全体設定を継承） */
+function currentFreezeBackgroundOptions() {
+  return (draft && draft.backgroundOptions) ? draft.backgroundOptions
+    : resolveBackgroundOptions(appState.backgroundOptions);
+}
+
+function buildFreezeBackgroundColorControls() {
+  buildBackgroundColorRow(els.freezeBackgroundBaseColorRow,
+    function () { return currentFreezeBackgroundOptions().base; },
+    function (hex) {
+      ensureDraftBackgroundOptions().base = hex;
+      els.freezeBackgroundBaseColorInput.value = hex;
+      updateFreezeBackgroundColorPresetSelection();
+    });
+  buildBackgroundColorRow(els.freezeBackgroundAccentColorRow,
+    function () { return currentFreezeBackgroundOptions().accent; },
+    function (hex) {
+      ensureDraftBackgroundOptions().accent = hex;
+      els.freezeBackgroundAccentColorInput.value = hex;
+      updateFreezeBackgroundColorPresetSelection();
+    });
+  updateFreezeBackgroundColorPresetSelection();
+}
+
+function updateFreezeBackgroundColorPresetSelection() {
+  var opts = currentFreezeBackgroundOptions();
+  [[els.freezeBackgroundBaseColorRow, opts.base],
+   [els.freezeBackgroundAccentColorRow, opts.accent]].forEach(function (pair) {
+    var buttons = pair[0].querySelectorAll(".background-color-btn");
+    for (var i = 0; i < buttons.length; i++) {
+      var match = (buttons[i].dataset.hex || "").toLowerCase() === (pair[1] || "").toLowerCase();
+      buttons[i].classList.toggle("selected", match);
+    }
+  });
+}
+
+/**
+ * フリーズ編集画面に入った時／背景処理セレクトを変更した時に呼ぶ。backgroundSelectの
+ * 直下に、選んだ種類に応じた色欄を必ず表示する（折りたたみやスクロールの外に置かない。
+ * 実機で「単色背景flatの色が選べない」不具合の再発防止）。
+ */
+function updateFreezeBackgroundOptionFieldVisibility() {
+  if (!draft) return;
+  var mode = resolveBackgroundMode(draft.background);
+  els.freezeBackgroundOptionsBody.hidden = BACKGROUND_MODES_WITH_OPTIONS.indexOf(mode) < 0;
+  [els.freezeBackgroundBaseField, els.freezeBackgroundAccentField, els.freezeBackgroundScaleField,
+   els.freezeBackgroundAngleField, els.freezeBackgroundOpacityField].forEach(function (field) {
+    var modes = (field.dataset.bgModes || "").split(",");
+    field.hidden = modes.indexOf(mode) < 0;
+  });
+}
+
+/** フリーズ編集画面に入った時、色欄・スライダーの表示値を現在の実効値に合わせる */
+function applyFreezeBackgroundOptionsToInputs() {
+  if (!draft) return;
+  var opts = currentFreezeBackgroundOptions();
+  els.freezeBackgroundBaseColorInput.value = opts.base;
+  els.freezeBackgroundAccentColorInput.value = opts.accent;
+  els.freezeBackgroundScaleSlider.value = opts.scale;
+  els.freezeBackgroundScaleValue.textContent = Number(opts.scale).toFixed(3);
+  els.freezeBackgroundAngleSlider.value = opts.angle;
+  els.freezeBackgroundAngleValue.textContent = Number(opts.angle).toFixed(0) + "°";
+  els.freezeBackgroundOpacitySlider.value = opts.opacity;
+  els.freezeBackgroundOpacityValue.textContent = Number(opts.opacity).toFixed(2);
+  updateFreezeBackgroundColorPresetSelection();
 }
 
 function buildMaskStyleColorRow(rowEl, onPick) {

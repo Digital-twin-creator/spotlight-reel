@@ -809,6 +809,43 @@ test("buildProjectJSON: 旧JSON相当（backgroundOptions未設定）はbackgrou
   project.freezes.forEach(fz => assert.ok(["mono", "dark"].indexOf(fz.background) >= 0));
 });
 
+test("buildProjectJSON: フリーズ単位でbackgroundOptionsを実体化していれば、その行だけbackground_optionsが出力される"
+  + "（実機で「単色背景flatの色がフリーズ単位で選べない」不具合の再発防止）", () => {
+  const state = sampleState();
+  state.freezes[0].background = "flat";
+  state.freezes[0].backgroundOptions = { base: "#ABCDEF", accent: "#000000", scale: 0.02, angle: 45, opacity: 1.0 };
+  const project = core.buildProjectJSON(state);
+  const byTime = t => project.freezes.find(f => f.time === t);
+  assert.deepStrictEqual(byTime(5.5).background_options,
+    { base: "#ABCDEF", accent: "#000000", scale: 0.02, angle: 45, opacity: 1.0 });
+  assert.strictEqual("background_options" in byTime(2.5), false,
+    "backgroundOptionsを実体化していない行はbackground_optionsキー自体を出力しない（全体設定を継承）");
+});
+
+test("parseProjectJSON: freezes[].background_optionsを読み込める。無ければnull（全体設定を継承）", () => {
+  const loaded = core.parseProjectJSON({
+    style: { background: "mono" },
+    freezes: [
+      { time: 0, name: "上書きあり", background: "flat", background_options: { base: "#112233" } },
+      { time: 1, name: "上書きなし", background: "flat" }
+    ]
+  });
+  assert.deepStrictEqual(loaded.freezes[0].backgroundOptions,
+    core.resolveBackgroundOptions({ base: "#112233" }));
+  assert.strictEqual(loaded.freezes[1].backgroundOptions, null);
+});
+
+test("buildProjectJSON/parseProjectJSON: フリーズ単位のbackgroundOptionsを往復できる", () => {
+  const state = sampleState();
+  state.freezes[0].background = "gradient";
+  state.freezes[0].backgroundOptions = { base: "#010101", accent: "#020202", scale: 0.03, angle: 90, opacity: 0.6 };
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  const byTime = t => loaded.freezes.find(f => f.time === t);
+  assert.deepStrictEqual(byTime(5.5).backgroundOptions, state.freezes[0].backgroundOptions);
+  assert.strictEqual(byTime(2.5).backgroundOptions, null);
+});
+
 /* ---- mask_style（人物マスク・影の縁の種類） ---- */
 
 test("resolveMaskStyle: 5種の既知の値はそのまま、未知の値はsolidにフォールバックする", () => {
@@ -933,7 +970,8 @@ test("buildProjectJSON: state.textBackingが既定(outline)ならstyle.text_back
   const project = core.buildProjectJSON(sampleState());
   assert.strictEqual(project.style.text_backing, "outline");
   assert.strictEqual("text_backing_options" in project.style, false);
-  assert.strictEqual(project.style.auto_contrast, true);
+  assert.strictEqual(project.style.auto_contrast, false,
+    "実機で座布団が意図せず表示される不具合の再発防止のためauto_contrastの既定はfalse");
 });
 
 test("buildProjectJSON: state.textBacking/autoContrastが指定されていればstyleに反映される", () => {
@@ -964,10 +1002,10 @@ test("parseProjectJSON: style.text_backing/auto_contrast/text_backing_optionsを
   assert.deepStrictEqual(loaded.textBackingOptions, { color: "#010203", opacity: 0.4, radius: 0.15, padding: 0.25 });
 });
 
-test("parseProjectJSON: style.text_backingが省略されていれば既定値'outline'/true/DEFAULT_TEXT_BACKING_OPTIONSを補う", () => {
+test("parseProjectJSON: style.text_backingが省略されていれば既定値'outline'/false/DEFAULT_TEXT_BACKING_OPTIONSを補う", () => {
   const loaded = core.parseProjectJSON({ freezes: [] });
   assert.strictEqual(loaded.textBacking, "outline");
-  assert.strictEqual(loaded.autoContrast, true);
+  assert.strictEqual(loaded.autoContrast, false);
   assert.deepStrictEqual(loaded.textBackingOptions, core.DEFAULT_TEXT_BACKING_OPTIONS);
 });
 

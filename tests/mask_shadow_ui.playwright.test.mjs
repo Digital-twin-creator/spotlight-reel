@@ -505,7 +505,12 @@ async function main() {
   check(await page.isVisible("#maskPreviewViewResultBtn"), "確認完了後「結果を見る」が表示されている状態を前提にする");
 
   // 描画キャンバスへのタッチはブロックされずすぐ操作できる（全画面モーダルが無くなったため、
-  // 元々このためのEscキー・背景タップ等の回避策も不要になった）
+  // 元々このためのEscキー・背景タップ等の回避策も不要になった）。
+  // このフリーズは既に名前を入力済み＝自動でテロップ移動モードに切り替わっているため、
+  // ここでは明示的に「✏ ブラシ」へ戻してからなぞる（そうしないとタッチはテロップ移動に
+  // 使われ、ブラシ操作の検証にならない）
+  await page.click("#telopModeBrushBtn");
+  await page.waitForTimeout(50);
   const strokesBeforeTouchBack = await page.evaluate(() => draft.strokes.length);
   await dragStroke(page, drawBox, 0.15, 0.6, 0.3, 0.7);
   const strokesAfterTouchBack = await page.evaluate(() => draft.strokes.length);

@@ -100,6 +100,9 @@ async function main() {
   const beforeName = await page.evaluate(() => !!computeEditorTelopBox());
   check(beforeName === false, "名前未入力の間はテロップ仮表示が無い（computeEditorTelopBoxがnull）");
 
+  const modeBeforeName = await page.evaluate(() => draft.telopEditMode);
+  check(modeBeforeName === "brush", "名前入力前の既定モードは「✏ ブラシ」: " + modeBeforeName);
+
   await page.fill(".title-line-text", "山田太郎");
   await page.waitForTimeout(100);
   const afterName = await page.evaluate(() => !!computeEditorTelopBox());
@@ -109,7 +112,18 @@ async function main() {
   check(defaultPos === null, "ドラッグ前はdraft.titlePosがnull（全体設定[0.5,0.78]を継承）");
 
   console.log("");
-  console.log("=== テロップをドラッグすると位置(draft.titlePos)が変わり、ストロークは増えない ===");
+  console.log("=== 名前を入力した直後は自動で「✥ テロップ移動」モードに切り替わる ===");
+  const modeAfterName = await page.evaluate(() => draft.telopEditMode);
+  check(modeAfterName === "move", "名前入力直後、draft.telopEditModeが'move'になる: " + modeAfterName);
+  const moveBtnSelectedAfterName = await page.evaluate(
+    () => document.getElementById("telopModeMoveBtn").classList.contains("selected"));
+  check(moveBtnSelectedAfterName, "「✥ テロップ移動」ボタンがselected状態になる");
+  const brushBtnNotSelectedAfterName = await page.evaluate(
+    () => document.getElementById("telopModeBrushBtn").classList.contains("selected"));
+  check(!brushBtnNotSelectedAfterName, "「✏ ブラシ」ボタンはselectedでなくなる");
+
+  console.log("");
+  console.log("=== テロップ移動モード中はテロップをドラッグすると位置(draft.titlePos)が変わり、ストロークは増えない ===");
   const strokesBefore = await page.evaluate(() => draft.strokes.length);
   const from = await telopCenterInPage(page);
   check(from !== null, "テロップの現在位置(ページ座標)を取得できる");
@@ -127,7 +141,53 @@ async function main() {
     "テロップをドラッグしてもストロークは増えない（ブラシ描画と競合しない）: " + strokesBefore + " -> " + strokesAfter);
 
   console.log("");
+  console.log("=== テロップ移動モード中は、テロップから離れた場所（ブロック外）をドラッグしても、"
+    + "描画されず唯一のテロップブロックを掴んで動かす ===");
+  const posBeforeOutsideGrab = await page.evaluate(() => draft.titlePos);
+  const strokesBeforeOutsideGrab = await page.evaluate(() => draft.strokes.length);
+  const drawBoxForGrab = await page.locator("#drawCanvas").boundingBox();
+  // テロップは現在(0.25, 0.3)付近にあるので、明らかに離れた右上（かつ映像下端の
+  // 「ブラシ／テロップ移動」切替バーとは重ならない位置）から始める
+  const outsideGrabFrom = { x: drawBoxForGrab.x + drawBoxForGrab.width * 0.85, y: drawBoxForGrab.y + drawBoxForGrab.height * 0.15 };
+  const outsideGrabTo = await ratioToPage(page, 0.6, 0.5);
+  await dragMouse(page, outsideGrabFrom, outsideGrabTo, 10);
+  await page.waitForTimeout(100);
+  const posAfterOutsideGrab = await page.evaluate(() => draft.titlePos);
+  const strokesAfterOutsideGrab = await page.evaluate(() => draft.strokes.length);
+  check(strokesAfterOutsideGrab === strokesBeforeOutsideGrab,
+    "テロップ移動モードではブロック外から始めたドラッグでもストロークは増えない: "
+    + strokesBeforeOutsideGrab + " -> " + strokesAfterOutsideGrab);
+  check(JSON.stringify(posAfterOutsideGrab) !== JSON.stringify(posBeforeOutsideGrab),
+    "テロップ移動モードではブロック外から始めたドラッグでも、最も近い（唯一の）テロップブロックを掴んで"
+    + "位置が変わる: " + JSON.stringify(posBeforeOutsideGrab) + " -> " + JSON.stringify(posAfterOutsideGrab));
+
+  console.log("");
+  console.log("=== 「✏ ブラシ」に切り替えると、テロップの上をなぞっても移動ではなく通常どおりストロークが描かれる ===");
+  await page.click("#telopModeBrushBtn");
+  await page.waitForTimeout(50);
+  const modeAfterBrushClick = await page.evaluate(() => draft.telopEditMode);
+  check(modeAfterBrushClick === "brush", "「✏ ブラシ」をタップするとdraft.telopEditMode='brush'になる: " + modeAfterBrushClick);
+  const brushBtnSelectedAfterClick = await page.evaluate(
+    () => document.getElementById("telopModeBrushBtn").classList.contains("selected"));
+  check(brushBtnSelectedAfterClick, "「✏ ブラシ」ボタンがselected状態になる");
+
+  const strokesBeforeOnTelop = await page.evaluate(() => draft.strokes.length);
+  const posBeforeOnTelop = await page.evaluate(() => draft.titlePos);
+  const onTelopFrom = await telopCenterInPage(page);
+  const onTelopTo = await ratioToPage(page, 0.4, 0.4);
+  await dragMouse(page, onTelopFrom, onTelopTo, 8);
+  await page.waitForTimeout(100);
+  const strokesAfterOnTelop = await page.evaluate(() => draft.strokes.length);
+  const posAfterOnTelop = await page.evaluate(() => draft.titlePos);
+  check(strokesAfterOnTelop === strokesBeforeOnTelop + 1,
+    "ブラシモードでは、テロップの上をなぞってもドラッグ移動ではなく通常どおりストロークが描かれる: "
+    + strokesBeforeOnTelop + " -> " + strokesAfterOnTelop);
+  check(JSON.stringify(posAfterOnTelop) === JSON.stringify(posBeforeOnTelop),
+    "ブラシモードでは、テロップの上をなぞってもdraft.titlePosは変わらない: " + JSON.stringify(posAfterOnTelop));
+
+  console.log("");
   console.log("=== テロップの外（映像の何もない場所）をドラッグすると、通常どおりストロークが描かれる ===");
+  const strokesBeforeOutsideDraw = await page.evaluate(() => draft.strokes.length);
   const drawBox = await page.locator("#drawCanvas").boundingBox();
   // テロップは現在(0.25, 0.3)付近にあるので、離れた右下をなぞる
   await dragMouse(
@@ -138,8 +198,15 @@ async function main() {
   );
   await page.waitForTimeout(100);
   const strokesAfterDraw = await page.evaluate(() => draft.strokes.length);
-  check(strokesAfterDraw === strokesBefore + 1,
+  check(strokesAfterDraw === strokesBeforeOutsideDraw + 1,
     "テロップ以外の場所をなぞると通常どおりストロークが1本追加される: " + strokesAfterDraw);
+
+  console.log("");
+  console.log("=== 「✥ テロップ移動」に戻すと、再びドラッグで位置を変えられる ===");
+  await page.click("#telopModeMoveBtn");
+  await page.waitForTimeout(50);
+  const modeAfterMoveClick = await page.evaluate(() => draft.telopEditMode);
+  check(modeAfterMoveClick === "move", "「✥ テロップ移動」をタップするとdraft.telopEditMode='move'になる: " + modeAfterMoveClick);
 
   console.log("");
   console.log("=== 画面端に向けてドラッグすると、はみ出さないようクランプされる ===");
@@ -228,6 +295,22 @@ async function main() {
   check(JSON.stringify(project2.style.title_pos) === JSON.stringify([0.5, 0.78]) &&
     project2.style.title_size === 0.06 && project2.style.title_align === "center",
     "全体設定(style)は既定値[0.5,0.78]/0.06/centerのまま（後方互換）: " + JSON.stringify(project2.style));
+
+  console.log("");
+  console.log("=== 「切り抜き：自動」のフリーズはブラシが不要なので、既定でテロップ移動モードになる ===");
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  await page.selectOption("#maskModeSelect", "auto");
+  await page.waitForTimeout(50);
+  const modeForAutoMask = await page.evaluate(() => draft.telopEditMode);
+  check(modeForAutoMask === "move",
+    "切り抜き方法を「自動」にするとdraft.telopEditModeの既定が'move'になる: " + modeForAutoMask);
+  const moveBtnSelectedForAutoMask = await page.evaluate(
+    () => document.getElementById("telopModeMoveBtn").classList.contains("selected"));
+  check(moveBtnSelectedForAutoMask, "「✥ テロップ移動」ボタンがselected状態になる（切り抜き：自動）");
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
