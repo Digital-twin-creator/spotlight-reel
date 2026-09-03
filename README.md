@@ -388,6 +388,7 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
     "brush_shape": "round",
     "mono_contrast": 1.3,
     "background": "mono",
+    "mask_style": "solid",
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     "title_font": "assets/fonts/Anton-Regular.ttf",
     "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf",
@@ -487,7 +488,7 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
   `x` は幅、`y` は高さ、`width` は幅を基準にします。
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`reveal_sec` / `slide_sec` / `hold_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
-  `background` / `font` / `audio_during_freeze` /
+  `background` / `background_options` / `mask_style` / `mask_style_options` / `font` / `audio_during_freeze` /
   `title_pos` / `title_size` / `title_align` / `title_font` / `title_font_jp` / `title_color` /
   `title_outline_color` / `brush_fade_sec` /
   `color_source` / `mask_options` / `reveal` / `shadow` を個別上書き可能。
@@ -596,6 +597,38 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
     適用されます。サーバー確認プレビュー（`extract.yml`）でも同じ処理を通すため、
     本番レンダリングと確認結果の見た目は一致します。無効にしたい場合は明示的に
     `"include_held_objects": false` を指定してください。
+- `background`：背景（人物以外）の塗り方。`mono`（既定・モノクロ化。`mono_contrast`で
+  コントラスト強調可） / `dark`（元のカラーを30%の明るさに減光） / `flat`（単色塗り） /
+  `halftone`（元フレームの明るさに応じたドット径のドットスクリーン。暗い場所ほどドットが
+  大きく`accent`色に、明るい場所は`base`地のまま） / `stripes`（`angle`度に傾けた
+  `base`/`accent`の縞模様） / `grid`（`stripes`と直交する縞を重ねた格子模様） /
+  `grain`（`mono`背景にフィルムグレイン＝粒状ノイズを重ねる。強さは`opacity`） /
+  `gradient`（`base`から`accent`への縦グラデーション）のいずれか。未指定・不明な値は
+  `mono` として扱われます（後方互換：この項目が無い既存のJSONもそのまま動きます）。
+  フリーズごとに上書き可能（エディタの背景処理セレクトが対応）。
+  - `background_options`：`flat`/`halftone`/`stripes`/`grid`/`grain`/`gradient`で使う
+    色・模様の設定。`{"base": "#RRGGBB", "accent": "#RRGGBB", "scale": 出力幅比,
+    "angle": 度, "opacity": 0〜1}`。省略可（省略時は`base: "#FFFFFF"`,
+    `accent: "#000000"`, `scale: 0.02`, `angle: 45`, `opacity: 1.0`。`mono`/`dark`では
+    参照されません）。`scale`はドット間隔・縞の周期（`halftone`/`stripes`/`grid`）を
+    出力幅に対する比率で指定し、`angle`は`stripes`/`grid`の傾き、`opacity`は`grain`の
+    グレインの強さです。エディタの全体設定で種類・色（プリセット＋自由入力）・
+    スケール・角度を指定でき、全既定値のときはJSON出力からキー自体が省略されます
+    （完全後方互換）。
+- `mask_style`：人物マスク・影の縁の種類。`solid`（既定・現状どおりの滑らかな縁） /
+  `halftone`（アルファの中間値をドットスクリーン化し、縁がドットに溶けたような見た目に
+  なる） / `pixel`（アルファを`scale`の格子で量子化し、ブロック状の縁になる） /
+  `outline`（アルファの輪郭に沿って`width`の線を`color`で描く。マスクの形自体は変えない） /
+  `rough`（アルファ境界にノイズ変位を加えてギザギザにする）のいずれか。未指定・不明な値は
+  `solid` として扱われます（後方互換）。**影（`shadow`）にも同じ`mask_style`が適用されます**
+  （人物のカラー化・影の輪郭の両方が同じ加工を通ります）。フリーズごとに上書き可能
+  （エディタの「マスクの縁」セレクトが対応）。
+  - `mask_style_options`：`halftone`/`pixel`/`outline`/`rough`で使う設定。
+    `{"scale": 出力幅比, "color": "#RRGGBB", "width": 出力幅比}`。省略可（省略時は
+    `scale: 0.012`, `color: "#FFFFFF"`, `width: 0.004`）。`scale`は`halftone`のドット間隔・
+    `pixel`の量子化ブロックサイズ・`rough`の変位量、`color`/`width`は`outline`の線の色・
+    太さです。エディタの全体設定で種類・色・スケール・線の太さを指定でき、全既定値の
+    ときはJSON出力からキー自体が省略されます（完全後方互換）。
 - `reveal`：人物の出現アニメーション。`wipe`（既定・下から上へ`reveal_sec`秒で拭き取るように
   表示） / `fade`（`reveal_sec`秒でフェードイン） / `none`（一瞬で全体を表示し、
   `reveal_sec`秒だけ動かず静止して待つ。`color_source: "auto"` のときのみ意味を持つ） /
@@ -609,7 +642,8 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
 - `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
-- 新しいキー（`mono_contrast` / `title_font` /
+- 新しいキー（`mono_contrast` / `background` / `background_options` / `mask_style` /
+  `mask_style_options` / `title_font` /
   `title_font_jp` / `title_bounce` / `title_pos` / `title_size` / `title_align` / `logo` /
   `color_source` / `mask_options` / `reveal`）は
   すべて省略可能で、省略時は旧バージョンの `render.py` と同じ見た目で動きます
