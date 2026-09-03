@@ -2297,6 +2297,141 @@ try:
     ux0, ux1, uy0, uy1 = text_bbox_xy(unclamped_layers)
     check(ux0 < sz_safe_rect[0], "safe_zone_rect省略時は画面端（0,0)まで許容され、安全域より外側に出る")
 
+    # ------------------------------------------------------------------
+    # 20) 常時表示の透かしロゴ（watermark）：resolve_watermark_config/composite_watermark/
+    #     render_watermark_frameと、load_project()がwatermarkキーを伝搬することを検証する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== watermark：resolve_watermark_configのフォールバック ===")
+    check(render.resolve_watermark_config(None) is None,
+          "watermark省略時（None/{}相当）はNoneを返す（透かし演出なし）")
+    check(render.resolve_watermark_config({}) is None,
+          "watermark={}（image等が無い辞書）もNoneを返す")
+    wm_cfg_default = render.resolve_watermark_config({"image": "logo.png"})
+    check(wm_cfg_default["position"] == "bottom_right", "position省略時はbottom_right")
+    check(abs(wm_cfg_default["width_ratio"] - 0.16) < 1e-9, "width_ratio省略時は0.16")
+    check(abs(wm_cfg_default["opacity"] - 0.85) < 1e-9, "opacity省略時は0.85")
+    check(abs(wm_cfg_default["margin"] - 0.03) < 1e-9, "margin省略時は0.03")
+    check(wm_cfg_default["shine"] == dict(render.WATERMARK_SHINE_DEFAULTS), "shine省略時はWATERMARK_SHINE_DEFAULTS")
+    check(wm_cfg_default["spin"] == dict(render.WATERMARK_SPIN_DEFAULTS), "spin省略時はWATERMARK_SPIN_DEFAULTS")
+
+    wm_cfg_bad_pos = render.resolve_watermark_config({"image": "logo.png", "position": "center"})
+    check(wm_cfg_bad_pos["position"] == "bottom_right", "未知のpositionはbottom_rightにフォールバックする")
+
+    wm_cfg_custom = render.resolve_watermark_config({
+        "image": "logo.png", "position": "top_left", "width_ratio": 0.2, "opacity": 0.5, "margin": 0.05,
+        "shine": {"enabled": False, "interval_sec": 2, "sec": 0.3},
+        "spin": {"enabled": False, "interval_sec": 5, "sec": 1.0},
+    })
+    check(wm_cfg_custom["position"] == "top_left" and abs(wm_cfg_custom["width_ratio"] - 0.2) < 1e-9
+          and abs(wm_cfg_custom["opacity"] - 0.5) < 1e-9 and abs(wm_cfg_custom["margin"] - 0.05) < 1e-9,
+          "指定した値がそのまま使われる")
+    check(wm_cfg_custom["shine"]["enabled"] is False and wm_cfg_custom["spin"]["enabled"] is False,
+          "shine/spinはそれぞれ個別にenabled=falseにできる")
+
+    print("")
+    print("=== watermark：composite_watermarkの四隅配置・width_scale（spin）・opacity ===")
+    wm_font_test_bgr, wm_font_test_alpha = render.load_logo_image(os.path.join("examples", "store_logo.png"))
+    check(wm_font_test_bgr is not None, "テスト用ロゴ画像を読み込めた")
+    wm_luma_test = render.build_logo_luminance_mask(wm_font_test_bgr, wm_font_test_alpha)
+
+    wm_w, wm_h = 400, 700
+    wm_base_frame = np.full((wm_h, wm_w, 3), 40, dtype=np.uint8)
+    for pos, expect_left, expect_top in (
+        ("top_left", True, True), ("top_right", False, True),
+        ("bottom_left", True, False), ("bottom_right", False, False),
+    ):
+        cfg = render.resolve_watermark_config({"image": "x", "position": pos})
+        out = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                          wm_w, wm_h, cfg)
+        diffmask = np.any(out != wm_base_frame, axis=2)
+        ys, xs = np.nonzero(diffmask)
+        check(len(xs) > 0, f"{pos}：透かしロゴが実際に描画されている")
+        is_left = xs.mean() < wm_w / 2.0
+        is_top = ys.mean() < wm_h / 2.0
+        check(is_left == expect_left and is_top == expect_top,
+              f"{pos}：想定どおりの角（左={is_left} 上={is_top}）に配置される")
+
+    cfg_full = render.resolve_watermark_config({"image": "x", "position": "bottom_right"})
+    out_full = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                           wm_w, wm_h, cfg_full, width_scale=1.0)
+    out_half = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                           wm_w, wm_h, cfg_full, width_scale=0.3)
+    width_full = np.count_nonzero(np.any(out_full != wm_base_frame, axis=2).any(axis=0))
+    width_half = np.count_nonzero(np.any(out_half != wm_base_frame, axis=2).any(axis=0))
+    check(0 < width_half < width_full,
+          f"width_scaleを小さくすると横幅が実際に縮む（spin演出）: full={width_full} half={width_half}")
+
+    cfg_opaque = render.resolve_watermark_config({"image": "x", "opacity": 1.0})
+    cfg_faint = render.resolve_watermark_config({"image": "x", "opacity": 0.1})
+    out_opaque = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                             wm_w, wm_h, cfg_opaque)
+    out_faint = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                            wm_w, wm_h, cfg_faint)
+    diff_opaque = int(np.abs(out_opaque.astype(int) - wm_base_frame.astype(int)).sum())
+    diff_faint = int(np.abs(out_faint.astype(int) - wm_base_frame.astype(int)).sum())
+    check(diff_faint < diff_opaque,
+          f"opacityが低いほど背景との差分が小さい（薄く重なる）: opaque_diff={diff_opaque} faint_diff={diff_faint}")
+
+    print("")
+    print("=== watermark：render_watermark_frameのshine/spinタイミング（interval_secごとにsec秒間だけ発生） ===")
+    wm_cfg_timed = render.resolve_watermark_config({
+        "image": "x", "shine": {"enabled": True, "interval_sec": 1.0, "sec": 0.4},
+        "spin": {"enabled": True, "interval_sec": 2.0, "sec": 0.5},
+    })
+    f_no_shine = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                wm_luma_test, wm_w, wm_h, 0.8, wm_cfg_timed)  # shine非アクティブ(0.8%1.0=0.8>=0.4)
+    f_shine_active = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                    wm_luma_test, wm_w, wm_h, 0.2, wm_cfg_timed)  # shineアクティブ
+    check(bool(np.any(f_no_shine != f_shine_active)),
+          "shineアクティブな時刻とそうでない時刻とで見た目が異なる")
+
+    f_no_spin_width = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                  wm_w, wm_h, wm_cfg_timed, width_scale=1.0)
+    f_spin_frame = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                  wm_luma_test, wm_w, wm_h, 2.25, wm_cfg_timed)
+    # spin: interval_sec=2.0周期のうちsec=0.5がアクティブ。t=2.25 → phase=0.25 <0.5 → アクティブ、
+    # local_t=0.5 → width_scale=|cos(pi*0.5)|=0（最も細くなる瞬間）
+    width_normal = np.count_nonzero(np.any(f_no_spin_width != wm_base_frame, axis=2).any(axis=0))
+    width_spin = np.count_nonzero(np.any(f_spin_frame != wm_base_frame, axis=2).any(axis=0))
+    check(width_spin < width_normal * 0.3,
+          f"spinアクティブ区間の中間（local_t=0.5）ではロゴがほぼ細い線状に潰れる: "
+          f"normal={width_normal} spin={width_spin}")
+
+    f_disabled_cfg = render.resolve_watermark_config({"image": "x", "shine": {"enabled": False},
+                                                        "spin": {"enabled": False}})
+    f_disabled_a = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                  wm_luma_test, wm_w, wm_h, 0.2, f_disabled_cfg)
+    f_disabled_b = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                                  wm_luma_test, wm_w, wm_h, 2.25, f_disabled_cfg)
+    check(bool(np.array_equal(f_disabled_a, f_disabled_b)),
+          "shine/spinをそれぞれenabled=falseにすれば、時刻によらず常に同じ見た目になる")
+
+    check(render.render_watermark_frame(wm_base_frame.copy(), None, None, None, wm_w, wm_h, 0.0, wm_cfg_timed)
+          is not None, "wm_bgr=Noneでもクラッシュしない（何もしない）")
+    unchanged = render.render_watermark_frame(wm_base_frame.copy(), None, None, None, wm_w, wm_h, 0.0, wm_cfg_timed)
+    check(bool(np.array_equal(unchanged, wm_base_frame)), "wm_bgr=Noneのときはフレームを変更しない")
+
+    print("")
+    print("=== watermark：load_project()がトップレベルのwatermarkキーを伝搬する ===")
+    import json as json_mod_wm
+    wm_proj_path = os.path.join(tmpdir, "wm_project.json")
+    with open(wm_proj_path, "w", encoding="utf-8") as wf:
+        json_mod_wm.dump({"version": 1, "video": "input.mp4", "style": {}, "freezes": [],
+                          "watermark": {"image": "logo.png", "position": "top_left"}}, wf)
+    loaded_wm_proj = render.load_project(wm_proj_path)
+    check("watermark" in loaded_wm_proj and loaded_wm_proj["watermark"] is not None,
+          "load_project()の戻り値にwatermarkキーが含まれ、JSONの内容がそのまま伝わる（プレースホルダ実装の後方互換回帰）")
+    check(loaded_wm_proj["watermark"]["position"] == "top_left",
+          f"watermarkの内容自体もJSONどおりに読み込める: {loaded_wm_proj['watermark']}")
+
+    wm_proj_no_key_path = os.path.join(tmpdir, "wm_project_none.json")
+    with open(wm_proj_no_key_path, "w", encoding="utf-8") as wf:
+        json_mod_wm.dump({"version": 1, "video": "input.mp4", "style": {}, "freezes": []}, wf)
+    loaded_wm_none = render.load_project(wm_proj_no_key_path)
+    check(loaded_wm_none.get("watermark") is None,
+          "watermarkキーが無い旧JSONではNoneのまま（完全後方互換）")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 

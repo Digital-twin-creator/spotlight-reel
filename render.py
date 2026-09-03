@@ -315,6 +315,7 @@ def load_project(json_path):
         "style": style,
         "freezes": freezes,
         "logo": proj.get("logo"),   # 無指定ならNone（ロゴ演出なし）
+        "watermark": proj.get("watermark"),  # 無指定ならNone（透かしロゴなし）
     }
 
 
@@ -2731,6 +2732,139 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
 
 
 # ---------------------------------------------------------------------------
+# 常時表示の透かしロゴ（watermark）。ラストロゴ（着地演出、上のrender_logo_frame）とは
+# 別の、動画全体を通して表示され続ける小さいロゴのオーバーレイ。四隅のいずれかに固定表示し、
+# 周期的にshine（斜めの光沢がロゴの輝度マスクにscreen合成で走る）・spin（横幅をcosで
+# 縮めて戻す簡易Y軸回転）を行う。フリーズ中もロゴ演出中も表示し続けるが、ラストロゴの
+# 着地演出（タメ+縮小+セトル。着地後のhold/sweep/fadeは対象外）の間だけ非表示にする
+# （大きな着地ロゴと重なって煩雑に見えるのを避けるため）。
+# shine/spinの周期（interval_sec）は各区間（フリーズ1つ・末尾のロゴ演出等）の開始時点を
+# 0秒とする簡易実装（動画全体を通じた単一の時計ではない）。
+# ---------------------------------------------------------------------------
+
+WATERMARK_POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
+DEFAULT_WATERMARK_POSITION = "bottom_right"
+WATERMARK_DEFAULTS = {"position": DEFAULT_WATERMARK_POSITION, "width_ratio": 0.16,
+                       "opacity": 0.85, "margin": 0.03}
+WATERMARK_SHINE_DEFAULTS = {"enabled": True, "interval_sec": 4.0, "sec": 0.6}
+WATERMARK_SPIN_DEFAULTS = {"enabled": True, "interval_sec": 9.0, "sec": 0.8}
+
+
+def resolve_watermark_config(wm_cfg):
+    """
+    watermark（{image, position, width_ratio, opacity, margin, shine, spin}）を解決する。
+    JSON側に無ければNoneを返す（透かし演出なし＝完全後方互換）。
+    """
+    if not wm_cfg:
+        return None
+    cfg = dict(WATERMARK_DEFAULTS)
+    position = wm_cfg.get("position") or DEFAULT_WATERMARK_POSITION
+    if position not in WATERMARK_POSITIONS:
+        warn(f"watermark.position='{position}' は未知の値です。'{DEFAULT_WATERMARK_POSITION}' として扱います。")
+        position = DEFAULT_WATERMARK_POSITION
+    cfg["position"] = position
+    cfg["width_ratio"] = max(0.01, float(wm_cfg.get("width_ratio") or WATERMARK_DEFAULTS["width_ratio"]))
+    cfg["opacity"] = float(np.clip(wm_cfg.get("opacity", WATERMARK_DEFAULTS["opacity"]), 0.0, 1.0))
+    cfg["margin"] = max(0.0, float(wm_cfg.get("margin") if wm_cfg.get("margin") is not None
+                                    else WATERMARK_DEFAULTS["margin"]))
+    cfg["image"] = wm_cfg.get("image")
+
+    shine = dict(WATERMARK_SHINE_DEFAULTS)
+    if isinstance(wm_cfg.get("shine"), dict):
+        shine.update(wm_cfg["shine"])
+    shine["enabled"] = bool(shine.get("enabled", True))
+    shine["interval_sec"] = max(0.1, float(shine.get("interval_sec") or WATERMARK_SHINE_DEFAULTS["interval_sec"]))
+    shine["sec"] = max(0.01, float(shine.get("sec") or WATERMARK_SHINE_DEFAULTS["sec"]))
+    cfg["shine"] = shine
+
+    spin = dict(WATERMARK_SPIN_DEFAULTS)
+    if isinstance(wm_cfg.get("spin"), dict):
+        spin.update(wm_cfg["spin"])
+    spin["enabled"] = bool(spin.get("enabled", True))
+    spin["interval_sec"] = max(0.1, float(spin.get("interval_sec") or WATERMARK_SPIN_DEFAULTS["interval_sec"]))
+    spin["sec"] = max(0.01, float(spin.get("sec") or WATERMARK_SPIN_DEFAULTS["sec"]))
+    cfg["spin"] = spin
+
+    return cfg
+
+
+def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, width_scale=1.0):
+    """
+    frameの指定コーナー（cfg["position"]）に透かしロゴを合成する。width_scale(0〜1)は
+    spin演出用の横幅スケール（1.0で等倍、0に近いほど横につぶれる＝Y軸回転の見た目）。
+    アンカーした角の辺は width_scale によらず固定される（その角から縮む・伸びる）。
+    """
+    if wm_bgr is None or cfg["opacity"] <= 0:
+        return frame
+    lh, lw = wm_bgr.shape[:2]
+    if lw <= 0 or lh <= 0:
+        return frame
+    base_scale = (W * cfg["width_ratio"]) / lw
+    new_w = max(1, int(round(lw * base_scale * max(0.0, width_scale))))
+    new_h = max(1, int(round(lh * base_scale)))
+    interp = cv2.INTER_AREA if base_scale < 1.0 else cv2.INTER_LINEAR
+    resized_bgr = cv2.resize(wm_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
+    resized_alpha = cv2.resize(wm_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
+    resized_alpha = resized_alpha * cfg["opacity"]
+
+    margin_px = int(round(cfg["margin"] * W))
+    position = cfg["position"]
+    if position == "top_left":
+        x0, y0 = margin_px, margin_px
+    elif position == "top_right":
+        x0, y0 = W - margin_px - new_w, margin_px
+    elif position == "bottom_left":
+        x0, y0 = margin_px, H - margin_px - new_h
+    else:  # bottom_right
+        x0, y0 = W - margin_px - new_w, H - margin_px - new_h
+    x1, y1 = x0 + new_w, y0 + new_h
+    sx0, sy0 = max(0, -x0), max(0, -y0)
+    sx1, sy1 = new_w - max(0, x1 - W), new_h - max(0, y1 - H)
+    dx0, dy0 = max(0, x0), max(0, y0)
+    dx1, dy1 = min(W, x1), min(H, y1)
+    if dx1 <= dx0 or dy1 <= dy0 or sx1 <= sx0 or sy1 <= sy0:
+        return frame
+
+    out = frame.copy()
+    patch_bgr = resized_bgr[sy0:sy1, sx0:sx1]
+    patch_a = resized_alpha[sy0:sy1, sx0:sx1]
+    region = out[dy0:dy1, dx0:dx1].astype(np.float32)
+    blended = region * (1.0 - patch_a) + patch_bgr * patch_a
+    out[dy0:dy1, dx0:dx1] = np.clip(blended, 0, 255).astype(np.uint8)
+    return out
+
+
+def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
+    """
+    経過秒数tにおける透かしロゴをframeに合成して返す（wm_bgr/cfgが無ければ何もしない）。
+    shine（斜めの光沢）・spin（横幅cosの簡易Y軸回転）は、それぞれのinterval_secごとに
+    sec秒間だけ発生する（interval_sec周期のうち先頭sec秒間がアクティブ）。
+    """
+    if wm_bgr is None or cfg is None:
+        return frame
+
+    layer_bgr = wm_bgr.astype(np.float32)
+    shine = cfg["shine"]
+    if shine["enabled"]:
+        phase = math.fmod(t, shine["interval_sec"])
+        if phase < shine["sec"]:
+            sweep_t = phase / shine["sec"]
+            strength = sweep_highlight_layer(wm_luma, sweep_t)
+            layer_bgr = screen_blend_white(layer_bgr, strength)
+    layer_bgr = np.clip(layer_bgr, 0, 255).astype(np.uint8)
+
+    width_scale = 1.0
+    spin = cfg["spin"]
+    if spin["enabled"]:
+        phase = math.fmod(t, spin["interval_sec"])
+        if phase < spin["sec"]:
+            local_t = phase / spin["sec"]
+            width_scale = abs(math.cos(math.pi * local_t))
+
+    return composite_watermark(frame, layer_bgr, wm_alpha, W, H, cfg, width_scale=width_scale)
+
+
+# ---------------------------------------------------------------------------
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
@@ -2895,7 +3029,9 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
 
 def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video_path=None,
                         logo_bgr=None, logo_alpha=None, logo_luma=None,
-                        logo_params=None, logo_bg_color=None):
+                        logo_params=None, logo_bg_color=None,
+                        watermark_bgr=None, watermark_alpha=None, watermark_luma=None,
+                        watermark_cfg=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
       1. 静止（背景処理のみ、固定0.3秒）
@@ -2947,18 +3083,30 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     bounce = bool(fz.get("title_bounce"))
     line_anims = [resolve_line_anim_params(line, bounce) for line in visible_title_lines]
 
+    # 透かしロゴ（watermark）：このフリーズ内で経過した秒数を独自に計測し（区間ごとの
+    # 簡易時計）、フレームごとに合成する。ラストロゴの着地演出（タメ+縮小+セトル）の間
+    # だけ非表示にする（下のhold(4)ループでlanding_total_framesとして計算）
+    wm_state = {"t": 0.0}
+
+    def apply_wm(img, suppress=False):
+        wm_state["t"] += 1.0 / fps
+        if suppress or watermark_bgr is None:
+            return img
+        return render_watermark_frame(img, watermark_bgr, watermark_alpha, watermark_luma,
+                                       W, H, wm_state["t"], watermark_cfg)
+
     # 1) 出現アニメ開始まで静止
     for _ in range(plan["n_pre"]):
-        yield bg.copy()
+        yield apply_wm(bg.copy())
 
     # 2) ①塗り(reveal)：人物の出現（ブラシが伸びる／自動マスクをワイプ・フェード／
     #    reveal="none"なら即座に全体表示）。元の位置のまま＝影は隠れている
     for i in range(plan["n_reveal"]):
         progress = (i + 1) / float(plan["n_reveal"])
         mask, paint = mask_and_paint_at(ctx, W, H, progress)
-        yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint,
-                                mask_style=mask_style, mask_style_options=mask_style_opts,
-                                subject_outline_cfg=subject_outline_cfg)
+        yield apply_wm(composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint,
+                                         mask_style=mask_style, mask_style_options=mask_style_opts,
+                                         subject_outline_cfg=subject_outline_cfg))
 
     done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
     shadow_done_mask = None
@@ -2987,11 +3135,11 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         for i in range(plan["n_slide_in"]):
             t = (i + 1) / float(plan["n_slide_in"])
             eased = ease_out_cubic(t)
-            yield composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
-                                    slide_dx=slide_dx * eased, slide_dy=slide_dy * eased,
-                                    shadow_mask_u8=shadow_done_mask,
-                                    mask_style=mask_style, mask_style_options=mask_style_opts,
-                                    subject_outline_cfg=subject_outline_cfg)
+            yield apply_wm(composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
+                                             slide_dx=slide_dx * eased, slide_dy=slide_dy * eased,
+                                             shadow_mask_u8=shadow_done_mask,
+                                             mask_style=mask_style, mask_style_options=mask_style_opts,
+                                             subject_outline_cfg=subject_outline_cfg))
 
     # 「着地」した状態（スライド済み。影が無ければ元の位置のまま）を1回だけ作って使い回す
     landed = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
@@ -3021,6 +3169,10 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     solid_bg_frame = None
     if plan["show_logo"] and logo_bg_color is not None:
         solid_bg_frame = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
+    # 透かしロゴは、ラストロゴの着地演出（暗転＋タメ+縮小+セトル）の間だけ非表示にする
+    # （着地後のhold/sweep/fadeの間は再び表示する）
+    landing_total_frames = (int(round(logo_landing_total_sec(logo_params) * fps))
+                             if plan["show_logo"] and logo_params else 0)
 
     # 4) ③静止(hold)。着地の瞬間（=このhold区間の最初のフレーム）にテロップのフェードイン開始し、
     #    hold区間の終わりまで表示し続ける（hold_secに完全に連動）
@@ -3043,9 +3195,11 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
                 layer["bgr"], layer["alpha"], scale, tx, ty, layer["cx"], layer["cy"])
             out = blend_telop(out, f_bgr, f_alpha, fade)
 
+        suppress_wm = False
         if plan["show_logo"]:
             rel = i - logo_start_in_hold
             if rel >= 0:
+                suppress_wm = rel < (blackout_frames + landing_total_frames)
                 if blackout_frames > 0 and rel < blackout_frames:
                     # 直前のシーン（テロップ込みの静止フレーム）から0.1秒（LOGO_CUT_BLACKOUT_SEC）
                     # かけて暗転し、そこでロゴ演出へカットする（クロスフェードではない）
@@ -3057,7 +3211,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
                     backdrop = solid_bg_frame if solid_bg_frame is not None else out
                     out = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
                                              W, H, logo_elapsed, logo_params, logo_bg_color)
-        yield out
+        yield apply_wm(out, suppress=suppress_wm)
 
     # 5) 影演出のスライドバック：通常再生に戻る直前に人物を元位置へ戻し、影を隠す
     if shadow_cfg and plan["n_slide_back"] > 0:
@@ -3071,7 +3225,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
                                     subject_outline_cfg=subject_outline_cfg)
             for layer in line_layers:
                 out = blend_telop(out, layer["bgr"], layer["alpha"], 1.0)
-            yield out
+            yield apply_wm(out)
 
 
 def compute_preview_sample_time(line0_anim_sec, line1_delay_sec, line1_anim_sec):
@@ -3588,6 +3742,18 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 if logo_at == "end":
                     logo_extra_frames = logo_blackout_frames + logo_total_frames
 
+        # --- 常時表示の透かしロゴ（watermark）の解決（無指定ならwatermark_cfg=Noneで以後素通り） ---
+        watermark_cfg = resolve_watermark_config(project.get("watermark"))
+        watermark_bgr, watermark_alpha, watermark_luma = None, None, None
+        if watermark_cfg:
+            watermark_path = resolve_path(watermark_cfg.get("image"), [os.getcwd(), json_dir, SCRIPT_DIR])
+            watermark_bgr, watermark_alpha = load_logo_image(watermark_path)
+            if watermark_bgr is None:
+                warn(f"透かしロゴ画像が見つかりません（{watermark_cfg.get('image')}）。watermarkは無効化します。")
+                watermark_cfg = None
+            else:
+                watermark_luma = build_logo_luminance_mask(watermark_bgr, watermark_alpha)
+
         plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_blackout_frames=(logo_blackout_frames if logo_at == "last_freeze" else 0))
@@ -3646,6 +3812,17 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         pending = list(plans)      # まだ挿入していないフリーズ
         written = 0
         last_out_frame = None
+        # 通常再生（フリーズ・ロゴ演出以外）の透かしロゴ用の簡易時計（動画全体で1つ、
+        # フリーズ内部の時計とは別。iter_freeze_frames/末尾ロゴ演出はそれぞれ自前で持つ）
+        wm_playback_t = 0.0
+
+        def watermark_playback(img):
+            nonlocal wm_playback_t
+            wm_playback_t += 1.0 / fps
+            if watermark_bgr is None:
+                return img
+            return render_watermark_frame(img, watermark_bgr, watermark_alpha, watermark_luma,
+                                           W, H, wm_playback_t, watermark_cfg)
 
         try:
             for i, frame in enumerate(iter_frames(reader, W, H)):
@@ -3655,15 +3832,18 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                     for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
                                                 cache_dir=cache_dir, video_path=video_path,
                                                 logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
-                                                logo_params=logo_params, logo_bg_color=logo_bg_color):
+                                                logo_params=logo_params, logo_bg_color=logo_bg_color,
+                                                watermark_bgr=watermark_bgr, watermark_alpha=watermark_alpha,
+                                                watermark_luma=watermark_luma, watermark_cfg=watermark_cfg):
                         writer.stdin.write(f.tobytes())
                         last_out_frame = f
                         written += 1
                         if written % 15 == 0:
                             print(f"\r  {written}/{total_out} フレーム",
                                   end="", flush=True)
-                writer.stdin.write(np.ascontiguousarray(frame).tobytes())
-                last_out_frame = frame
+                out_frame = watermark_playback(np.ascontiguousarray(frame))
+                writer.stdin.write(out_frame.tobytes())
+                last_out_frame = out_frame
                 written += 1
                 if written % 15 == 0:
                     print(f"\r  {written}/{total_out} フレーム", end="", flush=True)
@@ -3673,7 +3853,9 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
                                             cache_dir=cache_dir, video_path=video_path,
                                             logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
-                                            logo_params=logo_params, logo_bg_color=logo_bg_color):
+                                            logo_params=logo_params, logo_bg_color=logo_bg_color,
+                                            watermark_bgr=watermark_bgr, watermark_alpha=watermark_alpha,
+                                            watermark_luma=watermark_luma, watermark_cfg=watermark_cfg):
                     writer.stdin.write(f.tobytes())
                     last_out_frame = f
                     written += 1
@@ -3689,9 +3871,14 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                     backdrop = np.ascontiguousarray(last_out_frame)
                 blackout_frames = logo_blackout_frames_for(fps)
                 last_frame_f32 = np.ascontiguousarray(last_out_frame).astype(np.float32)
+                # 透かしロゴは、着地演出（暗転＋タメ+縮小+セトル）の間だけ非表示にする
+                # （着地後のhold/sweep/fadeでは再び表示する。iter_freeze_frames内のロゴ演出と同じ方針）
+                landing_total_frames_end = int(round(logo_landing_total_sec(logo_params) * fps))
+                wm_logo_t = 0.0
                 for i in range(blackout_frames):
                     bt = (i + 1) / float(blackout_frames)
                     out_frame = np.clip(last_frame_f32 * (1.0 - bt), 0, 255).astype(np.uint8)
+                    wm_logo_t += 1.0 / fps
                     writer.stdin.write(out_frame.tobytes())
                     written += 1
                     if written % 15 == 0:
@@ -3699,6 +3886,10 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 for i in range(logo_total_frames):
                     out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
                                                    W, H, i / float(fps), logo_params, logo_bg_color)
+                    wm_logo_t += 1.0 / fps
+                    if watermark_bgr is not None and i >= landing_total_frames_end:
+                        out_frame = render_watermark_frame(out_frame, watermark_bgr, watermark_alpha,
+                                                             watermark_luma, W, H, wm_logo_t, watermark_cfg)
                     writer.stdin.write(out_frame.tobytes())
                     written += 1
                     if written % 15 == 0:
