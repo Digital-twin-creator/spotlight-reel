@@ -26,12 +26,23 @@
       "direction": "auto",
       "offset_y": 0.02,
       "blur": 0.0
+    },
+    "subject_outline": {
+      "enabled": true,
+      "width": 0.006
     }
   },
   "freezes": [
     {
       "time": 2.5,
-      "name": "赤い人",
+      "name": {
+        "lines": [
+          {
+            "text": "赤い人",
+            "text_backing": "box"
+          }
+        ]
+      },
       "sfx": "shakin",
       "brush_shape": "round",
       "strokes": [
@@ -136,5 +147,16 @@
     "at": "last_freeze",
     "background": "auto",
     "sfx": "impact"
+  },
+  "watermark": {
+    "image": "store_logo.png",
+    "position": "bottom_right",
+    "width_ratio": 0.14
+  },
+  "hashtags": {
+    "text": "#京都 #祇園 #ClubIRIS",
+    "position": "top",
+    "backing": "box",
+    "always": true
   }
 }

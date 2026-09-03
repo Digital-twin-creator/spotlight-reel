@@ -510,7 +510,9 @@ def make_sample_json(video_filename):
     freezes = [
         {
             "time": 2.5,
-            "name": "赤い人",              # 日本語 → title_font_jp（NotoSansJP）が使われる
+            # 日本語 → title_font_jp（NotoSansJP）が使われる。text_backing="box"を明示し、
+            # 座布団（半透明の角丸矩形）を敷いたテロップの見本にする
+            "name": {"lines": [{"text": "赤い人", "text_backing": "box"}]},
             "sfx": "shakin",
             "brush_shape": "round",
             # circle_positions(2.5)の1人目は画面中心より左寄りに描かれるため、
@@ -561,6 +563,9 @@ def make_sample_json(video_filename):
                 "color": "#1A1A2E", "alpha": 0.8, "distance": 0.03,
                 "direction": "auto", "offset_y": 0.02, "blur": 0.0,
             },
+            # 人物の輪郭線（subject_outline）。mask_style=outlineとは独立の演出で、
+            # 人物マスクの外周に細い縁取りを重ねる（座布団と併用できることの見本にもなる）
+            "subject_outline": {"enabled": True, "width": 0.006},
         },
         "freezes": freezes,
         "logo": {
@@ -570,6 +575,21 @@ def make_sample_json(video_filename):
             "sfx": "impact",               # donより低く重い、ラストロゴ着地の既定SE
             # duration_sec / start_width_ratio / hold_big_sec / shrink_sec / settle_sec /
             # sweep_sec / flash_strength / width_ratio は省略時の既定値のまま使う
+        },
+        # 常時表示の透かしロゴ（watermark）。ラストロゴと同じダミー画像を流用し、
+        # 動画全体を通して右下に小さく表示され続ける（shine/spinは既定で有効）
+        "watermark": {
+            "image": "store_logo.png",
+            "position": "bottom_right",
+            "width_ratio": 0.14,
+        },
+        # ハッシュタグ表示（hashtags）。telopの既定位置(下寄り)と被らないよう上端に配置し、
+        # 座布団（box）でも安全域からはみ出さないことの見本にする
+        "hashtags": {
+            "text": "#京都 #祇園 #ClubIRIS",
+            "position": "top",
+            "backing": "box",
+            "always": True,
         },
     }
     return project
