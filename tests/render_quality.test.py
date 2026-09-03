@@ -1963,6 +1963,96 @@ try:
     check(bool(np.array_equal(legacy_dark, legacy_dark_default_opts)),
           "dark：background_options省略時と既定値明示時で出力が完全一致する（後方互換）")
 
+    # ------------------------------------------------------------------
+    # 16) 人物マスクの縁の種類（mask_style）：resolve_mask_style/resolve_mask_style_options
+    #     のフォールバックと、composite_layersでの5種の見た目・影への適用を検証する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 人物マスクの縁の種類：resolve_mask_style/resolve_mask_style_optionsのフォールバック ===")
+    check(render.resolve_mask_style("halftone") == "halftone", "既知の値はそのまま通す")
+    check(render.resolve_mask_style("unknown-style") == "solid", "未知の値はsolidにフォールバックする")
+    check(render.resolve_mask_style(None) == "solid", "Noneはsolidにフォールバックする")
+
+    default_mask_opts = render.resolve_mask_style_options({})
+    check(default_mask_opts == dict(render.MASK_STYLE_OPTIONS_DEFAULTS),
+          "mask_style_options省略時はMASK_STYLE_OPTIONS_DEFAULTSがそのまま使われる")
+    bad_mask_opts = render.resolve_mask_style_options({"mask_style_options": {
+        "scale": 0, "color": "not-a-color", "width": -1}})
+    check(bad_mask_opts["scale"] > 0, "scale=0は下限でクランプされ0除算にならない")
+    check(bad_mask_opts["color"] == render.MASK_STYLE_OPTIONS_DEFAULTS["color"],
+          "不正なcolorは既定色にフォールバックする")
+    check(bad_mask_opts["width"] > 0, "widthが負の値でも下限でクランプされる")
+
+    print("")
+    print("=== 人物マスクの縁の種類：composite_layersでsolid/halftone/pixel/outline/roughの見た目を検証 ===")
+    ms_h, ms_w = 200, 200
+    ms_bg = np.full((ms_h, ms_w, 3), 200, dtype=np.uint8)
+    ms_color = np.full((ms_h, ms_w, 3), (255, 120, 40), dtype=np.uint8)
+    ms_mask = np.zeros((ms_h, ms_w), dtype=np.uint8)
+    cv2.circle(ms_mask, (ms_w // 2, ms_h // 2), 60, 255, -1, lineType=cv2.LINE_AA)
+    ms_opts = render.resolve_mask_style_options({"mask_style_options": {
+        "scale": 0.02, "color": "#00FF00", "width": 0.02}})
+
+    solid_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h, mask_style="solid")
+    unknown_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h, mask_style="not-a-style")
+    check(bool(np.array_equal(solid_out, unknown_out)),
+          "composite_layers：未知のmask_styleはsolidとして扱われる（フォールバック）")
+    default_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h)
+    check(bool(np.array_equal(solid_out, default_out)),
+          "composite_layers：mask_style省略時はsolid（既存の丸い縁のまま）と完全一致する（後方互換）")
+
+    halftone_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h,
+                                            mask_style="halftone", mask_style_options=ms_opts)
+    check(bool(np.any(halftone_out != solid_out)), "halftone：solidと異なる見た目になる（縁がドットに溶ける）")
+    center_solid = solid_out[ms_h // 2, ms_w // 2]
+    # ドットの中心/隙間どちらに当たるかでピクセル単位ではブレるため、中心付近の
+    # 小さなパッチ平均で比較する（内部は依然ほぼ人物色を保っているはず）
+    patch_solid_mean = solid_out[ms_h // 2 - 5:ms_h // 2 + 5, ms_w // 2 - 5:ms_w // 2 + 5].mean(axis=(0, 1))
+    patch_halftone_mean = halftone_out[ms_h // 2 - 5:ms_h // 2 + 5, ms_w // 2 - 5:ms_w // 2 + 5].mean(axis=(0, 1))
+    check(float(np.abs(patch_solid_mean - patch_halftone_mean).sum()) < 90,
+          "halftone：マスク中心（完全に不透明な内部）は引き続きほぼ人物色のまま（周辺パッチ平均で比較）")
+
+    pixel_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h,
+                                         mask_style="pixel", mask_style_options=ms_opts)
+    check(bool(np.any(pixel_out != solid_out)), "pixel：solidと異なる見た目になる（縁がブロック状になる）")
+
+    rough_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h,
+                                         mask_style="rough", mask_style_options=ms_opts)
+    check(bool(np.any(rough_out != solid_out)), "rough：solidと異なる見た目になる（縁がギザギザになる）")
+    center_rough = rough_out[ms_h // 2, ms_w // 2]
+    check(int(np.abs(center_solid.astype(int) - center_rough.astype(int)).sum()) < 30,
+          "rough：マスク中心（縁から十分離れた内部）はほぼ変化しない（境界だけが歪む）")
+
+    outline_out = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h,
+                                           mask_style="outline", mask_style_options=ms_opts)
+    edge_point = outline_out[ms_h // 2, ms_w // 2 + 60]
+    check(bool(np.array_equal(edge_point, np.array([0, 255, 0]))),
+          f"outline：mask_style_options.colorで指定した縁の線（#00FF00→BGR(0,255,0)）が輪郭上に描かれる: {edge_point}")
+    outline_center = outline_out[ms_h // 2, ms_w // 2]
+    check(bool(np.array_equal(outline_center, center_solid)),
+          "outline：縁に線を追加するだけでマスクの形自体（中心の色）は変えない")
+
+    print("")
+    print("=== 人物マスクの縁の種類：shadowにも同じmask_styleが適用される ===")
+    ms_shadow_cfg = {"color": "#000000", "alpha": 0.9, "distance": 0.15, "direction": "right",
+                      "offset_y": 0.0, "blur": 0.0}
+    shadow_solid = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h, shadow_cfg=ms_shadow_cfg,
+                                            slide_dx=ms_w * 0.15, slide_dy=0.0, mask_style="solid")
+    shadow_outline = render.composite_layers(ms_bg, ms_color, ms_mask, ms_w, ms_h, shadow_cfg=ms_shadow_cfg,
+                                              slide_dx=ms_w * 0.15, slide_dy=0.0,
+                                              mask_style="outline", mask_style_options=ms_opts)
+    # 影は人物の「元の位置」（スライドしていない場所）に残る。その輪郭付近にも
+    # mask_style_options.color の線が乗っているはず（人物側の輪郭とは別の位置）。
+    shadow_edge_point = shadow_outline[ms_h // 2, ms_w // 2 - 60].astype(int)
+    # shadow_alphaが1.0未満のため背景がわずかに透けるが、指定した緑(#00FF00)に近い
+    # 色になっているはず（厳密な完全一致ではなく、緑成分が支配的であることを見る）
+    diff_from_outline_color = int(np.abs(shadow_edge_point - np.array([0, 255, 0])).sum())
+    check(diff_from_outline_color < 40,
+          f"shadow：影の輪郭（人物の元の位置）にも同じ縁の線が（影のalphaぶん薄れつつ）描かれる: "
+          f"{shadow_edge_point} diff={diff_from_outline_color}")
+    check(bool(np.any(shadow_outline != shadow_solid)),
+          "shadow：mask_style='outline'はsolidと異なる見た目になる（影の縁にも線が乗る）")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 

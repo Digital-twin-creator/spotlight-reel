@@ -80,6 +80,12 @@ DEFAULT_STYLE = {
                                    #  include_held_objectsはmodel="rvm-mobilenetv3"の時だけ意味を持ち、
                                    #  省略時はTrue＝isnet-general-useの前景のうち人物マスクに接する
                                    #  部分を合成して手に持った物の欠落を補う。merge_held_objects_with_isnet参照）
+    "mask_style": "solid",        # solid | halftone | pixel | outline | rough（人物マスク・影の縁の種類。
+                                   # shadowにも同じ加工を適用する。apply_mask_style/composite_layers参照）
+    # mask_style_optionsもここには持たせない（background_optionsと同じ理由。JSON側に無ければ
+    # resolve_mask_style_options()がMASK_STYLE_OPTIONS_DEFAULTSを補う）。
+    # {"scale": 出力幅比（halftone/pixel/roughで使用）, "color": "#RRGGBB"（outlineの線色）,
+    #  "width": 出力幅比（outlineの線の太さ）}
     "reveal": "wipe",             # wipe | fade | brush | none（人物の出現アニメ）
     # color_source（カラー化に使うマスク）もここには持たせない。省略時は上のmaskキーを
     # 読み替える（resolve_color_source参照）ことで、新旧どちらのJSONも同じロジックで扱える。
@@ -1052,8 +1058,129 @@ def render_shadow_layer(mask_u8, shadow_cfg):
     return shape_mask, alpha, color_bgr
 
 
+# ---------------------------------------------------------------------------
+# 人物マスクの縁の種類（mask_style）。人物のカラー化・影の両方の「形」を
+# 同じ加工ロジックで通す（shadowにも同じmask_styleを適用する）。
+# ---------------------------------------------------------------------------
+
+MASK_STYLES = ("solid", "halftone", "pixel", "outline", "rough")
+# mask_style_optionsの既定値。scale/widthは出力幅に対する比率。
+MASK_STYLE_OPTIONS_DEFAULTS = {"scale": 0.012, "color": "#FFFFFF", "width": 0.004}
+
+
+def resolve_mask_style(mode):
+    """未知の値は solid にフォールバックする（既存のresolve_background_modeと同じ方針）"""
+    mode = mode or "solid"
+    if mode not in MASK_STYLES:
+        warn(f"mask_style='{mode}' は未知の値です。solid として扱います。")
+        return "solid"
+    return mode
+
+
+def resolve_mask_style_options(fz):
+    """
+    mask_style_options（{"scale","color","width"}）を解決する。JSON側に無ければ
+    MASK_STYLE_OPTIONS_DEFAULTSをそのまま使う（solidでは参照されないため実質無害）。
+    """
+    opts = dict(MASK_STYLE_OPTIONS_DEFAULTS)
+    raw = fz.get("mask_style_options")
+    if isinstance(raw, dict):
+        opts.update(raw)
+    opts["scale"] = max(0.001, float(opts.get("scale") or MASK_STYLE_OPTIONS_DEFAULTS["scale"]))
+    opts["color"] = validate_hex_color(opts.get("color"), MASK_STYLE_OPTIONS_DEFAULTS["color"],
+                                        "mask_style_options.color")
+    opts["width"] = max(0.0005, float(opts.get("width") or MASK_STYLE_OPTIONS_DEFAULTS["width"]))
+    return opts
+
+
+def render_mask_style_halftone(alpha_u8, options, W):
+    """
+    アルファの中間値をドットスクリーン化する（新聞印刷の網点と同じ考え方をアルファに適用）。
+    完全に不透明なセルはほぼセル全体を覆う大きなドットになり、境界の半透明セルは小さな
+    ドットになるため、縁がドットに溶けたような見た目になる。scaleがドット間隔。
+    """
+    H, Wf = alpha_u8.shape
+    cell = max(3, int(round(options["scale"] * W)))
+    gw = max(1, Wf // cell + 1)
+    gh = max(1, H // cell + 1)
+    small = cv2.resize(alpha_u8, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    canvas = np.zeros((H, Wf), dtype=np.uint8)
+    max_r = cell * 0.5 * 0.95
+    for gy in range(gh):
+        cy = int(gy * cell + cell / 2)
+        if cy >= H:
+            continue
+        for gx in range(gw):
+            cx = int(gx * cell + cell / 2)
+            if cx >= Wf:
+                continue
+            r = int(round(max_r * float(small[gy, gx])))
+            if r >= 1:
+                cv2.circle(canvas, (cx, cy), r, 255, -1, lineType=cv2.LINE_AA)
+    return canvas
+
+
+def render_mask_style_pixel(alpha_u8, options, W):
+    """アルファをscaleの格子で量子化する（縮小平均→最近傍拡大でブロック状の縁になる）"""
+    H, Wf = alpha_u8.shape
+    cell = max(2, int(round(options["scale"] * W)))
+    gw = max(1, Wf // cell + 1)
+    gh = max(1, H // cell + 1)
+    small = cv2.resize(alpha_u8, (gw, gh), interpolation=cv2.INTER_AREA)
+    return cv2.resize(small, (Wf, H), interpolation=cv2.INTER_NEAREST)
+
+
+def render_mask_style_rough(alpha_u8, options, W):
+    """
+    アルファ境界にノイズ変位を加えてギザギザにする。低解像度の乱数場を滑らかに拡大して
+    (dx, dy)の変位マップにし、cv2.remapでアルファを歪ませる（内部・外部は一様なため見た目上は
+    境界だけがギザギザになる）。scaleが変位量（出力幅に対する比率）。
+    """
+    H, Wf = alpha_u8.shape
+    amp = max(0.0, options["scale"]) * W
+    small_h, small_w = max(2, H // 16), max(2, Wf // 16)
+    rng = np.random.default_rng()
+    noise_x = cv2.resize(rng.uniform(-1, 1, (small_h, small_w)).astype(np.float32), (Wf, H),
+                          interpolation=cv2.INTER_CUBIC)
+    noise_y = cv2.resize(rng.uniform(-1, 1, (small_h, small_w)).astype(np.float32), (Wf, H),
+                          interpolation=cv2.INTER_CUBIC)
+    xx, yy = np.meshgrid(np.arange(Wf, dtype=np.float32), np.arange(H, dtype=np.float32))
+    map_x = xx + noise_x * amp
+    map_y = yy + noise_y * amp
+    return cv2.remap(alpha_u8, map_x, map_y, interpolation=cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def apply_mask_style(alpha_u8, mode, options, W):
+    """mask_styleに応じてアルファマスクの「形」を加工する（solid/outlineは形自体は変えない）"""
+    if mode == "halftone":
+        return render_mask_style_halftone(alpha_u8, options, W)
+    if mode == "pixel":
+        return render_mask_style_pixel(alpha_u8, options, W)
+    if mode == "rough":
+        return render_mask_style_rough(alpha_u8, options, W)
+    return alpha_u8
+
+
+def render_mask_outline(alpha_u8, options, W):
+    """
+    アルファの輪郭にwidthの線をcolorで描く。2値化した形を膨張・収縮した差分から
+    境界に沿ったバンド（幅は両側にwidth_pxずつ）を作り、それをoptions.colorで塗る。
+    戻り値: (境界バンド uint8, 色 BGR)
+    """
+    width_px = max(1, int(round(options["width"] * W)))
+    binary = np.where(alpha_u8 >= 128, 255, 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    outer = cv2.dilate(binary, kernel, iterations=width_px)
+    inner = cv2.erode(binary, kernel, iterations=width_px)
+    band = cv2.subtract(outer, inner)
+    color_bgr = hex_to_bgr(options.get("color"), default=(255, 255, 255))
+    return band, color_bgr
+
+
 def composite_layers(bg, color, mask_u8, W, H, shadow_cfg=None,
-                      slide_dx=0.0, slide_dy=0.0, paint_mask_u8=None, shadow_mask_u8=None):
+                      slide_dx=0.0, slide_dy=0.0, paint_mask_u8=None, shadow_mask_u8=None,
+                      mask_style="solid", mask_style_options=None):
     """
     1フレーム分の合成処理（マスクの作り方＝ブラシ／自動／自動＋ブラシ には依存しない、
     共通の「マスクさえあれば合成できる」部分）。
@@ -1063,23 +1190,39 @@ def composite_layers(bg, color, mask_u8, W, H, shadow_cfg=None,
     固定して描き、人物レイヤー（mask_u8）だけをずらすことで、そのズレ量ぶん影が
     「現れる」ように見せる（影自体は動かさない）。shadow.source（影に使うマスクの種類）が
     color_sourceと異なる場合、shadow_mask_u8にその別マスクを渡す。
+    mask_style（solid/halftone/pixel/outline/rough）は人物・影どちらの形にも同じ加工・
+    同じmask_style_optionsを通す（outlineはアルファの形自体は変えず、境界に沿った線を
+    それぞれの位置に追加で重ねる）。
     """
     out = bg.astype(np.float32)
+    mask_style = resolve_mask_style(mask_style)
+    style_opts = mask_style_options or MASK_STYLE_OPTIONS_DEFAULTS
 
     if shadow_cfg:
         sm_mask = shadow_mask_u8 if shadow_mask_u8 is not None else mask_u8
+        sm_mask = apply_mask_style(sm_mask, mask_style, style_opts, W)
         shadow_mask, shadow_alpha, shadow_color = render_shadow_layer(sm_mask, shadow_cfg)
         sm = (shadow_mask.astype(np.float32) / 255.0)[:, :, None] * shadow_alpha
         out = out * (1.0 - sm) + np.array(shadow_color, dtype=np.float32) * sm
+        if mask_style == "outline":
+            band, outline_color = render_mask_outline(sm_mask, style_opts, W)
+            bandf = (band.astype(np.float32) / 255.0)[:, :, None] * shadow_alpha
+            out = out * (1.0 - bandf) + np.array(outline_color, dtype=np.float32) * bandf
 
+    styled_mask = apply_mask_style(mask_u8, mask_style, style_opts, W)
     if abs(slide_dx) >= 0.5 or abs(slide_dy) >= 0.5:
-        person_mask = translate_mask(mask_u8, slide_dx, slide_dy)
+        person_mask = translate_mask(styled_mask, slide_dx, slide_dy)
         person_color = translate_mask(color, slide_dx, slide_dy)
     else:
-        person_mask = mask_u8
+        person_mask = styled_mask
         person_color = color
     m = (person_mask.astype(np.float32) / 255.0)[:, :, None]
     out = out * (1.0 - m) + person_color.astype(np.float32) * m
+
+    if mask_style == "outline":
+        band, outline_color = render_mask_outline(person_mask, style_opts, W)
+        bandf = (band.astype(np.float32) / 255.0)[:, :, None]
+        out = out * (1.0 - bandf) + np.array(outline_color, dtype=np.float32) * bandf
 
     if paint_mask_u8 is not None:
         pm = (paint_mask_u8.astype(np.float32) / 255.0)[:, :, None] * BRUSH_PAINT_ALPHA
@@ -2491,6 +2634,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     cache_dir = cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME)
     video_path = video_path or "input"
     ctx = build_mask_context(fz, frame, W, H, cache_dir, video_path)
+    mask_style = resolve_mask_style(fz.get("mask_style"))
+    mask_style_opts = resolve_mask_style_options(fz)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -2514,7 +2659,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     for i in range(plan["n_reveal"]):
         progress = (i + 1) / float(plan["n_reveal"])
         mask, paint = mask_and_paint_at(ctx, W, H, progress)
-        yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint)
+        yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint,
+                                mask_style=mask_style, mask_style_options=mask_style_opts)
 
     done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
     shadow_done_mask = None
@@ -2545,11 +2691,13 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             eased = ease_out_cubic(t)
             yield composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * eased, slide_dy=slide_dy * eased,
-                                    shadow_mask_u8=shadow_done_mask)
+                                    shadow_mask_u8=shadow_done_mask,
+                                    mask_style=mask_style, mask_style_options=mask_style_opts)
 
     # 「着地」した状態（スライド済み。影が無ければ元の位置のまま）を1回だけ作って使い回す
     landed = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
-                               slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_done_mask)
+                               slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_done_mask,
+                               mask_style=mask_style, mask_style_options=mask_style_opts)
 
     # ブラシ（またはauto+brushのreveal="brush"）で描いた場合のみ、完了時点で先端に残っている
     # 「乾いていない白い絵の具」を brush_fade_sec 秒かけてフェードアウトさせる。
@@ -2618,7 +2766,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             remaining = 1.0 - ease_out_cubic(t)
             out = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining,
-                                    shadow_mask_u8=shadow_done_mask)
+                                    shadow_mask_u8=shadow_done_mask,
+                                    mask_style=mask_style, mask_style_options=mask_style_opts)
             for layer in line_layers:
                 out = blend_telop(out, layer["bgr"], layer["alpha"], 1.0)
             yield out
@@ -2659,6 +2808,8 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     video_path = video_path or "input"
     ctx = build_mask_context(fz, frame, W, H, cache_dir, video_path)
     mask, _paint = mask_and_paint_at(ctx, W, H, 1.0)
+    mask_style = resolve_mask_style(fz.get("mask_style"))
+    mask_style_opts = resolve_mask_style_options(fz)
 
     slide_dx, slide_dy = 0.0, 0.0
     shadow_mask = None
@@ -2666,9 +2817,11 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
         shadow_mask = build_shadow_mask(fz, frame, W, H, cache_dir, video_path, shadow_cfg, mask)
         slide_dx, slide_dy = compute_shadow_slide_vector(shadow_mask, W, shadow_cfg)
 
-    before_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, shadow_mask_u8=shadow_mask)
+    before_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, shadow_mask_u8=shadow_mask,
+                                   mask_style=mask_style, mask_style_options=mask_style_opts)
     after_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
-                                  slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask)
+                                  slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask,
+                                  mask_style=mask_style, mask_style_options=mask_style_opts)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -2701,7 +2854,8 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
         # after_imgは既に全行を着地状態で焼き込んでいるため、行アニメの確認画像は
         # テロップを含まない着地後の背景（before/afterと同じcomposite_layers）から作り直す
         lines_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
-                                      slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask)
+                                      slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask,
+                                      mask_style=mask_style, mask_style_options=mask_style_opts)
         for line, layer, (anim, anim_sec) in zip(visible_title_lines, line_layers, anim_params):
             fade, scale, tx, ty = compute_line_frame_state(
                 anim, anim_sec, line["delay_sec"], sample_t, W, H)

@@ -809,6 +809,106 @@ test("buildProjectJSON: 旧JSON相当（backgroundOptions未設定）はbackgrou
   project.freezes.forEach(fz => assert.ok(["mono", "dark"].indexOf(fz.background) >= 0));
 });
 
+/* ---- mask_style（人物マスク・影の縁の種類） ---- */
+
+test("resolveMaskStyle: 5種の既知の値はそのまま、未知の値はsolidにフォールバックする", () => {
+  ["solid", "halftone", "pixel", "outline", "rough"].forEach(m => {
+    assert.strictEqual(core.resolveMaskStyle(m), m);
+  });
+  assert.strictEqual(core.resolveMaskStyle("rainbow"), "solid");
+  assert.strictEqual(core.resolveMaskStyle(undefined), "solid");
+  assert.strictEqual(core.resolveMaskStyle(null), "solid");
+});
+
+test("resolveMaskStyleOptions: 未指定/不正値はDEFAULT_MASK_STYLE_OPTIONSで補う", () => {
+  const opts = core.resolveMaskStyleOptions({});
+  assert.deepStrictEqual(opts, core.DEFAULT_MASK_STYLE_OPTIONS);
+  const invalid = core.resolveMaskStyleOptions({ scale: 0, color: "not-a-color", width: -1 });
+  assert.ok(invalid.scale > 0);
+  assert.strictEqual(invalid.color, core.DEFAULT_MASK_STYLE_OPTIONS.color);
+  assert.ok(invalid.width > 0);
+});
+
+test("resolveMaskStyleOptions: 正しい値はそのまま(hexは大文字化)採用する", () => {
+  const opts = core.resolveMaskStyleOptions({ scale: 0.02, color: "#ff0000", width: 0.01 });
+  assert.strictEqual(opts.scale, 0.02);
+  assert.strictEqual(opts.color, "#FF0000");
+  assert.strictEqual(opts.width, 0.01);
+});
+
+test("buildProjectJSON: state.maskStyleが既定(solid)ならstyle.mask_styleは'solid'、mask_style_optionsキーは省略する", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual(project.style.mask_style, "solid");
+  assert.strictEqual("mask_style_options" in project.style, false);
+});
+
+test("buildProjectJSON: state.maskStyleが指定されていればstyle.mask_styleに反映される（未知値はsolidにフォールバック）", () => {
+  const state = Object.assign(sampleState(), { maskStyle: "outline" });
+  assert.strictEqual(core.buildProjectJSON(state).style.mask_style, "outline");
+  const invalidState = Object.assign(sampleState(), { maskStyle: "invalid" });
+  assert.strictEqual(core.buildProjectJSON(invalidState).style.mask_style, "solid");
+});
+
+test("buildProjectJSON: state.maskStyleOptionsが既定と異なればstyle.mask_style_optionsを明示的に出力する", () => {
+  const state = Object.assign(sampleState(), {
+    maskStyle: "halftone",
+    maskStyleOptions: { scale: 0.02, color: "#123456", width: 0.01 }
+  });
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.mask_style_options, { scale: 0.02, color: "#123456", width: 0.01 });
+});
+
+test("buildProjectJSON: フリーズのmask_styleは常に出力され、未知値はsolidにフォールバックする", () => {
+  const state = sampleState();
+  state.freezes[0].maskStyle = "rough";
+  state.freezes[1].maskStyle = "not-a-style";
+  const project = core.buildProjectJSON(state);
+  const byTime = t => project.freezes.find(f => f.time === t);
+  assert.strictEqual(byTime(5.5).mask_style, "rough");
+  assert.strictEqual(byTime(2.5).mask_style, "solid");
+});
+
+test("parseProjectJSON: style.mask_style/style.mask_style_optionsを読み込める", () => {
+  const loaded = core.parseProjectJSON({
+    style: { mask_style: "pixel", mask_style_options: { scale: 0.03, color: "#010203", width: 0.006 } },
+    freezes: []
+  });
+  assert.strictEqual(loaded.maskStyle, "pixel");
+  assert.deepStrictEqual(loaded.maskStyleOptions, { scale: 0.03, color: "#010203", width: 0.006 });
+});
+
+test("parseProjectJSON: style.mask_styleが省略されていれば既定値'solid'/DEFAULT_MASK_STYLE_OPTIONSを補う", () => {
+  const loaded = core.parseProjectJSON({ freezes: [] });
+  assert.strictEqual(loaded.maskStyle, "solid");
+  assert.deepStrictEqual(loaded.maskStyleOptions, core.DEFAULT_MASK_STYLE_OPTIONS);
+});
+
+test("parseProjectJSON: フリーズにmask_styleが無ければstyle.mask_styleを継承する", () => {
+  const loaded = core.parseProjectJSON({
+    style: { mask_style: "outline" },
+    freezes: [{ time: 0, name: "" }, { time: 1, name: "", mask_style: "pixel" }]
+  });
+  assert.strictEqual(loaded.freezes[0].maskStyle, "outline");
+  assert.strictEqual(loaded.freezes[1].maskStyle, "pixel");
+});
+
+test("buildProjectJSON/parseProjectJSON: 全体設定のmaskStyle/maskStyleOptionsを往復できる", () => {
+  const state = Object.assign(sampleState(), {
+    maskStyle: "rough",
+    maskStyleOptions: { scale: 0.008, color: "#ABCDEF", width: 0.002 }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.maskStyle, "rough");
+  assert.deepStrictEqual(loaded.maskStyleOptions, state.maskStyleOptions);
+});
+
+test("buildProjectJSON: 旧JSON相当（maskStyleOptions未設定）はmask_style_optionsキーを出力せず、solidのみの旧仕様と完全後方互換", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual("mask_style_options" in project.style, false);
+  project.freezes.forEach(fz => assert.strictEqual(fz.mask_style, "solid"));
+});
+
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }

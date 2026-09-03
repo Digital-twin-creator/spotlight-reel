@@ -511,6 +511,16 @@
           </select>
         </div>
         <div class="field grow">
+          <label>マスクの縁（このフリーズだけ全体設定を上書き）</label>
+          <select id="maskStyleSelect">
+            <option value="solid">solid（現状のまま）</option>
+            <option value="halftone">halftone（ドットスクリーン）</option>
+            <option value="pixel">pixel（ブロック状）</option>
+            <option value="outline">outline（輪郭線）</option>
+            <option value="rough">rough（ギザギザ）</option>
+          </select>
+        </div>
+        <div class="field grow">
           <label>ブラシ形状</label>
           <select id="brushShapeSelect">
             <option value="round">round（丸筆）</option>
@@ -667,6 +677,31 @@
             <option value="brush">brush（ブラシのストロークを使う）</option>
             <option value="auto">auto（自動切り抜きを使う）</option>
           </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>mask_style（人物マスク・影の縁の種類・全体既定） <span class="muted">フリーズごとに上書き可</span></label>
+        <select id="maskStyleDefaultSelect">
+          <option value="solid">solid（現状のまま）</option>
+          <option value="halftone">halftone（ドットスクリーン）</option>
+          <option value="pixel">pixel（ブロック状）</option>
+          <option value="outline">outline（輪郭線）</option>
+          <option value="rough">rough（ギザギザ）</option>
+        </select>
+      </div>
+      <div id="maskStyleOptionsBody" hidden>
+        <div class="field">
+          <label>縁の色 color（outlineのみ）</label>
+          <div class="row wrap" id="maskStyleColorRow"></div>
+          <input type="text" id="maskStyleColorInput" placeholder="#FFFFFF" inputmode="none" style="width:7em;margin-top:4px;">
+        </div>
+        <div class="field">
+          <label>模様のスケール scale（halftone/pixel/roughの細かさ） <span class="brush-slider-value" id="maskStyleScaleValue">0.012</span></label>
+          <input type="range" id="maskStyleScaleSlider" min="0.003" max="0.05" step="0.001" value="0.012">
+        </div>
+        <div class="field">
+          <label>縁の線の太さ width（outlineのみ） <span class="brush-slider-value" id="maskStyleWidthValue">0.004</span></label>
+          <input type="range" id="maskStyleWidthSlider" min="0.001" max="0.02" step="0.001" value="0.004">
         </div>
       </div>
       <div class="field">
@@ -877,6 +912,7 @@ var DEFAULT_STYLE = {
   // のみ使う（parseProjectJSON参照）。新しいJSONの書き出しにはcolor_sourceを使う。
   mask: "brush",
   mask_options: null,
+  mask_style: "solid",
   reveal: "wipe"
   // 影（フィルム色）演出はここに既定値を含めない（意図的。render.pyのDEFAULT_STYLEと同じ理由）。
   // JSON側に"shadow"キーが無ければ既定で有効（parseProjectJSON参照）。ここに既定値を
@@ -919,6 +955,35 @@ function resolveBackgroundOptions(opts) {
   var opacityRaw = (opts.opacity !== null && opts.opacity !== undefined && !isNaN(Number(opts.opacity)))
     ? Number(opts.opacity) : DEFAULT_BACKGROUND_OPTIONS.opacity;
   return { base: base, accent: accent, scale: scale, angle: angle, opacity: clamp01(opacityRaw) };
+}
+/** 人物マスク・影の縁の種類（render.pyのMASK_STYLESと同じ値） */
+var MASK_STYLES = ["solid", "halftone", "pixel", "outline", "rough"];
+/** mask_style_optionsの既定値（render.pyのMASK_STYLE_OPTIONS_DEFAULTSと同じ値） */
+var DEFAULT_MASK_STYLE_OPTIONS = { scale: 0.012, color: "#FFFFFF", width: 0.004 };
+/** 未知の値は solid にフォールバックする（render.pyのresolve_mask_styleと同じ方針） */
+function resolveMaskStyle(mode) {
+  return MASK_STYLES.indexOf(mode) >= 0 ? mode : "solid";
+}
+/** mask_style種類<select>の選択肢（value/label） */
+var MASK_STYLE_LABELS = [
+  { value: "solid", label: "solid（現状のまま）" },
+  { value: "halftone", label: "halftone（ドットスクリーン）" },
+  { value: "pixel", label: "pixel（ブロック状）" },
+  { value: "outline", label: "outline（輪郭線）" },
+  { value: "rough", label: "rough（ギザギザ）" }
+];
+/** mask_style_optionsが実際に意味を持つ種類（solidは無視するため対象外） */
+var MASK_STYLE_MODES_WITH_OPTIONS = ["halftone", "pixel", "outline", "rough"];
+/**
+ * mask_style_options（scale/color/width）を解決する
+ * （render.pyのresolve_mask_style_optionsと同じ方針：不正/未指定はDEFAULT_MASK_STYLE_OPTIONSで補う）
+ */
+function resolveMaskStyleOptions(opts) {
+  opts = opts || {};
+  var scale = Math.max(0.001, Number(opts.scale) || DEFAULT_MASK_STYLE_OPTIONS.scale);
+  var color = isValidHexColor(opts.color) ? opts.color.toUpperCase() : DEFAULT_MASK_STYLE_OPTIONS.color;
+  var width = Math.max(0.0005, Number(opts.width) || DEFAULT_MASK_STYLE_OPTIONS.width);
+  return { scale: scale, color: color, width: width };
 }
 /** 行ごとのテロップ出現アクション（render.pyのTITLE_LINE_ANIMSと同じ値）。"" は未指定（従来のbounce/fade一斉表示） */
 var TITLE_LINE_ANIMS = ["bounce", "slide_right", "slide_left", "slide_up", "slide_down", "fade", "none"];
@@ -1237,6 +1302,7 @@ function freezeToJSON(fz, sfxLibrary) {
     time: round(numOr(fz.time, 0), 2),
     name: titleLinesForJSON(titleLines, sfxLibrary),
     background: resolveBackgroundMode(fz.background),
+    mask_style: resolveMaskStyle(fz.maskStyle),
     brush_shape: resolveBrushShape(fz.brushShape),
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
@@ -1285,6 +1351,7 @@ function buildProjectJSON(state) {
       brush_width: DEFAULT_STYLE.brush_width,
       mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
       background: resolveBackgroundMode(state.background),
+      mask_style: resolveMaskStyle(state.maskStyle),
       font: DEFAULT_FONT_PATH,
       title_bounce: !!state.titleBounce,
       title_pos: [
@@ -1327,6 +1394,18 @@ function buildProjectJSON(state) {
       scale: round(bgOpts.scale, 4),
       angle: round(bgOpts.angle, 1),
       opacity: round(bgOpts.opacity, 2)
+    };
+  }
+  // mask_style_options（縁の色・スケール・線の太さ）は全既定値のときはキー自体を省略する
+  // （完全後方互換）。ひとつでも既定と異なれば明示的に書き出す。
+  var maskStyleOpts = resolveMaskStyleOptions(state.maskStyleOptions);
+  if (maskStyleOpts.scale !== DEFAULT_MASK_STYLE_OPTIONS.scale ||
+      maskStyleOpts.color !== DEFAULT_MASK_STYLE_OPTIONS.color ||
+      maskStyleOpts.width !== DEFAULT_MASK_STYLE_OPTIONS.width) {
+    project.style.mask_style_options = {
+      scale: round(maskStyleOpts.scale, 4),
+      color: maskStyleOpts.color,
+      width: round(maskStyleOpts.width, 4)
     };
   }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
@@ -1448,6 +1527,7 @@ function parseProjectJSON(json, sfxLibrary) {
   json = json || {};
   var style = Object.assign({}, DEFAULT_STYLE, json.style || {});
   var styleBackgroundMode = resolveBackgroundMode(style.background);
+  var styleMaskStyle = resolveMaskStyle(style.mask_style);
   var freezes = (json.freezes || []).map(function (fz, i) {
     var sfxFields = resolveSfxFieldsFromJSON(fz.sfx, sfxLibrary, SFX_ALIGNS_FREEZE);
     var titleLines = normalizeTitleLines(fz.name).map(function (line) {
@@ -1469,6 +1549,7 @@ function parseProjectJSON(json, sfxLibrary) {
       sfxAlign: sfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
       sfxMissingFile: sfxFields.sfxMissingFile || "",
       background: fz.background !== undefined ? resolveBackgroundMode(fz.background) : styleBackgroundMode,
+      maskStyle: fz.mask_style !== undefined ? resolveMaskStyle(fz.mask_style) : styleMaskStyle,
       brushShape: resolveBrushShape(fz.brush_shape),
       maskMode: resolveColorSourceForFreeze(fz),
       brushEditMode: "add",
@@ -1595,6 +1676,8 @@ function parseProjectJSON(json, sfxLibrary) {
     monoContrast: numOr(style.mono_contrast, DEFAULT_STYLE.mono_contrast),
     background: resolveBackgroundMode(style.background),
     backgroundOptions: resolveBackgroundOptions(style.background_options),
+    maskStyle: resolveMaskStyle(style.mask_style),
+    maskStyleOptions: resolveMaskStyleOptions(style.mask_style_options),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -2741,6 +2824,12 @@ if (typeof module !== "undefined" && module.exports) {
     BACKGROUND_MODE_LABELS: BACKGROUND_MODE_LABELS,
     BACKGROUND_MODES_WITH_OPTIONS: BACKGROUND_MODES_WITH_OPTIONS,
     resolveBackgroundOptions: resolveBackgroundOptions,
+    MASK_STYLES: MASK_STYLES,
+    DEFAULT_MASK_STYLE_OPTIONS: DEFAULT_MASK_STYLE_OPTIONS,
+    resolveMaskStyle: resolveMaskStyle,
+    MASK_STYLE_LABELS: MASK_STYLE_LABELS,
+    MASK_STYLE_MODES_WITH_OPTIONS: MASK_STYLE_MODES_WITH_OPTIONS,
+    resolveMaskStyleOptions: resolveMaskStyleOptions,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -2925,6 +3014,8 @@ var appState = {
   monoContrast: DEFAULT_STYLE.mono_contrast,
   background: DEFAULT_STYLE.background,
   backgroundOptions: Object.assign({}, DEFAULT_BACKGROUND_OPTIONS),
+  maskStyle: DEFAULT_STYLE.mask_style,
+  maskStyleOptions: Object.assign({}, DEFAULT_MASK_STYLE_OPTIONS),
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -3071,7 +3162,7 @@ function init() {
     "maskPreviewBtn", "maskPreviewStatusLine", "maskPreviewViewResultBtn", "maskPreviewActionsLink",
     "undoStrokeBtn", "clearStrokesBtn", "previewBtn",
     "titleLinesList", "addTitleLineBtn", "freezeTitleFontSelect",
-    "sfxSelect", "sfxAlignSelect", "backgroundSelect", "brushShapeSelect",
+    "sfxSelect", "sfxAlignSelect", "backgroundSelect", "maskStyleSelect", "brushShapeSelect",
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
@@ -3083,6 +3174,10 @@ function init() {
     "backgroundScaleSlider", "backgroundScaleValue",
     "backgroundAngleSlider", "backgroundAngleValue",
     "backgroundOpacitySlider", "backgroundOpacityValue",
+    "maskStyleDefaultSelect", "maskStyleOptionsBody",
+    "maskStyleColorRow", "maskStyleColorInput",
+    "maskStyleScaleSlider", "maskStyleScaleValue",
+    "maskStyleWidthSlider", "maskStyleWidthValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
@@ -3111,6 +3206,7 @@ function init() {
   initGuideCard();
   buildFilmColorControls();
   buildBackgroundColorControls();
+  buildMaskStyleColorControls();
   populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
   populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
 
@@ -3272,6 +3368,29 @@ function init() {
   els.backgroundOpacitySlider.addEventListener("input", function () {
     appState.backgroundOptions.opacity = Number(els.backgroundOpacitySlider.value);
     els.backgroundOpacityValue.textContent = appState.backgroundOptions.opacity.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.maskStyleDefaultSelect.addEventListener("change", function () {
+    appState.maskStyle = resolveMaskStyle(els.maskStyleDefaultSelect.value);
+    els.maskStyleOptionsBody.hidden = MASK_STYLE_MODES_WITH_OPTIONS.indexOf(appState.maskStyle) < 0;
+    saveToLocalStorage();
+  });
+  els.maskStyleColorInput.addEventListener("input", function () {
+    var v = els.maskStyleColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      appState.maskStyleOptions.color = v.toUpperCase();
+      updateMaskStyleColorPresetSelection();
+      saveToLocalStorage();
+    }
+  });
+  els.maskStyleScaleSlider.addEventListener("input", function () {
+    appState.maskStyleOptions.scale = Number(els.maskStyleScaleSlider.value);
+    els.maskStyleScaleValue.textContent = appState.maskStyleOptions.scale.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.maskStyleWidthSlider.addEventListener("input", function () {
+    appState.maskStyleOptions.width = Number(els.maskStyleWidthSlider.value);
+    els.maskStyleWidthValue.textContent = appState.maskStyleOptions.width.toFixed(3);
     saveToLocalStorage();
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
@@ -3679,6 +3798,7 @@ function startNewFreeze() {
     sfxLibraryId: null,
     sfxAlign: SFX_ALIGN_DEFAULT,
     background: appState.background || "mono",
+    maskStyle: appState.maskStyle || "solid",
     brushShape: "round",
     maskMode: "brush",
     brushEditMode: "add",
@@ -3824,6 +3944,7 @@ function enterDrawMode() {
   els.sfxAlignSelect.value = resolveSfxAlign(draft.sfxAlign, SFX_ALIGNS_FREEZE);
   els.sfxAlignSelect.hidden = !draft.sfxLibraryId;
   els.backgroundSelect.value = draft.background || "mono";
+  els.maskStyleSelect.value = resolveMaskStyle(draft.maskStyle);
   els.brushShapeSelect.value = resolveBrushShape(draft.brushShape);
   els.maskModeSelect.value = resolveMaskMode(draft.maskMode);
   setBrushEditMode(draft.brushEditMode || "add");
@@ -3928,6 +4049,7 @@ function commitFreezeEdit() {
   draft.sfxLibraryId = sfxFields.sfxLibraryId;
   draft.sfxAlign = resolveSfxAlign(els.sfxAlignSelect.value, SFX_ALIGNS_FREEZE);
   draft.background = els.backgroundSelect.value;
+  draft.maskStyle = els.maskStyleSelect.value;
   draft.brushShape = els.brushShapeSelect.value;
   draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
   // titleSize/titleAlignは、titleSizeSlider/titleAlignSelectの自前のイベントリスナーが
@@ -5525,12 +5647,14 @@ function startPreviewPlayback() {
           var progress = BRUSH > 0 ? Math.min(1, revealElapsed / BRUSH) : 1;
           if (maskMode === "brush") {
             if (geoInfo.total > 0) {
-              drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape, shadowCfg);
+              drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, draft.brushShape, shadowCfg,
+                draft.maskStyle, appState.maskStyleOptions);
             }
           } else {
             var baseMask = maskMode === "auto+brush" ? autoBrushStrokeMaskCanvas : autoPlaceholderMaskCanvas;
             var revealedMask = applyRevealToMask(baseMask, W, H, revealMode, progress);
-            drawMaskComposite(pctx, frameCanvas, revealedMask, W, H, shadowCfg, 0, 0);
+            drawMaskComposite(pctx, frameCanvas, revealedMask, W, H, shadowCfg, 0, 0,
+              draft.maskStyle, appState.maskStyleOptions);
             if (maskMode === "auto") drawAutoLabel(pctx, W, H, progress);
           }
         } else {
@@ -5550,7 +5674,8 @@ function startPreviewPlayback() {
               slideDy = slideDyFull * remaining;
             }
           }
-          drawMaskComposite(pctx, frameCanvas, doneMaskCanvas, W, H, shadowCfg, slideDx, slideDy);
+          drawMaskComposite(pctx, frameCanvas, doneMaskCanvas, W, H, shadowCfg, slideDx, slideDy,
+            draft.maskStyle, appState.maskStyleOptions);
           if (maskMode === "auto") drawAutoLabel(pctx, W, H, 1);
 
           // テロップは行ごとに独立したアクション（lines[].anim/anim_sec/delay_sec、省略時は
@@ -5737,16 +5862,139 @@ function buildBackgroundCanvas(srcCanvas, dstCanvas, mode, options) {
   }
 }
 
+/** 小さな乱数場(sw×sh)を双線形補間でw×hへ滑らかに拡大する（rough縁の変位マップ生成用） */
+function generateSmoothNoiseField(sw, sh, w, h) {
+  var small = new Float32Array(sw * sh);
+  for (var i = 0; i < small.length; i++) small[i] = Math.random() * 2 - 1;
+  var out = new Float32Array(w * h);
+  for (var y = 0; y < h; y++) {
+    var gy = (y / h) * (sh - 1);
+    var gy0 = Math.floor(gy), gy1 = Math.min(sh - 1, gy0 + 1), fy = gy - gy0;
+    for (var x = 0; x < w; x++) {
+      var gx = (x / w) * (sw - 1);
+      var gx0 = Math.floor(gx), gx1 = Math.min(sw - 1, gx0 + 1), fx = gx - gx0;
+      var v00 = small[gy0 * sw + gx0], v01 = small[gy0 * sw + gx1];
+      var v10 = small[gy1 * sw + gx0], v11 = small[gy1 * sw + gx1];
+      var v0 = v00 + (v01 - v00) * fx, v1 = v10 + (v11 - v10) * fx;
+      out[y * w + x] = v0 + (v1 - v0) * fy;
+    }
+  }
+  return out;
+}
+
+/**
+ * mask_styleに応じてマスクcanvasの「形」（アルファ）を加工したcanvasを返す
+ * （render.pyのapply_mask_styleと同じ考え方の簡易プレビュー版。solid/outlineは形自体を変えない
+ * ためmaskCanvasをそのまま返す）。
+ */
+function applyMaskStyleToCanvas(maskCanvas, mode, options, W) {
+  mode = resolveMaskStyle(mode);
+  if (mode !== "halftone" && mode !== "pixel" && mode !== "rough") return maskCanvas;
+  var w = maskCanvas.width, h = maskCanvas.height;
+  var mctx = maskCanvas.getContext("2d");
+  var srcData = mctx.getImageData(0, 0, w, h).data;
+  var outCanvas = document.createElement("canvas");
+  outCanvas.width = w; outCanvas.height = h;
+  var octx = outCanvas.getContext("2d");
+
+  if (mode === "halftone") {
+    var cell = Math.max(3, Math.round(options.scale * W));
+    var maxR = cell * 0.5 * 0.95;
+    octx.fillStyle = "#FFFFFF";
+    for (var cy = Math.floor(cell / 2); cy < h; cy += cell) {
+      for (var cx = Math.floor(cell / 2); cx < w; cx += cell) {
+        var idx = (Math.min(h - 1, cy) * w + Math.min(w - 1, cx)) * 4;
+        var a = srcData[idx + 3] / 255;
+        var r = maxR * a;
+        if (r >= 1) {
+          octx.beginPath();
+          octx.arc(cx, cy, r, 0, Math.PI * 2);
+          octx.fill();
+        }
+      }
+    }
+    return outCanvas;
+  }
+  if (mode === "pixel") {
+    var cell2 = Math.max(2, Math.round(options.scale * W));
+    var gw = Math.max(1, Math.floor(w / cell2) + 1);
+    var gh = Math.max(1, Math.floor(h / cell2) + 1);
+    var smallCanvas = document.createElement("canvas");
+    smallCanvas.width = gw; smallCanvas.height = gh;
+    smallCanvas.getContext("2d").drawImage(maskCanvas, 0, 0, gw, gh);
+    octx.imageSmoothingEnabled = false;
+    octx.drawImage(smallCanvas, 0, 0, w, h);
+    return outCanvas;
+  }
+  // rough：低解像度の滑らかな乱数場を変位マップにして、アルファ境界をギザギザに歪ませる
+  var amp = Math.max(0, options.scale) * W;
+  var sw = Math.max(2, Math.floor(w / 16)), sh = Math.max(2, Math.floor(h / 16));
+  var noiseX = generateSmoothNoiseField(sw, sh, w, h);
+  var noiseY = generateSmoothNoiseField(sw, sh, w, h);
+  var outImg = octx.createImageData(w, h);
+  var od = outImg.data;
+  for (var y2 = 0; y2 < h; y2++) {
+    for (var x2 = 0; x2 < w; x2++) {
+      var sx = Math.round(x2 + noiseX[y2 * w + x2] * amp);
+      var sy = Math.round(y2 + noiseY[y2 * w + x2] * amp);
+      var di = (y2 * w + x2) * 4;
+      if (sx >= 0 && sx < w && sy >= 0 && sy < h) {
+        od[di] = 255; od[di + 1] = 255; od[di + 2] = 255;
+        od[di + 3] = srcData[(sy * w + sx) * 4 + 3];
+      }
+    }
+  }
+  octx.putImageData(outImg, 0, 0);
+  return outCanvas;
+}
+
+/**
+ * mask_style="outline"のときだけ、アルファ境界に沿ったoptions.color/widthの縁取りレイヤーを返す
+ * （render.pyのrender_mask_outlineの簡易プレビュー版：ぼかし→中間アルファ帯を縁として塗る近似）。
+ * outline以外はnullを返す。
+ */
+function renderMaskOutlineOverlay(maskCanvas, mode, options, W) {
+  if (resolveMaskStyle(mode) !== "outline") return null;
+  var w = maskCanvas.width, h = maskCanvas.height;
+  var widthPx = Math.max(1, Math.round(options.width * W));
+  var blurCanvas = document.createElement("canvas");
+  blurCanvas.width = w; blurCanvas.height = h;
+  var bctx = blurCanvas.getContext("2d");
+  bctx.filter = "blur(" + widthPx + "px)";
+  bctx.drawImage(maskCanvas, 0, 0);
+  bctx.filter = "none";
+  var data = bctx.getImageData(0, 0, w, h).data;
+  var outCanvas = document.createElement("canvas");
+  outCanvas.width = w; outCanvas.height = h;
+  var octx = outCanvas.getContext("2d");
+  var outImg = octx.createImageData(w, h);
+  var od = outImg.data;
+  var rgb = hexToRgbTriplet(options.color, [255, 255, 255]);
+  for (var i = 0; i < data.length; i += 4) {
+    var a = data[i + 3];
+    if (a > 20 && a < 235) {
+      od[i] = rgb[0]; od[i + 1] = rgb[1]; od[i + 2] = rgb[2]; od[i + 3] = 255;
+    }
+  }
+  octx.putImageData(outImg, 0, 0);
+  return outCanvas;
+}
+
 /**
  * 影・人物カラーの合成（マスクの作り方＝ブラシ／自動／自動＋ブラシ修正には依存しない、
  * 共通の「マスクさえあればいい」部分）。render.pyのcomposite_layersと同じレイヤー順・考え方：
  * 背景（呼び出し側で描画済み）→影（人物の「元の位置」。動かさない）→
  * 人物カラー（(slideDx, slideDy)だけずらした位置）。
  * shadowCfg = { enabled, color, alpha, blurRatio } | null
+ * mask_style（solid/halftone/pixel/outline/rough）は人物・影どちらの形にも同じ加工・
+ * 同じmaskStyleOptionsを通す（render.pyのcomposite_layersと同じ方針）。
  */
-function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slideDx, slideDy) {
+function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slideDx, slideDy, maskStyle, maskStyleOptions) {
   slideDx = slideDx || 0;
   slideDy = slideDy || 0;
+  maskStyle = resolveMaskStyle(maskStyle);
+  var styleOpts = maskStyleOptions || DEFAULT_MASK_STYLE_OPTIONS;
+  var styledMask = applyMaskStyleToCanvas(maskCanvas, maskStyle, styleOpts, W);
 
   if (shadowCfg && shadowCfg.enabled) {
     var shadowCanvas = document.createElement("canvas");
@@ -5754,7 +6002,7 @@ function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slide
     var sctx = shadowCanvas.getContext("2d");
     var blurPx = Math.max(0, (shadowCfg.blurRatio || 0) * W);
     if (blurPx > 0) sctx.filter = "blur(" + blurPx + "px)";
-    sctx.drawImage(maskCanvas, 0, 0);
+    sctx.drawImage(styledMask, 0, 0);
     sctx.filter = "none";
     // ぼかし後のアルファ形状はそのままに、色だけ影色に置き換える
     sctx.globalCompositeOperation = "source-in";
@@ -5765,6 +6013,14 @@ function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slide
     pctx.globalAlpha = shadowCfg.alpha != null ? shadowCfg.alpha : DEFAULT_SHADOW.alpha;
     pctx.drawImage(shadowCanvas, 0, 0);
     pctx.restore();
+
+    var shadowOutline = renderMaskOutlineOverlay(maskCanvas, maskStyle, styleOpts, W);
+    if (shadowOutline) {
+      pctx.save();
+      pctx.globalAlpha = shadowCfg.alpha != null ? shadowCfg.alpha : DEFAULT_SHADOW.alpha;
+      pctx.drawImage(shadowOutline, 0, 0);
+      pctx.restore();
+    }
   }
 
   var colorCanvas = document.createElement("canvas");
@@ -5772,12 +6028,17 @@ function drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, slide
   var cctx = colorCanvas.getContext("2d");
   cctx.drawImage(frameCanvas, 0, 0);
   cctx.globalCompositeOperation = "destination-in";
-  cctx.drawImage(maskCanvas, 0, 0);
+  cctx.drawImage(styledMask, 0, 0);
 
   pctx.drawImage(colorCanvas, slideDx, slideDy);
+
+  var personOutline = renderMaskOutlineOverlay(maskCanvas, maskStyle, styleOpts, W);
+  if (personOutline) {
+    pctx.drawImage(personOutline, slideDx, slideDy);
+  }
 }
 
-function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, shadowCfg) {
+function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, shadowCfg, maskStyle, maskStyleOptions) {
   if (geoInfo.total <= 0) return;
   var head = geoInfo.total * progress;
   shape = resolveBrushShape(shape);
@@ -5789,7 +6050,7 @@ function drawBrushComposite(pctx, frameCanvas, geoInfo, progress, W, H, shape, s
   drawStampedGeo(mctx, shape, geoInfo.geo, 0, head);
 
   // 出現アニメ中（ブラシが伸びている間）は人物は「元の位置」のまま＝影は完全に隠れている
-  drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, 0, 0);
+  drawMaskComposite(pctx, frameCanvas, maskCanvas, W, H, shadowCfg, 0, 0, maskStyle, maskStyleOptions);
 
   if (progress < 1) {
     var maxThick = Math.max.apply(null, geoInfo.geo.map(function (g) { return g.thick; }));
@@ -6050,6 +6311,40 @@ function updateBackgroundColorPresetSelection() {
   });
 }
 
+function buildMaskStyleColorRow(rowEl, onPick) {
+  rowEl.innerHTML = "";
+  TITLE_COLOR_PRESETS.forEach(function (preset) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small ghost mask-style-color-btn";
+    btn.title = preset.label;
+    btn.dataset.hex = preset.hex;
+    btn.innerHTML = '<span class="swatch" style="background:' + preset.hex + '"></span>';
+    btn.addEventListener("click", function () {
+      onPick(preset.hex);
+      updateMaskStyleColorPresetSelection();
+    });
+    rowEl.appendChild(btn);
+  });
+}
+
+function buildMaskStyleColorControls() {
+  buildMaskStyleColorRow(els.maskStyleColorRow, function (hex) {
+    appState.maskStyleOptions.color = hex;
+    els.maskStyleColorInput.value = hex;
+    saveToLocalStorage();
+  });
+  updateMaskStyleColorPresetSelection();
+}
+
+function updateMaskStyleColorPresetSelection() {
+  var buttons = els.maskStyleColorRow.querySelectorAll(".mask-style-color-btn");
+  for (var i = 0; i < buttons.length; i++) {
+    var match = (buttons[i].dataset.hex || "").toLowerCase() === (appState.maskStyleOptions.color || "").toLowerCase();
+    buttons[i].classList.toggle("selected", match);
+  }
+}
+
 /* ---------------- ラストロゴ ---------------- */
 
 function handleLogoFileChange(e) {
@@ -6236,6 +6531,16 @@ function applySettingsToInputs() {
   els.shadowBlurSlider.value = appState.shadowBlurRatio;
   els.shadowBlurValue.textContent = Number(appState.shadowBlurRatio).toFixed(3);
   els.shadowSourceSelect.value = resolveShadowSource(appState.shadowSource);
+  appState.maskStyle = resolveMaskStyle(appState.maskStyle);
+  appState.maskStyleOptions = resolveMaskStyleOptions(appState.maskStyleOptions);
+  els.maskStyleDefaultSelect.value = appState.maskStyle;
+  els.maskStyleOptionsBody.hidden = MASK_STYLE_MODES_WITH_OPTIONS.indexOf(appState.maskStyle) < 0;
+  els.maskStyleColorInput.value = appState.maskStyleOptions.color;
+  els.maskStyleScaleSlider.value = appState.maskStyleOptions.scale;
+  els.maskStyleScaleValue.textContent = Number(appState.maskStyleOptions.scale).toFixed(3);
+  els.maskStyleWidthSlider.value = appState.maskStyleOptions.width;
+  els.maskStyleWidthValue.textContent = Number(appState.maskStyleOptions.width).toFixed(3);
+  updateMaskStyleColorPresetSelection();
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
@@ -6361,6 +6666,8 @@ function buildLocalStoragePayload(dropThumbs) {
     monoContrast: appState.monoContrast,
     background: appState.background,
     backgroundOptions: appState.backgroundOptions,
+    maskStyle: appState.maskStyle,
+    maskStyleOptions: appState.maskStyleOptions,
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
@@ -6428,6 +6735,8 @@ function loadFromLocalStorage(videoFileName) {
     appState.monoContrast = numOr(data.monoContrast, DEFAULT_STYLE.mono_contrast);
     appState.background = resolveBackgroundMode(data.background);
     appState.backgroundOptions = resolveBackgroundOptions(data.backgroundOptions);
+    appState.maskStyle = resolveMaskStyle(data.maskStyle);
+    appState.maskStyleOptions = resolveMaskStyleOptions(data.maskStyleOptions);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
@@ -7146,6 +7455,8 @@ function handleJsonFileChange(e) {
       appState.monoContrast = loaded.monoContrast;
       appState.background = loaded.background;
       appState.backgroundOptions = loaded.backgroundOptions;
+      appState.maskStyle = loaded.maskStyle;
+      appState.maskStyleOptions = loaded.maskStyleOptions;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;

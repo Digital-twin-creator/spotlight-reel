@@ -328,6 +328,55 @@ async function main() {
     "modeをmonoに戻しても、変更済みのbackground_optionsの値は保持されたままJSONに出力される（破棄されない）: "
     + JSON.stringify(projectBgReset.style.background_options));
 
+  console.log("");
+  console.log("=== 人物マスクの縁の種類：全体設定でsolid以外を選ぶとオプション欄が表示され、色・スケール・線の太さを設定できる ===");
+  const maskStyleOptionsHiddenAtSolid = await page.evaluate(() => document.getElementById("maskStyleOptionsBody").hidden);
+  check(maskStyleOptionsHiddenAtSolid, "既定(solid)ではmaskStyleOptionsBodyは隠れている");
+  await page.selectOption("#maskStyleDefaultSelect", "outline");
+  await page.waitForTimeout(50);
+  const maskStyleAfterSelect = await page.evaluate(() => appState.maskStyle);
+  check(maskStyleAfterSelect === "outline", "セレクトで'outline'を選ぶとappState.maskStyleに反映される: " + maskStyleAfterSelect);
+  const maskStyleOptionsShown = await page.evaluate(() => !document.getElementById("maskStyleOptionsBody").hidden);
+  check(maskStyleOptionsShown, "outlineを選ぶとmaskStyleOptionsBodyが表示される");
+
+  await page.click("#maskStyleColorRow .mask-style-color-btn[title=\"赤\"]");
+  await page.waitForTimeout(50);
+  const maskStyleColorAfterPreset = await page.evaluate(() => appState.maskStyleOptions.color);
+  check(maskStyleColorAfterPreset === "#FF3B30", "色プリセット「赤」を選ぶとappState.maskStyleOptions.color=#FF3B30になる: " + maskStyleColorAfterPreset);
+
+  await page.fill("#maskStyleScaleSlider", "0.02");
+  await page.dispatchEvent("#maskStyleScaleSlider", "input");
+  await page.fill("#maskStyleWidthSlider", "0.008");
+  await page.dispatchEvent("#maskStyleWidthSlider", "input");
+  await page.waitForTimeout(50);
+  const maskStyleOptsAfterSliders = await page.evaluate(() => appState.maskStyleOptions);
+  check(maskStyleOptsAfterSliders.scale === 0.02 && maskStyleOptsAfterSliders.width === 0.008,
+    "scale/widthスライダーがappState.maskStyleOptionsに反映される: " + JSON.stringify(maskStyleOptsAfterSliders));
+
+  const projectMaskStyle = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectMaskStyle.style.mask_style === "outline", "JSON出力：style.mask_styleに'outline'が反映される: " + projectMaskStyle.style.mask_style);
+  check(!!projectMaskStyle.style.mask_style_options
+    && projectMaskStyle.style.mask_style_options.color === "#FF3B30"
+    && projectMaskStyle.style.mask_style_options.scale === 0.02
+    && projectMaskStyle.style.mask_style_options.width === 0.008,
+    "JSON出力：style.mask_style_optionsに設定した値がすべて反映される: " + JSON.stringify(projectMaskStyle.style.mask_style_options));
+
+  console.log("");
+  console.log("=== 人物マスクの縁の種類：既存フリーズの「マスクの縁」で全体設定を上書きでき、そのフリーズだけJSONに反映される ===");
+  const maskStyleFreezeId = await page.evaluate(() => appState.freezes[0].id);
+  await page.evaluate((id) => { editFreeze(id); }, maskStyleFreezeId);
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  await page.selectOption("#maskStyleSelect", "halftone");
+  await page.click("#commitFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  const projectMaskStyleFreeze = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectMaskStyleFreeze.freezes.some((f) => f.mask_style === "halftone"),
+    "フリーズ単位で上書きしたマスクの縁('halftone')がJSONのfreezes[].mask_styleに反映される: "
+    + JSON.stringify(projectMaskStyleFreeze.freezes.map((f) => f.mask_style)));
+  check(projectMaskStyleFreeze.style.mask_style === "outline",
+    "フリーズ単位の上書きをしても全体設定(style.mask_style)は変わらない: " + projectMaskStyleFreeze.style.mask_style);
+
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
   await context.close();
