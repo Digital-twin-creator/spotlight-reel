@@ -2144,6 +2144,90 @@ try:
     check(abs(render.contrast_ratio((128, 128, 128), (128, 128, 128)) - 1.0) < 0.01,
           "同じ色同士のコントラスト比は1（最小）")
 
+    # ------------------------------------------------------------------
+    # 18) 人物輪郭アウトライン（subject_outline）：mask_style=outlineとは独立のレイヤーで、
+    #     どのmask_styleとも併用できる（合成順：影 → 人物 → 輪郭線）ことを検証する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 人物輪郭アウトライン：resolve_subject_outline_configのフォールバック ===")
+    default_so_cfg = render.resolve_subject_outline_config({})
+    check(default_so_cfg == dict(render.SUBJECT_OUTLINE_DEFAULTS),
+          "subject_outline省略時はSUBJECT_OUTLINE_DEFAULTSがそのまま使われる")
+    so_cfg_bad_width = render.resolve_subject_outline_config(
+        {"subject_outline": {"enabled": True, "width": -1}})
+    check(so_cfg_bad_width["width"] > 0, "widthが負の値でも下限でクランプされる")
+    so_cfg_disabled = render.resolve_subject_outline_config({"subject_outline": {"width": 0.01}})
+    check(so_cfg_disabled["enabled"] is False, "enabledを省略すると無効のまま（既定はオフ）")
+
+    print("")
+    print("=== 人物輪郭アウトライン：composite_layersでの見た目・自動色選択を検証 ===")
+    so_h, so_w = 200, 200
+    so_bg_light = np.full((so_h, so_w, 3), 220, dtype=np.uint8)
+    so_bg_dark = np.full((so_h, so_w, 3), 20, dtype=np.uint8)
+    so_color = np.full((so_h, so_w, 3), (255, 120, 40), dtype=np.uint8)
+    so_mask = np.zeros((so_h, so_w), dtype=np.uint8)
+    cv2.circle(so_mask, (so_w // 2, so_h // 2), 60, 255, -1, lineType=cv2.LINE_AA)
+    so_cfg_on = render.resolve_subject_outline_config({"subject_outline": {"enabled": True, "width": 0.01}})
+
+    so_off = render.composite_layers(so_bg_light, so_color, so_mask, so_w, so_h)
+    so_on = render.composite_layers(so_bg_light, so_color, so_mask, so_w, so_h,
+                                     subject_outline_cfg=so_cfg_on)
+    check(bool(np.any(so_off != so_on)), "enabled=trueならsolidと異なる見た目になる（輪郭線が乗る）")
+    so_center_off = so_off[so_h // 2, so_w // 2]
+    so_center_on = so_on[so_h // 2, so_w // 2]
+    check(bool(np.array_equal(so_center_off, so_center_on)),
+          "輪郭線を追加するだけでマスクの形自体（中心の色）は変えない")
+
+    so_edge_on_light = so_on[so_h // 2, so_w // 2 + 60]
+    check(bool(np.array_equal(so_edge_on_light, np.array([0, 0, 0]))),
+          f"color=auto：明るい背景では黒い輪郭線が選ばれる: {so_edge_on_light}")
+    so_on_dark = render.composite_layers(so_bg_dark, so_color, so_mask, so_w, so_h,
+                                          subject_outline_cfg=so_cfg_on)
+    so_edge_on_dark = so_on_dark[so_h // 2, so_w // 2 + 60]
+    check(bool(np.array_equal(so_edge_on_dark, np.array([255, 255, 255]))),
+          f"color=auto：暗い背景では白い輪郭線が選ばれる: {so_edge_on_dark}")
+
+    so_cfg_red = render.resolve_subject_outline_config(
+        {"subject_outline": {"enabled": True, "width": 0.01, "color": "#FF0000"}})
+    so_on_red = render.composite_layers(so_bg_light, so_color, so_mask, so_w, so_h,
+                                         subject_outline_cfg=so_cfg_red)
+    so_edge_red = so_on_red[so_h // 2, so_w // 2 + 60]
+    check(bool(np.array_equal(so_edge_red, np.array([0, 0, 255]))),
+          f"colorを明示すればその色（#FF0000→BGR(0,0,255)）が使われる: {so_edge_red}")
+
+    print("")
+    print("=== 人物輪郭アウトライン：mask_style=outlineとの併用、影には適用されないことを検証 ===")
+    so_ms_opts = render.resolve_mask_style_options({"mask_style_options": {
+        "scale": 0.02, "color": "#00FF00", "width": 0.02}})
+    so_with_mask_outline = render.composite_layers(
+        so_bg_light, so_color, so_mask, so_w, so_h,
+        mask_style="outline", mask_style_options=so_ms_opts, subject_outline_cfg=so_cfg_red)
+    # mask_style=outlineの帯（幅0.02→片側4px、半径56〜64）と、subject_outlineの帯
+    # （幅0.01→片側2px、半径58〜62）は同じ境界（半径60）を中心に重なる。合成順で
+    # subject_outlineが後から乗るため、重なる範囲（半径60付近）は赤、mask_style側のみの
+    # 範囲（半径57付近）は緑のままになるはず
+    so_mo_green_only = so_with_mask_outline[so_h // 2, so_w // 2 + 57]
+    check(bool(np.array_equal(so_mo_green_only, np.array([0, 255, 0]))),
+          "mask_style=outlineの縁の線（緑）は、subject_outlineの帯の外側では引き続き見える（併用できる）")
+    so_mo_edge = so_with_mask_outline[so_h // 2, so_w // 2 + 60]
+    check(bool(np.array_equal(so_mo_edge, np.array([0, 0, 255]))),
+          "subject_outlineの線（赤）は帯が重なる範囲では後から乗って優先される（併用できる）")
+
+    so_shadow_cfg = {"color": "#000000", "alpha": 0.9, "distance": 0.15, "direction": "right",
+                      "offset_y": 0.0, "blur": 0.0}
+    so_shadow_off = render.composite_layers(so_bg_light, so_color, so_mask, so_w, so_h,
+                                             shadow_cfg=so_shadow_cfg,
+                                             slide_dx=so_w * 0.15, slide_dy=0.0)
+    so_shadow_on = render.composite_layers(so_bg_light, so_color, so_mask, so_w, so_h,
+                                            shadow_cfg=so_shadow_cfg,
+                                            slide_dx=so_w * 0.15, slide_dy=0.0,
+                                            subject_outline_cfg=so_cfg_red)
+    so_shadow_edge = so_shadow_on[so_h // 2, so_w // 2 - 60]
+    check(bool(np.array_equal(so_shadow_edge, so_shadow_off[so_h // 2, so_w // 2 - 60])),
+          "影（人物の元の位置）には輪郭線が乗らない（合成順：影 → 人物 → 輪郭線）")
+    check(bool(np.any(so_shadow_on != so_shadow_off)),
+          "それでも人物側には輪郭線が乗るため、全体としては見た目が変わる")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 

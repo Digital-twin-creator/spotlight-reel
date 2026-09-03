@@ -1221,9 +1221,53 @@ def render_mask_outline(alpha_u8, options, W):
     return band, color_bgr
 
 
+# ---------------------------------------------------------------------------
+# 人物輪郭アウトライン（subject_outline）。mask_style="outline"とは独立の別レイヤーで、
+# どのmask_styleとも併用できる（合成順：影 → 人物 → 輪郭線）。
+# ---------------------------------------------------------------------------
+
+SUBJECT_OUTLINE_DEFAULTS = {"enabled": False, "width": 0.002, "color": "auto"}
+
+
+def resolve_subject_outline_config(fz):
+    """
+    subject_outline（{"enabled","width","color"}）を解決する。JSON側に無ければ
+    無効（enabled=False）のまま返す。color="auto"（既定）は背景の平均輝度から
+    白/黒を自動選択する（resolve_subject_outline_color参照）。
+    """
+    raw = fz.get("subject_outline")
+    cfg = dict(SUBJECT_OUTLINE_DEFAULTS)
+    if isinstance(raw, dict):
+        cfg.update(raw)
+    cfg["enabled"] = bool(cfg.get("enabled", False))
+    cfg["width"] = max(0.0005, float(cfg.get("width") or SUBJECT_OUTLINE_DEFAULTS["width"]))
+    return cfg
+
+
+def resolve_subject_outline_color(color_value, bg_bgr):
+    """color="auto"（またはNone/未指定）なら背景の平均輝度から白/黒を選ぶ。それ以外は
+    #RRGGBBとして解釈する（不正な値は白にフォールバック）。"""
+    if color_value and color_value != "auto":
+        return hex_to_bgr(validate_hex_color(color_value, "#FFFFFF", "subject_outline.color"),
+                           default=(255, 255, 255))
+    if bg_bgr is not None:
+        gray_mean = float(cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2GRAY).mean())
+        return (255, 255, 255) if gray_mean < 128 else (0, 0, 0)
+    return (255, 255, 255)
+
+
+def render_subject_outline_band(mask_u8, width_px):
+    """mask_u8の輪郭に沿った境界バンド（幅は両側にwidth_pxずつ）を返す（render_mask_outlineと同じ技法）"""
+    binary = np.where(mask_u8 >= 128, 255, 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    outer = cv2.dilate(binary, kernel, iterations=width_px)
+    inner = cv2.erode(binary, kernel, iterations=width_px)
+    return cv2.subtract(outer, inner)
+
+
 def composite_layers(bg, color, mask_u8, W, H, shadow_cfg=None,
                       slide_dx=0.0, slide_dy=0.0, paint_mask_u8=None, shadow_mask_u8=None,
-                      mask_style="solid", mask_style_options=None):
+                      mask_style="solid", mask_style_options=None, subject_outline_cfg=None):
     """
     1フレーム分の合成処理（マスクの作り方＝ブラシ／自動／自動＋ブラシ には依存しない、
     共通の「マスクさえあれば合成できる」部分）。
@@ -1266,6 +1310,13 @@ def composite_layers(bg, color, mask_u8, W, H, shadow_cfg=None,
         band, outline_color = render_mask_outline(person_mask, style_opts, W)
         bandf = (band.astype(np.float32) / 255.0)[:, :, None]
         out = out * (1.0 - bandf) + np.array(outline_color, dtype=np.float32) * bandf
+
+    if subject_outline_cfg and subject_outline_cfg.get("enabled"):
+        so_width_px = max(1, int(round(subject_outline_cfg["width"] * W)))
+        so_band = render_subject_outline_band(person_mask, so_width_px)
+        so_color = resolve_subject_outline_color(subject_outline_cfg.get("color"), bg)
+        so_bandf = (so_band.astype(np.float32) / 255.0)[:, :, None]
+        out = out * (1.0 - so_bandf) + np.array(so_color, dtype=np.float32) * so_bandf
 
     if paint_mask_u8 is not None:
         pm = (paint_mask_u8.astype(np.float32) / 255.0)[:, :, None] * BRUSH_PAINT_ALPHA
@@ -2821,6 +2872,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     ctx = build_mask_context(fz, frame, W, H, cache_dir, video_path)
     mask_style = resolve_mask_style(fz.get("mask_style"))
     mask_style_opts = resolve_mask_style_options(fz)
+    subject_outline_cfg = resolve_subject_outline_config(fz)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -2849,7 +2901,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         progress = (i + 1) / float(plan["n_reveal"])
         mask, paint = mask_and_paint_at(ctx, W, H, progress)
         yield composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, paint_mask_u8=paint,
-                                mask_style=mask_style, mask_style_options=mask_style_opts)
+                                mask_style=mask_style, mask_style_options=mask_style_opts,
+                                subject_outline_cfg=subject_outline_cfg)
 
     done_mask, _done_paint = mask_and_paint_at(ctx, W, H, 1.0)
     shadow_done_mask = None
@@ -2881,12 +2934,14 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             yield composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * eased, slide_dy=slide_dy * eased,
                                     shadow_mask_u8=shadow_done_mask,
-                                    mask_style=mask_style, mask_style_options=mask_style_opts)
+                                    mask_style=mask_style, mask_style_options=mask_style_opts,
+                                    subject_outline_cfg=subject_outline_cfg)
 
     # 「着地」した状態（スライド済み。影が無ければ元の位置のまま）を1回だけ作って使い回す
     landed = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_done_mask,
-                               mask_style=mask_style, mask_style_options=mask_style_opts)
+                               mask_style=mask_style, mask_style_options=mask_style_opts,
+                               subject_outline_cfg=subject_outline_cfg)
 
     # ブラシ（またはauto+brushのreveal="brush"）で描いた場合のみ、完了時点で先端に残っている
     # 「乾いていない白い絵の具」を brush_fade_sec 秒かけてフェードアウトさせる。
@@ -2956,7 +3011,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             out = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining,
                                     shadow_mask_u8=shadow_done_mask,
-                                    mask_style=mask_style, mask_style_options=mask_style_opts)
+                                    mask_style=mask_style, mask_style_options=mask_style_opts,
+                                    subject_outline_cfg=subject_outline_cfg)
             for layer in line_layers:
                 out = blend_telop(out, layer["bgr"], layer["alpha"], 1.0)
             yield out
@@ -2999,6 +3055,7 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     mask, _paint = mask_and_paint_at(ctx, W, H, 1.0)
     mask_style = resolve_mask_style(fz.get("mask_style"))
     mask_style_opts = resolve_mask_style_options(fz)
+    subject_outline_cfg = resolve_subject_outline_config(fz)
 
     slide_dx, slide_dy = 0.0, 0.0
     shadow_mask = None
@@ -3007,10 +3064,12 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
         slide_dx, slide_dy = compute_shadow_slide_vector(shadow_mask, W, shadow_cfg)
 
     before_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg, shadow_mask_u8=shadow_mask,
-                                   mask_style=mask_style, mask_style_options=mask_style_opts)
+                                   mask_style=mask_style, mask_style_options=mask_style_opts,
+                                   subject_outline_cfg=subject_outline_cfg)
     after_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
                                   slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask,
-                                  mask_style=mask_style, mask_style_options=mask_style_opts)
+                                  mask_style=mask_style, mask_style_options=mask_style_opts,
+                                  subject_outline_cfg=subject_outline_cfg)
 
     title_size = float(fz.get("title_size", DEFAULT_STYLE["title_size"]))
     size_px = max(8, int(round(H * title_size)))
@@ -3048,7 +3107,8 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
         # テロップを含まない着地後の背景（before/afterと同じcomposite_layers）から作り直す
         lines_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
                                       slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask,
-                                      mask_style=mask_style, mask_style_options=mask_style_opts)
+                                      mask_style=mask_style, mask_style_options=mask_style_opts,
+                                      subject_outline_cfg=subject_outline_cfg)
         for line, layer, (anim, anim_sec) in zip(visible_title_lines, line_layers, anim_params):
             fade, scale, tx, ty = compute_line_frame_state(
                 anim, anim_sec, line["delay_sec"], sample_t, W, H)
