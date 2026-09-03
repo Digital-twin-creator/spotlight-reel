@@ -4841,7 +4841,13 @@ def render_video_smart(video_path, out_path, W, H, fps, src_frames, plans,
     if cur < src_frames:
         copy_path = os.path.join(tmpdir, f"smart_seg_{seg_i:03d}_copy.mp4")
         seg_i += 1
-        actual = extract_copy_segment(video_path, idx_to_time[cur], None, copy_path)
+        # 末尾は動画の実際のEOFまで（None）ではなく、src_frames（duration基準の想定値）
+        # までのちょうどの枚数を明示的に指定する。元動画の実際のデコード可能フレーム数が
+        # duration*fpsの丸め値よりわずかに多いことがあり（-c copyでの時間指定トリムなど、
+        # 実写動画では珍しくない）、EOFまで無条件に読むと後段の音声（duration基準で
+        # 構築済み）より映像が長くなり、mux時の-shortestによる打ち切りが非キーフレーム
+        # 境界で起きてフレームの欠落を引き起こすことがある（実機検証で確認）。
+        actual = extract_copy_segment(video_path, idx_to_time[cur], src_frames - cur, copy_path)
         copied_frames += actual
         parts.append(copy_path)
         cur += actual
@@ -5008,7 +5014,10 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
     if cur < src_frames:
         seg_path = os.path.join(tmpdir, f"hybrid_seg_{seg_i:03d}_pass.mp4")
         seg_i += 1
-        actual = extract_hybrid_segment(video_path, cur / fps, None, seg_path, W, H, fps,
+        # 末尾は動画の実際のEOFまで（None）ではなく、src_frames（duration基準の想定値）
+        # までのちょうどの枚数を明示的に指定する（render_video_smartの対応する末尾処理と
+        # 同じ理由。コメント参照）。
+        actual = extract_hybrid_segment(video_path, cur / fps, src_frames - cur, seg_path, W, H, fps,
                                          watermark_asset=watermark_asset, hashtags_asset=hashtags_asset,
                                          tmpdir=tmpdir)
         passthrough_frames += actual
