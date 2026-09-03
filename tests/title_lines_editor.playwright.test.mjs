@@ -443,6 +443,50 @@ async function main() {
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
+  console.log("");
+  console.log("=== subject_outline：全体設定で有効にすると色・太さのオプション欄が表示され、JSONに反映される ===");
+  const subjectOutlineHiddenAtOff = await page.evaluate(() => document.getElementById("subjectOutlineOptionsBody").hidden);
+  check(subjectOutlineHiddenAtOff, "既定(enabled=false)ではsubjectOutlineOptionsBodyは隠れている");
+  const projectBeforeEnable = await page.evaluate(() => buildProjectJSON(appState));
+  check(!("subject_outline" in projectBeforeEnable.style),
+    "既定のままではJSON出力にstyle.subject_outlineキー自体が出力されない（完全後方互換）");
+
+  await page.check("#subjectOutlineEnabledCheckbox");
+  await page.waitForTimeout(50);
+  const subjectOutlineEnabledAfterCheck = await page.evaluate(() => appState.subjectOutline.enabled);
+  check(subjectOutlineEnabledAfterCheck === true, "チェックを入れるとappState.subjectOutline.enabled=trueになる");
+  const subjectOutlineOptionsShown = await page.evaluate(() => !document.getElementById("subjectOutlineOptionsBody").hidden);
+  check(subjectOutlineOptionsShown, "有効にするとsubjectOutlineOptionsBodyが表示される");
+
+  const autoColorCheckedByDefault = await page.evaluate(() => document.getElementById("subjectOutlineAutoColorCheckbox").checked);
+  check(autoColorCheckedByDefault, "既定では「色を自動選択」がチェックされている（color=auto）");
+  const colorFieldHiddenWhenAuto = await page.evaluate(() => document.getElementById("subjectOutlineColorField").hidden);
+  check(colorFieldHiddenWhenAuto, "自動選択中は色選択欄が隠れている");
+
+  await page.uncheck("#subjectOutlineAutoColorCheckbox");
+  await page.waitForTimeout(50);
+  const colorFieldShownAfterUncheck = await page.evaluate(() => !document.getElementById("subjectOutlineColorField").hidden);
+  check(colorFieldShownAfterUncheck, "自動選択を外すと色選択欄が表示される");
+  await page.click("#subjectOutlineColorRow .subject-outline-color-btn[title=\"赤\"]");
+  await page.waitForTimeout(50);
+  const subjectOutlineColorAfterPreset = await page.evaluate(() => appState.subjectOutline.color);
+  check(subjectOutlineColorAfterPreset === "#FF3B30",
+    "色プリセット「赤」を選ぶとappState.subjectOutline.color=#FF3B30になる: " + subjectOutlineColorAfterPreset);
+
+  await page.fill("#subjectOutlineWidthSlider", "0.006");
+  await page.waitForTimeout(50);
+  const subjectOutlineWidthAfterFill = await page.evaluate(() => appState.subjectOutline.width);
+  check(Math.abs(subjectOutlineWidthAfterFill - 0.006) < 1e-6,
+    "スライダーでwidthを変更するとappState.subjectOutline.widthに反映される: " + subjectOutlineWidthAfterFill);
+
+  const projectAfterEnable = await page.evaluate(() => buildProjectJSON(appState));
+  check(!!projectAfterEnable.style.subject_outline && projectAfterEnable.style.subject_outline.enabled === true,
+    "JSON出力：style.subject_outline.enabledがtrueになる: " + JSON.stringify(projectAfterEnable.style.subject_outline));
+  check(projectAfterEnable.style.subject_outline.color === "#FF3B30",
+    "JSON出力：style.subject_outline.colorが反映される");
+  check(Math.abs(projectAfterEnable.style.subject_outline.width - 0.006) < 1e-6,
+    "JSON出力：style.subject_outline.widthが反映される");
+
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
   await context.close();

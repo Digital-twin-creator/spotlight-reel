@@ -737,6 +737,25 @@
           <input type="range" id="textBackingPaddingSlider" min="0" max="1" step="0.05" value="0.35">
         </div>
       </div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="subjectOutlineEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="subjectOutlineEnabledCheckbox">人物輪郭アウトライン（subject_outline） <span class="muted">mask_styleとは別レイヤー・どのmask_styleとも併用可</span></label>
+      </div>
+      <div id="subjectOutlineOptionsBody" hidden>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="subjectOutlineAutoColorCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="subjectOutlineAutoColorCheckbox">色を自動選択（背景の明るさに応じて白/黒）</label>
+        </div>
+        <div class="field" id="subjectOutlineColorField">
+          <label>輪郭線の色 color</label>
+          <div class="row wrap" id="subjectOutlineColorRow"></div>
+          <input type="text" id="subjectOutlineColorInput" placeholder="#FFFFFF" inputmode="none" style="width:7em;margin-top:4px;">
+        </div>
+        <div class="field">
+          <label>輪郭線の太さ width <span class="brush-slider-value" id="subjectOutlineWidthValue">0.002</span></label>
+          <input type="range" id="subjectOutlineWidthSlider" min="0.0005" max="0.01" step="0.0005" value="0.002">
+        </div>
+      </div>
       <div class="field">
         <label>出力解像度</label>
         <select id="outputModeSelect">
@@ -1054,6 +1073,22 @@ function resolveTextBackingOptions(opts) {
   var radius = Math.max(0, Number(opts.radius) || DEFAULT_TEXT_BACKING_OPTIONS.radius);
   var padding = Math.max(0, Number(opts.padding) || DEFAULT_TEXT_BACKING_OPTIONS.padding);
   return { color: color, opacity: clamp01(opacityRaw), radius: radius, padding: padding };
+}
+/**
+ * 人物輪郭アウトライン subject_outline（render.pyのSUBJECT_OUTLINE_DEFAULTSと同じ値）。
+ * mask_style="outline"とは独立の別レイヤーで、どのmask_styleとも併用できる。
+ */
+var DEFAULT_SUBJECT_OUTLINE = { enabled: false, width: 0.002, color: "auto" };
+/**
+ * subject_outline（enabled/width/color）を解決する
+ * （render.pyのresolve_subject_outline_configと同じ方針：不正/未指定はDEFAULT_SUBJECT_OUTLINEで補う）
+ */
+function resolveSubjectOutlineConfig(cfg) {
+  cfg = cfg || {};
+  var enabled = !!cfg.enabled;
+  var width = Math.max(0.0005, Number(cfg.width) || DEFAULT_SUBJECT_OUTLINE.width);
+  var color = cfg.color || DEFAULT_SUBJECT_OUTLINE.color;
+  return { enabled: enabled, width: width, color: color };
 }
 /** 行ごとのテロップ出現アクション（render.pyのTITLE_LINE_ANIMSと同じ値）。"" は未指定（従来のbounce/fade一斉表示） */
 var TITLE_LINE_ANIMS = ["bounce", "slide_right", "slide_left", "slide_up", "slide_down", "fade", "none"];
@@ -1494,6 +1529,18 @@ function buildProjectJSON(state) {
       padding: round(textBackingOpts.padding, 3)
     };
   }
+  // subject_outline（人物輪郭アウトライン）は全既定値（enabled=falseのまま）のときは
+  // キー自体を省略する（完全後方互換）。有効化するか既定と異なる値にした場合のみ書き出す。
+  var subjectOutlineCfg = resolveSubjectOutlineConfig(state.subjectOutline);
+  if (subjectOutlineCfg.enabled !== DEFAULT_SUBJECT_OUTLINE.enabled ||
+      subjectOutlineCfg.width !== DEFAULT_SUBJECT_OUTLINE.width ||
+      subjectOutlineCfg.color !== DEFAULT_SUBJECT_OUTLINE.color) {
+    project.style.subject_outline = {
+      enabled: subjectOutlineCfg.enabled,
+      width: round(subjectOutlineCfg.width, 4),
+      color: subjectOutlineCfg.color
+    };
+  }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
   // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
   var titleFontKey = state.titleFontKey || DEFAULT_TITLE_FONT_KEY;
@@ -1767,6 +1814,7 @@ function parseProjectJSON(json, sfxLibrary) {
     textBacking: resolveTextBacking(style.text_backing),
     autoContrast: style.auto_contrast !== undefined ? !!style.auto_contrast : DEFAULT_STYLE.auto_contrast,
     textBackingOptions: resolveTextBackingOptions(style.text_backing_options),
+    subjectOutline: resolveSubjectOutlineConfig(style.subject_outline),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -2927,6 +2975,8 @@ if (typeof module !== "undefined" && module.exports) {
     resolveTextBacking: resolveTextBacking,
     resolveTextBackingOptions: resolveTextBackingOptions,
     TEXT_BACKING_MODES_WITH_OPTIONS: TEXT_BACKING_MODES_WITH_OPTIONS,
+    DEFAULT_SUBJECT_OUTLINE: DEFAULT_SUBJECT_OUTLINE,
+    resolveSubjectOutlineConfig: resolveSubjectOutlineConfig,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3116,6 +3166,7 @@ var appState = {
   textBacking: DEFAULT_STYLE.text_backing,
   autoContrast: DEFAULT_STYLE.auto_contrast,
   textBackingOptions: Object.assign({}, DEFAULT_TEXT_BACKING_OPTIONS),
+  subjectOutline: Object.assign({}, DEFAULT_SUBJECT_OUTLINE),
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -3283,6 +3334,10 @@ function init() {
     "textBackingOpacitySlider", "textBackingOpacityValue",
     "textBackingRadiusSlider", "textBackingRadiusValue",
     "textBackingPaddingSlider", "textBackingPaddingValue",
+    "subjectOutlineEnabledCheckbox", "subjectOutlineOptionsBody",
+    "subjectOutlineAutoColorCheckbox", "subjectOutlineColorField",
+    "subjectOutlineColorRow", "subjectOutlineColorInput",
+    "subjectOutlineWidthSlider", "subjectOutlineWidthValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
@@ -3313,6 +3368,7 @@ function init() {
   buildBackgroundColorControls();
   buildMaskStyleColorControls();
   buildTextBackingColorControls();
+  buildSubjectOutlineColorControls();
   populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
   populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
 
@@ -3530,6 +3586,31 @@ function init() {
   els.textBackingPaddingSlider.addEventListener("input", function () {
     appState.textBackingOptions.padding = Number(els.textBackingPaddingSlider.value);
     els.textBackingPaddingValue.textContent = appState.textBackingOptions.padding.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.subjectOutlineEnabledCheckbox.addEventListener("change", function () {
+    appState.subjectOutline.enabled = els.subjectOutlineEnabledCheckbox.checked;
+    els.subjectOutlineOptionsBody.hidden = !appState.subjectOutline.enabled;
+    saveToLocalStorage();
+  });
+  els.subjectOutlineAutoColorCheckbox.addEventListener("change", function () {
+    var isAuto = els.subjectOutlineAutoColorCheckbox.checked;
+    appState.subjectOutline.color = isAuto ? "auto" : (isValidHexColor(els.subjectOutlineColorInput.value.trim())
+      ? els.subjectOutlineColorInput.value.trim().toUpperCase() : "#FFFFFF");
+    els.subjectOutlineColorField.hidden = isAuto;
+    saveToLocalStorage();
+  });
+  els.subjectOutlineColorInput.addEventListener("input", function () {
+    var v = els.subjectOutlineColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      appState.subjectOutline.color = v.toUpperCase();
+      updateSubjectOutlineColorPresetSelection();
+      saveToLocalStorage();
+    }
+  });
+  els.subjectOutlineWidthSlider.addEventListener("input", function () {
+    appState.subjectOutline.width = Number(els.subjectOutlineWidthSlider.value);
+    els.subjectOutlineWidthValue.textContent = appState.subjectOutline.width.toFixed(4);
     saveToLocalStorage();
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
@@ -6585,6 +6666,42 @@ function updateTextBackingColorPresetSelection() {
   }
 }
 
+function buildSubjectOutlineColorRow(rowEl, onPick) {
+  rowEl.innerHTML = "";
+  TITLE_COLOR_PRESETS.forEach(function (preset) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small ghost subject-outline-color-btn";
+    btn.title = preset.label;
+    btn.dataset.hex = preset.hex;
+    btn.innerHTML = '<span class="swatch" style="background:' + preset.hex + '"></span>';
+    btn.addEventListener("click", function () {
+      onPick(preset.hex);
+      updateSubjectOutlineColorPresetSelection();
+    });
+    rowEl.appendChild(btn);
+  });
+}
+
+function buildSubjectOutlineColorControls() {
+  buildSubjectOutlineColorRow(els.subjectOutlineColorRow, function (hex) {
+    appState.subjectOutline.color = hex;
+    els.subjectOutlineColorInput.value = hex;
+    els.subjectOutlineAutoColorCheckbox.checked = false;
+    els.subjectOutlineColorField.hidden = false;
+    saveToLocalStorage();
+  });
+  updateSubjectOutlineColorPresetSelection();
+}
+
+function updateSubjectOutlineColorPresetSelection() {
+  var buttons = els.subjectOutlineColorRow.querySelectorAll(".subject-outline-color-btn");
+  for (var i = 0; i < buttons.length; i++) {
+    var match = (buttons[i].dataset.hex || "").toLowerCase() === (appState.subjectOutline.color || "").toLowerCase();
+    buttons[i].classList.toggle("selected", match);
+  }
+}
+
 /* ---------------- ラストロゴ ---------------- */
 
 function handleLogoFileChange(e) {
@@ -6795,6 +6912,16 @@ function applySettingsToInputs() {
   els.textBackingPaddingSlider.value = appState.textBackingOptions.padding;
   els.textBackingPaddingValue.textContent = Number(appState.textBackingOptions.padding).toFixed(2);
   updateTextBackingColorPresetSelection();
+  appState.subjectOutline = resolveSubjectOutlineConfig(appState.subjectOutline);
+  els.subjectOutlineEnabledCheckbox.checked = !!appState.subjectOutline.enabled;
+  els.subjectOutlineOptionsBody.hidden = !appState.subjectOutline.enabled;
+  var isSubjectOutlineAuto = appState.subjectOutline.color === "auto";
+  els.subjectOutlineAutoColorCheckbox.checked = isSubjectOutlineAuto;
+  els.subjectOutlineColorField.hidden = isSubjectOutlineAuto;
+  els.subjectOutlineColorInput.value = isSubjectOutlineAuto ? "#FFFFFF" : appState.subjectOutline.color;
+  els.subjectOutlineWidthSlider.value = appState.subjectOutline.width;
+  els.subjectOutlineWidthValue.textContent = Number(appState.subjectOutline.width).toFixed(4);
+  updateSubjectOutlineColorPresetSelection();
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
@@ -6925,6 +7052,7 @@ function buildLocalStoragePayload(dropThumbs) {
     textBacking: appState.textBacking,
     autoContrast: appState.autoContrast,
     textBackingOptions: appState.textBackingOptions,
+    subjectOutline: appState.subjectOutline,
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
@@ -6997,6 +7125,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.textBacking = resolveTextBacking(data.textBacking);
     appState.autoContrast = data.autoContrast !== undefined ? !!data.autoContrast : DEFAULT_STYLE.auto_contrast;
     appState.textBackingOptions = resolveTextBackingOptions(data.textBackingOptions);
+    appState.subjectOutline = resolveSubjectOutlineConfig(data.subjectOutline);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
@@ -7720,6 +7849,7 @@ function handleJsonFileChange(e) {
       appState.textBacking = loaded.textBacking;
       appState.autoContrast = loaded.autoContrast;
       appState.textBackingOptions = loaded.textBackingOptions;
+      appState.subjectOutline = loaded.subjectOutline;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;

@@ -997,6 +997,50 @@ test("normalizeTitleLines/titleLineToJSON: 行ごとのtext_backingは値があ�
   assert.strictEqual(json2.text_backing, "box");
 });
 
+/* ---- subject_outline（人物輪郭アウトライン） ---- */
+
+test("resolveSubjectOutlineConfig: 未指定/不正値はDEFAULT_SUBJECT_OUTLINEで補う", () => {
+  const cfg = core.resolveSubjectOutlineConfig({});
+  assert.deepStrictEqual(cfg, core.DEFAULT_SUBJECT_OUTLINE);
+  const negWidth = core.resolveSubjectOutlineConfig({ enabled: true, width: -1, color: "auto" });
+  assert.ok(negWidth.width > 0, "widthが負の値でも下限でクランプされる");
+  assert.strictEqual(negWidth.enabled, true);
+  const customColor = core.resolveSubjectOutlineConfig({ color: "#FF0000" });
+  assert.strictEqual(customColor.color, "#FF0000");
+});
+
+test("buildProjectJSON: state.subjectOutlineが既定(enabled=false)ならstyle.subject_outlineキーを省略する（完全後方互換）", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual("subject_outline" in project.style, false);
+});
+
+test("buildProjectJSON: state.subjectOutline.enabled=trueならstyle.subject_outlineを明示的に出力する", () => {
+  const state = Object.assign(sampleState(), {
+    subjectOutline: { enabled: true, width: 0.005, color: "#00FF00" }
+  });
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.subject_outline, { enabled: true, width: 0.005, color: "#00FF00" });
+});
+
+test("parseProjectJSON: style.subject_outlineを読み込める。省略時はDEFAULT_SUBJECT_OUTLINEを補う", () => {
+  const loaded = core.parseProjectJSON({
+    style: { subject_outline: { enabled: true, width: 0.003, color: "auto" } },
+    freezes: [],
+  });
+  assert.deepStrictEqual(loaded.subjectOutline, { enabled: true, width: 0.003, color: "auto" });
+  const defaultLoaded = core.parseProjectJSON({ freezes: [] });
+  assert.deepStrictEqual(defaultLoaded.subjectOutline, core.DEFAULT_SUBJECT_OUTLINE);
+});
+
+test("buildProjectJSON/parseProjectJSON: 全体設定のsubjectOutlineを往復できる", () => {
+  const state = Object.assign(sampleState(), {
+    subjectOutline: { enabled: true, width: 0.004, color: "#123ABC" }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.deepStrictEqual(loaded.subjectOutline, state.subjectOutline);
+});
+
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }
