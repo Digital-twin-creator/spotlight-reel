@@ -183,6 +183,18 @@ async function main() {
   await page.dispatchEvent("#logoColorInput", "input");
   project = await page.evaluate(() => buildProjectJSON(appState));
   check(project.logo.background === "#112233", "色指定モードで選んだ色がJSONに反映される: " + project.logo.background);
+  const logoHexSynced = await page.inputValue("#logoColorHexInput");
+  check(logoHexSynced.toUpperCase() === "#112233",
+    "色ホイールの操作で16進テキスト欄（#logoColorHexInput）も同期する: " + logoHexSynced);
+  const logoNameLabel = await page.textContent("#logoColorNameLabel");
+  check(!!logoNameLabel && logoNameLabel.trim().length > 0,
+    "色ホイールの操作で色名ラベル（#logoColorNameLabel）にも近い色名が表示される: " + logoNameLabel);
+
+  await page.fill("#logoColorHexInput", "#a52a2a");
+  await page.dispatchEvent("#logoColorHexInput", "input");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.background.toUpperCase() === "#A52A2A",
+    "16進テキスト欄への直接入力でもJSONに反映される: " + project.logo.background);
 
   await page.selectOption("#logoBackgroundSelect", "auto");
   project = await page.evaluate(() => buildProjectJSON(appState));
@@ -287,8 +299,12 @@ async function main() {
     "hashtags.positionが選択どおりになる: " + (project.hashtags && project.hashtags.position));
   check(project.hashtags && project.hashtags.size === 0.032,
     "hashtags.sizeがスライダー操作どおりになる: " + (project.hashtags && project.hashtags.size));
-  check(project.hashtags && project.hashtags.color === "#ff0000",
-    "hashtags.colorが入力どおりになる: " + (project.hashtags && project.hashtags.color));
+  check(project.hashtags && project.hashtags.color.toUpperCase() === "#FF0000",
+    "hashtags.colorが入力どおりになる（wireColorPickerは他の色欄と同じく大文字で統一する）: "
+    + (project.hashtags && project.hashtags.color));
+  const hashtagsHexSynced = await page.inputValue("#hashtagsColorHexInput");
+  check(hashtagsHexSynced.toUpperCase() === "#FF0000",
+    "色ホイールの操作で16進テキスト欄（#hashtagsColorHexInput）も同期する: " + hashtagsHexSynced);
   check(project.hashtags && project.hashtags.backing === "box",
     "hashtags.backingが選択どおりになる: " + (project.hashtags && project.hashtags.backing));
   check(project.hashtags && project.hashtags.always === true, "hashtags.alwaysの既定はtrue");

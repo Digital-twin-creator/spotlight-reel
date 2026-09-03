@@ -108,13 +108,14 @@ async function main() {
   check(box.textH > 0, "ブロックの高さが1行分より大きい（複数行が縦に積まれている）: " + box.textH);
 
   console.log("");
-  console.log("=== 行ごとの文字色プリセット：クリックするとdraft.titleLines[].colorに反映される ===");
-  await page.click(".title-line-row:nth-child(1) .title-line-color-btn[title=\"金\"]");
+  console.log("=== 行ごとの文字色：色ホイール／16進テキスト欄がdraft.titleLines[].colorに反映される ===");
+  await page.fill(".title-line-row:nth-child(1) .title-line-color-wheel", "#e6c15c");
+  await page.dispatchEvent(".title-line-row:nth-child(1) .title-line-color-wheel", "input");
   await page.waitForTimeout(50);
   const line1Color = await page.evaluate(() => draft.titleLines[0].color);
-  check(line1Color === "#E6C15C", "1行目に「金」プリセットを選ぶとcolor=#E6C15Cになる: " + line1Color);
-  const colorBtnSelected = await page.locator(".title-line-row:nth-child(1) .title-line-color-btn[title=\"金\"]").evaluate((el) => el.classList.contains("selected"));
-  check(colorBtnSelected, "選択したプリセットボタンにselectedクラスが付く");
+  check(line1Color === "#E6C15C", "1行目の色ホイールで金色を選ぶとcolor=#E6C15Cになる: " + line1Color);
+  const line1HexSynced = await page.inputValue(".title-line-row:nth-child(1) .title-line-color-input");
+  check(line1HexSynced === "#E6C15C", "色ホイールの操作で16進テキスト欄も同期する: " + line1HexSynced);
 
   await page.fill(".title-line-row:nth-child(2) .title-line-color-input", "#ff3b30");
   await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-color-input", "input");
@@ -265,10 +266,11 @@ async function main() {
   const bgOptionsShown = await page.evaluate(() => !document.getElementById("backgroundOptionsBody").hidden);
   check(bgOptionsShown, "halftoneを選ぶとbackgroundOptionsBodyが表示される");
 
-  await page.click("#backgroundBaseColorRow .background-color-btn[title=\"黒\"]");
+  await page.fill("#backgroundBaseColorInput", "#000000");
+  await page.dispatchEvent("#backgroundBaseColorInput", "input");
   await page.waitForTimeout(50);
   const bgBaseAfterPreset = await page.evaluate(() => appState.backgroundOptions.base);
-  check(bgBaseAfterPreset === "#000000", "base色プリセット「黒」を選ぶとappState.backgroundOptions.base=#000000になる: " + bgBaseAfterPreset);
+  check(bgBaseAfterPreset === "#000000", "base色の16進テキスト欄に黒を入れるとappState.backgroundOptions.base=#000000になる: " + bgBaseAfterPreset);
 
   await page.fill("#backgroundAccentColorInput", "#00aaff");
   await page.dispatchEvent("#backgroundAccentColorInput", "input");
@@ -362,10 +364,11 @@ async function main() {
   const maskStyleOptionsShown = await page.evaluate(() => !document.getElementById("maskStyleOptionsBody").hidden);
   check(maskStyleOptionsShown, "outlineを選ぶとmaskStyleOptionsBodyが表示される");
 
-  await page.click("#maskStyleColorRow .mask-style-color-btn[title=\"赤\"]");
+  await page.fill("#maskStyleColorInput", "#ff3b30");
+  await page.dispatchEvent("#maskStyleColorInput", "input");
   await page.waitForTimeout(50);
   const maskStyleColorAfterPreset = await page.evaluate(() => appState.maskStyleOptions.color);
-  check(maskStyleColorAfterPreset === "#FF3B30", "色プリセット「赤」を選ぶとappState.maskStyleOptions.color=#FF3B30になる: " + maskStyleColorAfterPreset);
+  check(maskStyleColorAfterPreset === "#FF3B30", "16進テキスト欄に赤を入れるとappState.maskStyleOptions.color=#FF3B30になる: " + maskStyleColorAfterPreset);
 
   await page.fill("#maskStyleScaleSlider", "0.02");
   await page.dispatchEvent("#maskStyleScaleSlider", "input");
@@ -411,10 +414,11 @@ async function main() {
   const backingOptionsShown = await page.evaluate(() => !document.getElementById("textBackingOptionsBody").hidden);
   check(backingOptionsShown, "boxを選ぶとtextBackingOptionsBodyが表示される");
 
-  await page.click("#textBackingColorRow .text-backing-color-btn[title=\"赤\"]");
+  await page.fill("#textBackingColorInput", "#ff3b30");
+  await page.dispatchEvent("#textBackingColorInput", "input");
   await page.waitForTimeout(50);
   const backingColorAfterPreset = await page.evaluate(() => appState.textBackingOptions.color);
-  check(backingColorAfterPreset === "#FF3B30", "色プリセット「赤」を選ぶとappState.textBackingOptions.color=#FF3B30になる: " + backingColorAfterPreset);
+  check(backingColorAfterPreset === "#FF3B30", "16進テキスト欄に赤を入れるとappState.textBackingOptions.color=#FF3B30になる: " + backingColorAfterPreset);
 
   await page.uncheck("#autoContrastCheckbox");
   await page.waitForTimeout(50);
@@ -467,11 +471,12 @@ async function main() {
   await page.waitForTimeout(50);
   const colorFieldShownAfterUncheck = await page.evaluate(() => !document.getElementById("subjectOutlineColorField").hidden);
   check(colorFieldShownAfterUncheck, "自動選択を外すと色選択欄が表示される");
-  await page.click("#subjectOutlineColorRow .subject-outline-color-btn[title=\"赤\"]");
+  await page.fill("#subjectOutlineColorInput", "#ff3b30");
+  await page.dispatchEvent("#subjectOutlineColorInput", "input");
   await page.waitForTimeout(50);
   const subjectOutlineColorAfterPreset = await page.evaluate(() => appState.subjectOutline.color);
   check(subjectOutlineColorAfterPreset === "#FF3B30",
-    "色プリセット「赤」を選ぶとappState.subjectOutline.color=#FF3B30になる: " + subjectOutlineColorAfterPreset);
+    "16進テキスト欄に赤を入れるとappState.subjectOutline.color=#FF3B30になる: " + subjectOutlineColorAfterPreset);
 
   await page.fill("#subjectOutlineWidthSlider", "0.006");
   await page.waitForTimeout(50);

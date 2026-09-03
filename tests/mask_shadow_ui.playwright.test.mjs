@@ -670,8 +670,8 @@ async function main() {
   // ことを確認する（以前は既定で閉じていたため見落とされていた）。
   check(await page.evaluate(() => document.getElementById("settingsSection").open),
     "settingsSectionはページ読み込み直後から既定で開いている（影の色プリセットが最初から見える）");
-  check(await page.isVisible("#filmColorPresetRow"),
-    "何も操作しなくても影の色プリセット行（#filmColorPresetRow）が最初から見えている");
+  check(await page.isVisible("#shadowColorWheel"),
+    "何も操作しなくても影の色ホイール（#shadowColorWheel）が最初から見えている");
 
   console.log("");
   console.log("=== 全体設定：影（フィルム色）のオン/オフとスライダー・方向 ===");
@@ -695,7 +695,7 @@ async function main() {
 
   await page.check("#shadowEnabledCheckbox");
   check(await page.isVisible("#shadowOptionsBody"), "影オンでshadowOptionsBodyが表示される");
-  check(await page.isVisible("#filmColorPresetRow"), "影オンで色プリセット行（#filmColorPresetRow）が表示される");
+  check(await page.isVisible("#shadowColorWheel"), "影オンで色ホイール（#shadowColorWheel）が表示される");
   await page.fill("#shadowDistanceSlider", "0.05");
   await page.dispatchEvent("#shadowDistanceSlider", "input");
   await page.fill("#shadowBlurSlider", "0.04");
@@ -715,11 +715,17 @@ async function main() {
   const styleAutoDir = (await page.evaluate(() => buildProjectJSON(appState))).style;
   check(styleAutoDir.shadow.direction === "auto", "shadowDirectionSelectを'自動'に戻すとstyle.shadow.directionが'auto'になる: " + styleAutoDir.shadow.direction);
 
-  const presetHex = await page.evaluate(() => Object.values(FILM_COLOR_PRESETS)[1]);
-  await page.locator("#filmColorPresetRow .film-color-btn").nth(1).click();
+  await page.fill("#shadowColorInput", "#00c8ff");
+  await page.dispatchEvent("#shadowColorInput", "input");
   const styleWithPresetColor = (await page.evaluate(() => buildProjectJSON(appState))).style;
-  check(styleWithPresetColor.shadow.color.toLowerCase() === presetHex.toLowerCase(),
-    "色プリセットをクリックするとstyle.shadow.colorがそのプリセット色になる: " + styleWithPresetColor.shadow.color);
+  check(styleWithPresetColor.shadow.color.toLowerCase() === "#00c8ff",
+    "16進テキスト欄に色を入力するとstyle.shadow.colorがその色になる: " + styleWithPresetColor.shadow.color);
+  const wheelSynced = await page.inputValue("#shadowColorWheel");
+  check(wheelSynced.toLowerCase() === "#00c8ff",
+    "16進テキスト欄への入力で色ホイール（#shadowColorWheel）の値も同期する: " + wheelSynced);
+  const nameLabelSynced = await page.textContent("#shadowColorNameLabel");
+  check(!!nameLabelSynced && nameLabelSynced.trim().length > 0,
+    "16進テキスト欄への入力で色名ラベル（#shadowColorNameLabel）にも近い色名が表示される: " + nameLabelSynced);
 
   console.log("");
   console.log("=== 全体設定：reveal（wipe/fade） ===");
