@@ -3395,14 +3395,69 @@ function evenDown(n) {
 }
 
 /**
- * Git Data API（blobs）が1ファイルあたり受け付ける上限バイト数。
- * これを超える動画はアップロード前に中断し、大きすぎる旨をユーザーに表示する。
+ * Git Data API（blobs）は、base64化後の巨大な単一JSON POSTだと実機で
+ * 422「Sorry, your input was too large to process」を返すことがある
+ * （100MB程度の生バイト数でも起こりうる）。そのため、これを超えるファイルは
+ * CHUNK_SIZE_BYTESごとに分割し、パートごとに個別のblobとしてアップロードする。
  */
-var MAX_BLOB_BYTES = 100 * 1024 * 1024;
+var CHUNK_SIZE_BYTES = 20 * 1024 * 1024;
 
-/** ファイルサイズがGit Data APIのblob上限を超えているか */
-function exceedsBlobLimit(sizeBytes) {
-  return (sizeBytes || 0) > MAX_BLOB_BYTES;
+/**
+ * エディタ側で事前にはじく、アップロード対象ファイル合計サイズの上限。
+ * 分割アップロード自体は上限なく機能するが、実機（モバイル回線・メモリ）での
+ * 現実的な所要時間・安定性を考え、合計400MBを超える場合はアップロードを開始せず中断する。
+ */
+var MAX_TOTAL_UPLOAD_BYTES = 400 * 1024 * 1024;
+
+/** ファイルサイズがチャンク分割の閾値を超えているか（超えていれば分割アップロード対象） */
+function needsChunkedUpload(sizeBytes) {
+  return (sizeBytes || 0) > CHUNK_SIZE_BYTES;
+}
+
+/** ファイルサイズから、CHUNK_SIZE_BYTESごとに分割した場合のパート数を求める（最低1） */
+function chunkCount(sizeBytes) {
+  return Math.max(1, Math.ceil((sizeBytes || 0) / CHUNK_SIZE_BYTES));
+}
+
+/** 分割アップロードするパートのtreeパスを組み立てる（"video.mp4" + 0 → "video.mp4.part000"） */
+function chunkPartPath(assetName, partIndex) {
+  return assetName + ".part" + String(partIndex).padStart(3, "0");
+}
+
+/** アップロード対象ファイル合計サイズが、事前確認の上限（400MB）を超えているか */
+function exceedsTotalUploadLimit(totalBytes) {
+  return (totalBytes || 0) > MAX_TOTAL_UPLOAD_BYTES;
+}
+
+/**
+ * manifest.json に記録する1ファイル分のエントリを組み立てる。
+ * name: job branch内でのアセット名（"video.mp4"等。パート分割時は".partNNN"を除いた基準名）
+ * originalName: アップロード元ファイルの本来のファイル名（記録用。拡張子判定等には使わない）
+ * sha256: 分割前の元ファイル全体に対するSHA-256の16進文字列（render.yml側での結合後検証用）
+ */
+function buildManifestEntry(name, originalName, sizeBytes, sha256Hex) {
+  return {
+    name: name,
+    originalName: originalName || name,
+    parts: chunkCount(sizeBytes),
+    size: sizeBytes || 0,
+    sha256: sha256Hex
+  };
+}
+
+/** manifest.json 本体を組み立てる。分割されたファイルが1つも無ければ呼び出し側でmanifest自体を省略する */
+function buildManifestPayload(fileEntries) {
+  return { version: 1, files: fileEntries || [] };
+}
+
+/** ArrayBufferを小文字16進文字列に変換する（crypto.subtle.digestの結果からSHA-256文字列を作るのに使う） */
+function bufferToHex(buffer) {
+  var bytes = new Uint8Array(buffer);
+  var hex = new Array(bytes.length);
+  for (var i = 0; i < bytes.length; i++) {
+    hex[i] = bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex.join("");
 }
 
 /** GitHub Release作成APIに送るボディを組み立てる */
@@ -3706,8 +3761,15 @@ if (typeof module !== "undefined" && module.exports) {
     evenDown: evenDown,
     MASK_PREVIEW_LONG_EDGE_PX: MASK_PREVIEW_LONG_EDGE_PX,
     videoAssetName: videoAssetName,
-    MAX_BLOB_BYTES: MAX_BLOB_BYTES,
-    exceedsBlobLimit: exceedsBlobLimit,
+    CHUNK_SIZE_BYTES: CHUNK_SIZE_BYTES,
+    MAX_TOTAL_UPLOAD_BYTES: MAX_TOTAL_UPLOAD_BYTES,
+    needsChunkedUpload: needsChunkedUpload,
+    chunkCount: chunkCount,
+    chunkPartPath: chunkPartPath,
+    exceedsTotalUploadLimit: exceedsTotalUploadLimit,
+    buildManifestEntry: buildManifestEntry,
+    buildManifestPayload: buildManifestPayload,
+    bufferToHex: bufferToHex,
     buildReleasePayload: buildReleasePayload,
     buildDispatchPayload: buildDispatchPayload,
     buildBlobPayload: buildBlobPayload,
@@ -8820,8 +8882,8 @@ function blobToBase64(blob, onProgress) {
 
 /**
  * Git Data API へ、base64化済みのファイル内容をblobとして送る。
- * 動画は最大100MB（≒base64化後133MB程度）になりうる単一の大きなJSON POSTのため、
- * fetchではなくXHRを使い upload.onprogress で進捗を表示する。
+ * 分割アップロード後も1パートあたり最大CHUNK_SIZE_BYTES（20MB。≒base64化後27MB程度）の
+ * 単一のJSON POSTになるため、fetchではなくXHRを使い upload.onprogress で進捗を表示する。
  */
 function ghCreateBlob(user, repo, token, base64Content, onProgress) {
   var url = ghApiBase(user, repo) + "/git/blobs";
@@ -8855,6 +8917,73 @@ function ghCreateBlob(user, repo, token, base64Content, onProgress) {
     };
     xhr.send(body);
   });
+}
+
+/** ファイル全体（分割前）のSHA-256を16進文字列で求める。manifest.json記録・結合後検証に使う */
+function sha256OfFile(file) {
+  return file.arrayBuffer().then(function (buf) {
+    return crypto.subtle.digest("SHA-256", buf);
+  }).then(bufferToHex);
+}
+
+/**
+ * 1ファイルをGit Data APIへアップロードする。CHUNK_SIZE_BYTES以下ならこれまで通り単一blobとして
+ * アップロードし、超える場合はFile.slice()でCHUNK_SIZE_BYTESごとに分割し、パートごとに個別の
+ * blobとしてアップロードする（".partNNN"のtreeエントリを複数作る）。
+ * 戻り値: { entries: [{path, sha}, ...], manifestEntry: {...} | null }
+ * manifestEntryは分割した場合のみ非null（呼び出し側がmanifest.jsonへ集約する）。
+ * onProgress(pct, label): 0-100の進捗と、パート単位の状況を表す短いラベルを都度通知する。
+ */
+function uploadFileChunked(user, repo, token, file, assetName, originalName, onProgress) {
+  var report = onProgress || function () {};
+  if (!needsChunkedUpload(file.size)) {
+    return blobToBase64(file, function (pct) { report(pct * 0.5, ""); })
+      .then(function (base64) {
+        return ghCreateBlob(user, repo, token, base64, function (pct) { report(50 + pct * 0.5, ""); });
+      })
+      .then(function (blob) {
+        return { entries: [{ path: assetName, sha: blob.sha }], manifestEntry: null };
+      });
+  }
+
+  var total = chunkCount(file.size);
+  var entries = [];
+  var sha256Hex = null;
+  return sha256OfFile(file)
+    .then(function (hex) {
+      sha256Hex = hex;
+      var chain = Promise.resolve();
+      for (var i = 0; i < total; i++) {
+        (function (partIndex) {
+          var start = partIndex * CHUNK_SIZE_BYTES;
+          var end = Math.min(start + CHUNK_SIZE_BYTES, file.size);
+          var partBlob = file.slice(start, end);
+          var partPath = chunkPartPath(assetName, partIndex);
+          var label = "パート" + (partIndex + 1) + "/" + total;
+          chain = chain
+            .then(function () {
+              return blobToBase64(partBlob, function (pct) {
+                report(((partIndex + pct / 100 * 0.5) / total) * 100, label);
+              });
+            })
+            .then(function (base64) {
+              return ghCreateBlob(user, repo, token, base64, function (pct) {
+                report(((partIndex + 0.5 + pct / 100 * 0.5) / total) * 100, label);
+              });
+            })
+            .then(function (blob) {
+              entries.push({ path: partPath, sha: blob.sha });
+            });
+        })(i);
+      }
+      return chain;
+    })
+    .then(function () {
+      return {
+        entries: entries,
+        manifestEntry: buildManifestEntry(assetName, originalName || file.name, file.size, sha256Hex)
+      };
+    });
 }
 
 /** workflow_dispatch はrun idを返さないため、run一覧を数回ポーリングして自分のrunを見つける */
@@ -8953,10 +9082,6 @@ function startMakeVideoJob() {
   }
 
   var videoFile = appState.videoFile;
-  if (exceedsBlobLimit(videoFile.size)) {
-    showJobError("動画が大きすぎます（上限100MB）。短くするか解像度を下げてください");
-    return;
-  }
 
   var logoFile = (appState.logo && appState.logo.imageFile) || null;
   if (appState.logo && appState.logo.imageName && !logoFile) {
@@ -8964,19 +9089,11 @@ function startMakeVideoJob() {
     els.logoSection.open = true;
     return;
   }
-  if (logoFile && exceedsBlobLimit(logoFile.size)) {
-    showJobError("ロゴ画像が大きすぎます（上限100MB）");
-    return;
-  }
 
   var watermarkFile = (appState.watermark && appState.watermark.imageFile) || null;
   if (appState.watermark && appState.watermark.imageName && !watermarkFile) {
     showJobError("透かしロゴの設定が残っていますが画像が選び直されていません。透かしロゴ画像を選び直してください");
     els.watermarkSection.open = true;
-    return;
-  }
-  if (watermarkFile && exceedsBlobLimit(watermarkFile.size)) {
-    showJobError("透かしロゴ画像が大きすぎます（上限100MB）");
     return;
   }
 
@@ -8988,14 +9105,35 @@ function startMakeVideoJob() {
     els.ghSettingsDetails.open = true;
     return;
   }
-  persistGhSettings(user, repo, token);
 
-  var warnings = validateProjectForConfirmation(appState);
-  if (warnings.length > 0) {
-    showConfirmWarningsModal(warnings);
-    return;
-  }
-  runMakeVideoJobUpload();
+  // 動画・ロゴ・透かしロゴ・使用中の効果音（IndexedDB上のメタデータのみ、Blob本体は読まない）
+  // の合計サイズを、アップロード（通信）を一切開始する前に事前確認する。
+  // 分割アップロード自体はファイルサイズに上限を設けないが、実機での現実的な所要時間・
+  // 安定性を考え、合計400MBを超える場合はここで中断する。
+  var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
+  sfxLibraryListMeta()
+    .then(function (metas) {
+      var sfxTotal = (metas || [])
+        .filter(function (m) { return usedSfxIds.indexOf(m.id) >= 0; })
+        .reduce(function (sum, m) { return sum + (m.size || 0); }, 0);
+      var totalBytes = videoFile.size + (logoFile ? logoFile.size : 0) + (watermarkFile ? watermarkFile.size : 0) + sfxTotal;
+      if (exceedsTotalUploadLimit(totalBytes)) {
+        showJobError("動画が大きすぎます。iPhoneの写真アプリで書き出し時に解像度を下げるか、短くトリミングしてください");
+        return;
+      }
+
+      persistGhSettings(user, repo, token);
+
+      var warnings = validateProjectForConfirmation(appState);
+      if (warnings.length > 0) {
+        showConfirmWarningsModal(warnings);
+        return;
+      }
+      runMakeVideoJobUpload();
+    })
+    .catch(function (err) {
+      showJobError("アップロード前の確認に失敗しました: " + (err && err.message ? err.message : err));
+    });
 }
 
 /** レンダリングは通るが意図と違う結果になりそうな警告を、確認モーダルに一覧表示する */
@@ -9023,13 +9161,14 @@ function runMakeVideoJobUpload() {
   var jsonBlob = new Blob([currentProjectJSONText()], { type: "application/json" });
   var baseCommitSha = null;
   var jsonBlobSha = null;
-  var videoBlobSha = null;
-  var logoBlobSha = null;
-  var watermarkBlobSha = null;
   var releaseInfo = null;
   var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
+  var videoTreeEntries = [];
+  var logoTreeEntries = [];
+  var watermarkTreeEntries = [];
   var sfxTreeEntries = [];
   var confirmedAlphaTreeEntries = [];
+  var manifestFileEntries = [];
 
   setJobButtonBusy(true);
   showJobProgress(2, "リリースを作成中…");
@@ -9051,41 +9190,36 @@ function runMakeVideoJobUpload() {
     })
     .then(function (blob) {
       jsonBlobSha = blob.sha;
-      showJobProgress(14, "動画をBase64に変換中… 0%");
-      return blobToBase64(videoFile, function (pct) {
-        showJobProgress(14 + pct * 0.36, "動画をBase64に変換中… " + pct + "%");
+      showJobProgress(14, "動画をアップロード中… 0%");
+      return uploadFileChunked(user, repo, token, videoFile, videoName, videoFile.name, function (pct, label) {
+        showJobProgress(14 + pct * 0.70, "動画をアップロード中…" + (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
       });
     })
-    .then(function (videoBase64) {
-      showJobProgress(50, "動画をアップロード中… 0%");
-      return ghCreateBlob(user, repo, token, videoBase64, function (pct) {
-        showJobProgress(50 + pct * 0.35, "動画をアップロード中… " + pct + "%");
+    .then(function (result) {
+      videoTreeEntries = result.entries;
+      if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+      if (!logoFile) return null;
+      showJobProgress(84, "ロゴ画像をアップロード中… 0%");
+      return uploadFileChunked(user, repo, token, logoFile, logoAssetName(logoFile.name), logoFile.name, function (pct, label) {
+        showJobProgress(84 + pct * 0.02, "ロゴ画像をアップロード中…" + (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
       });
     })
-    .then(function (blob) {
-      videoBlobSha = blob.sha;
-      if (!logoFile) return null;
-      showJobProgress(84, "ロゴ画像をBase64に変換中…");
-      return blobToBase64(logoFile);
-    })
-    .then(function (logoBase64) {
-      if (!logoFile) return null;
-      showJobProgress(86, "ロゴ画像をアップロード中…");
-      return ghCreateBlob(user, repo, token, logoBase64);
-    })
-    .then(function (logoBlob) {
-      if (logoBlob) logoBlobSha = logoBlob.sha;
+    .then(function (result) {
+      if (result) {
+        logoTreeEntries = result.entries;
+        if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+      }
       if (!watermarkFile) return null;
-      showJobProgress(86.3, "透かしロゴ画像をBase64に変換中…");
-      return blobToBase64(watermarkFile);
+      showJobProgress(86, "透かしロゴ画像をアップロード中… 0%");
+      return uploadFileChunked(user, repo, token, watermarkFile, watermarkAssetName(watermarkFile.name), watermarkFile.name, function (pct, label) {
+        showJobProgress(86 + pct * 0.007, "透かしロゴ画像をアップロード中…" + (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
+      });
     })
-    .then(function (watermarkBase64) {
-      if (!watermarkFile) return null;
-      showJobProgress(86.6, "透かしロゴ画像をアップロード中…");
-      return ghCreateBlob(user, repo, token, watermarkBase64);
-    })
-    .then(function (watermarkBlob) {
-      if (watermarkBlob) watermarkBlobSha = watermarkBlob.sha;
+    .then(function (result) {
+      if (result) {
+        watermarkTreeEntries = result.entries;
+        if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+      }
       // 効果音ライブラリ（自分のmp3/wav）のうち、実際に使われているファイルだけを
       // 1件ずつIndexedDBから取り出してアップロードする（動画・ロゴ画像と同じGit Data API経由）
       showJobProgress(87, "効果音ファイルをアップロード中… 0/" + usedSfxIds.length);
@@ -9095,11 +9229,12 @@ function runMakeVideoJobUpload() {
           .then(function () { return sfxLibraryGetRecord(id); })
           .then(function (record) {
             if (!record || !record.blob) return null;
-            return blobToBase64(record.blob).then(function (base64) {
-              return ghCreateBlob(user, repo, token, base64).then(function (blob) {
-                sfxTreeEntries.push({ path: sfxLibraryAssetPath(record.id, record.name), sha: blob.sha });
-                showJobProgress(87, "効果音ファイルをアップロード中… " + (i + 1) + "/" + usedSfxIds.length);
-              });
+            var sfxPath = sfxLibraryAssetPath(record.id, record.name);
+            return uploadFileChunked(user, repo, token, record.blob, sfxPath, record.name, function (pct, label) {
+              showJobProgress(87, "効果音ファイルをアップロード中… " + (i + 1) + "/" + usedSfxIds.length + (label ? "（" + label + "）" : ""));
+            }).then(function (result) {
+              sfxTreeEntries = sfxTreeEntries.concat(result.entries);
+              if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
             });
           });
       });
@@ -9118,22 +9253,32 @@ function runMakeVideoJobUpload() {
     })
     .then(function (entries) {
       confirmedAlphaTreeEntries = entries;
-      showJobProgress(88, "コミットを作成中…");
-      return ghGetCommit(user, repo, token, baseCommitSha);
+      // 1つでも分割アップロードしたファイルがあれば、結合・検証用のmanifest.jsonも
+      // 1つのblobとしてコミットに含める（render.yml/extract.yml側がcheckout後に読む）
+      if (manifestFileEntries.length === 0) return null;
+      showJobProgress(87.8, "manifest.json を準備中…");
+      var manifestBlob = new Blob([JSON.stringify(buildManifestPayload(manifestFileEntries), null, 2)], { type: "application/json" });
+      return blobToBase64(manifestBlob).then(function (base64) {
+        return ghCreateBlob(user, repo, token, base64);
+      });
     })
-    .then(function (baseCommit) {
-      var entries = [
-        { path: "project.json", sha: jsonBlobSha },
-        { path: videoName, sha: videoBlobSha }
-      ];
-      if (logoFile && logoBlobSha) {
-        entries.push({ path: logoAssetName(logoFile.name), sha: logoBlobSha });
-      }
-      if (watermarkFile && watermarkBlobSha) {
-        entries.push({ path: watermarkAssetName(watermarkFile.name), sha: watermarkBlobSha });
-      }
-      entries = entries.concat(sfxTreeEntries).concat(confirmedAlphaTreeEntries);
-      return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
+    .then(function (manifestBlobResult) {
+      showJobProgress(88, "コミットを作成中…");
+      var manifestTreeEntries = manifestBlobResult ? [{ path: "manifest.json", sha: manifestBlobResult.sha }] : [];
+      return ghGetCommit(user, repo, token, baseCommitSha).then(function (baseCommit) {
+        return { baseCommit: baseCommit, manifestTreeEntries: manifestTreeEntries };
+      });
+    })
+    .then(function (ctx) {
+      var entries = [{ path: "project.json", sha: jsonBlobSha }];
+      entries = entries
+        .concat(videoTreeEntries)
+        .concat(logoTreeEntries)
+        .concat(watermarkTreeEntries)
+        .concat(sfxTreeEntries)
+        .concat(confirmedAlphaTreeEntries)
+        .concat(ctx.manifestTreeEntries);
+      return ghCreateTree(user, repo, token, ctx.baseCommit.tree.sha, entries);
     })
     .then(function (tree) {
       return ghCreateCommit(user, repo, token, "spotlight-reel editor: " + tag, tree.sha, baseCommitSha);

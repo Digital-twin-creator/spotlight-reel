@@ -2637,15 +2637,82 @@ test("videoAssetName: 拡張子が無ければ video.mp4 にフォールバッ�
   assert.strictEqual(core.videoAssetName(""), "video.mp4");
 });
 
-/* ---- exceedsBlobLimit ---- */
-test("exceedsBlobLimit: 100MBちょうどは超過ではない", () => {
-  assert.strictEqual(core.exceedsBlobLimit(core.MAX_BLOB_BYTES), false);
+/* ---- needsChunkedUpload / chunkCount / chunkPartPath ---- */
+test("needsChunkedUpload: 20MBちょうどは分割不要", () => {
+  assert.strictEqual(core.needsChunkedUpload(core.CHUNK_SIZE_BYTES), false);
 });
-test("exceedsBlobLimit: 100MBを1バイトでも超えたら超過", () => {
-  assert.strictEqual(core.exceedsBlobLimit(core.MAX_BLOB_BYTES + 1), true);
+test("needsChunkedUpload: 20MBを1バイトでも超えたら分割対象", () => {
+  assert.strictEqual(core.needsChunkedUpload(core.CHUNK_SIZE_BYTES + 1), true);
 });
-test("exceedsBlobLimit: 小さいファイルは超過ではない", () => {
-  assert.strictEqual(core.exceedsBlobLimit(1024), false);
+test("needsChunkedUpload: 小さいファイルは分割不要", () => {
+  assert.strictEqual(core.needsChunkedUpload(1024), false);
+});
+
+test("chunkCount: 20MBちょうどは1パート", () => {
+  assert.strictEqual(core.chunkCount(core.CHUNK_SIZE_BYTES), 1);
+});
+test("chunkCount: 20MB+1バイトは2パート", () => {
+  assert.strictEqual(core.chunkCount(core.CHUNK_SIZE_BYTES + 1), 2);
+});
+test("chunkCount: 60MBちょうどは3パート", () => {
+  assert.strictEqual(core.chunkCount(3 * core.CHUNK_SIZE_BYTES), 3);
+});
+test("chunkCount: 0バイトでも最低1パート", () => {
+  assert.strictEqual(core.chunkCount(0), 1);
+});
+
+test("chunkPartPath: 3桁ゼロ埋めのpartNNNサフィックスを付ける", () => {
+  assert.strictEqual(core.chunkPartPath("video.mp4", 0), "video.mp4.part000");
+  assert.strictEqual(core.chunkPartPath("video.mp4", 1), "video.mp4.part001");
+  assert.strictEqual(core.chunkPartPath("video.mp4", 12), "video.mp4.part012");
+});
+test("chunkPartPath: 3桁を超えるパート数でも桁が伸びるだけで壊れない", () => {
+  assert.strictEqual(core.chunkPartPath("video.mp4", 123), "video.mp4.part123");
+  assert.strictEqual(core.chunkPartPath("video.mp4", 1234), "video.mp4.part1234");
+});
+
+/* ---- exceedsTotalUploadLimit ---- */
+test("exceedsTotalUploadLimit: 400MBちょうどは超過ではない", () => {
+  assert.strictEqual(core.exceedsTotalUploadLimit(core.MAX_TOTAL_UPLOAD_BYTES), false);
+});
+test("exceedsTotalUploadLimit: 400MBを1バイトでも超えたら超過", () => {
+  assert.strictEqual(core.exceedsTotalUploadLimit(core.MAX_TOTAL_UPLOAD_BYTES + 1), true);
+});
+test("exceedsTotalUploadLimit: 小さい合計サイズは超過ではない", () => {
+  assert.strictEqual(core.exceedsTotalUploadLimit(60 * 1024 * 1024), false);
+});
+
+/* ---- buildManifestEntry / buildManifestPayload ---- */
+test("buildManifestEntry: name/originalName/parts/size/sha256を記録する", () => {
+  const e = core.buildManifestEntry("video.mp4", "IMG_1234.MOV", 3 * core.CHUNK_SIZE_BYTES, "deadbeef");
+  assert.strictEqual(e.name, "video.mp4");
+  assert.strictEqual(e.originalName, "IMG_1234.MOV");
+  assert.strictEqual(e.parts, 3);
+  assert.strictEqual(e.size, 3 * core.CHUNK_SIZE_BYTES);
+  assert.strictEqual(e.sha256, "deadbeef");
+});
+test("buildManifestEntry: originalNameが無ければnameで補う", () => {
+  const e = core.buildManifestEntry("video.mp4", null, 1024, "abc");
+  assert.strictEqual(e.originalName, "video.mp4");
+});
+
+test("buildManifestPayload: versionとfiles配列を持つ", () => {
+  const entries = [core.buildManifestEntry("video.mp4", "a.mov", 1024, "abc")];
+  const payload = core.buildManifestPayload(entries);
+  assert.strictEqual(payload.version, 1);
+  assert.deepStrictEqual(payload.files, entries);
+});
+test("buildManifestPayload: 未指定なら空配列になる", () => {
+  assert.deepStrictEqual(core.buildManifestPayload(), { version: 1, files: [] });
+});
+
+/* ---- bufferToHex ---- */
+test("bufferToHex: バイト列を小文字16進文字列に変換する", () => {
+  const buf = new Uint8Array([0, 1, 15, 16, 255]).buffer;
+  assert.strictEqual(core.bufferToHex(buf), "00010f10ff");
+});
+test("bufferToHex: 空バッファは空文字列", () => {
+  assert.strictEqual(core.bufferToHex(new Uint8Array([]).buffer), "");
 });
 
 /* ---- buildReleasePayload / buildDispatchPayload ---- */

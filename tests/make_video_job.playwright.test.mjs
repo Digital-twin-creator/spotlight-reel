@@ -5,7 +5,8 @@
 // api.github.com への実際の通信をモックした状態で検証する回帰テスト。
 // 実際のGitHubには一切アクセスしない（Release作成・Git Data APIでのブランチコミット
 // （blob→tree→commit→ref）・workflow_dispatch・runのポーリング・成功時のReleaseページ
-// リンク表示・失敗時のエラー表示・100MB超過時の中断・GitHub連携設定の保存表示・
+// リンク表示・失敗時のエラー表示・合計400MB超過時の中断・20MB超ファイルの分割アップロード
+// （manifest.json同梱）・GitHub連携設定の保存表示・
 // runが自動確認できなかった場合の案内表示、を全てモックで再現する）。
 //
 // uploads.github.com は使わない（実機検証でCORS拒否されることが判明したため、
@@ -430,7 +431,7 @@ async function main() {
   }
 
   console.log("");
-  console.log("=== シナリオ4: 動画が100MBを超える場合は通信せず中断する ===");
+  console.log("=== シナリオ4: 合計400MBを超える場合は通信せず中断する ===");
   {
     const context = await browser.newContext({ ...iphone });
     const page = await context.newPage();
@@ -443,23 +444,27 @@ async function main() {
     await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
 
-    // 実ファイルを100MB超に差し替える代わりに、読み込み済みFileの.sizeだけを偽装する
-    // （exceedsBlobLimitはFileを読む前にsizeプロパティだけを見て中断するため、これで十分再現できる）
+    // 実ファイルを400MB超に差し替える代わりに、読み込み済みFileの.sizeだけを偽装する
+    // （事前確認の合計サイズチェックはIndexedDB上のメタデータとFile.sizeだけを見て
+    // 通信前に中断するため、これで十分再現できる）
     await page.evaluate(() => {
-      Object.defineProperty(appState.videoFile, "size", { value: 200 * 1024 * 1024, configurable: true });
+      Object.defineProperty(appState.videoFile, "size", { value: 500 * 1024 * 1024, configurable: true });
     });
 
     await page.click("#makeVideoBtn");
-    await page.waitForTimeout(300);
+    await page.waitForFunction(
+      () => document.getElementById("jobStatusLine").className.indexOf("err") >= 0,
+      null, { timeout: 3000 }
+    );
 
     const statusText = await page.evaluate(() => document.getElementById("jobStatusLine").textContent);
     const statusClass = await page.evaluate(() => document.getElementById("jobStatusLine").className);
     const btnDisabled = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
 
-    check(statusClass.indexOf("err") >= 0, "100MB超の動画でタップするとエラー表示になる");
-    check(statusText.indexOf("大きすぎます") >= 0 && statusText.indexOf("100MB") >= 0,
-      "エラーメッセージが上限(100MB)を示す: " + statusText);
-    check(calledUnexpectedly === false, "100MB超の場合、GitHub APIへは一切通信しない（変換すら始めない）");
+    check(statusClass.indexOf("err") >= 0, "合計400MB超でタップするとエラー表示になる");
+    check(statusText.indexOf("動画が大きすぎます") >= 0 && statusText.indexOf("解像度を下げるか") >= 0 && statusText.indexOf("トリミング") >= 0,
+      "エラーメッセージが要求通りの文言になっている: " + statusText);
+    check(calledUnexpectedly === false, "合計400MB超の場合、GitHub APIへは一切通信しない（アップロードすら始めない）");
     check(btnDisabled === false, "中断後、ボタンが押せる状態のまま（処理中で固まらない）");
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
@@ -811,6 +816,52 @@ async function main() {
     check(confirmReleaseCalledUnexpectedly === false, "モデルが一致しない確認結果は再利用対象にせず、確認用Releaseへ問い合わせすらしない");
     check(mock.treePayload && !mock.treePayload.tree.some((e) => e.path.indexOf("cache/") === 0),
       "treeにcache/配下のエントリが含まれない（フォールバックして通常どおりrender.py側で自動切り抜きされる）");
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ11: 動画が20MBを超える場合は分割アップロードされ、manifest.jsonがtreeに含まれる ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    const mock = makeMock({ runId: 555011 });
+    await routeApiGithub(page, mock);
+
+    await loadVideoAndOpenSettings(page, videoPath);
+    await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
+
+    // 実ファイルは小さいまま、読み込み済みFileの.sizeだけを45MB相当（3パート分）に偽装する
+    // （分割数・パート命名・manifest.json同梱の配線を検証するのが目的で、パート内容自体は
+    // 60MBの実ファイルを使う実Actionsジョブでの検証（別タスク）で確認する）
+    const partCount = await page.evaluate(() => {
+      const fakeSize = CHUNK_SIZE_BYTES * 2 + 5 * 1024 * 1024;
+      Object.defineProperty(appState.videoFile, "size", { value: fakeSize, configurable: true });
+      return chunkCount(fakeSize);
+    });
+    check(partCount === 3, "偽装したサイズから3パートになる想定どおり: " + partCount);
+
+    await page.click("#makeVideoBtn");
+    await page.waitForFunction(
+      () => !document.getElementById("jobResultLink").hidden,
+      null, { timeout: 30000 }
+    );
+
+    const videoName = await page.evaluate(() => videoAssetName(appState.videoFile.name));
+
+    check(mock.blobCalls === 1 + partCount + 1,
+      "blob作成が project.json(1) + 動画" + partCount + "パート + manifest.json(1) の合計" + (partCount + 2) + "回呼ばれる: " + mock.blobCalls + "回");
+    check(mock.treePayload && Array.from({ length: partCount }, (_, i) => i).every(
+      (i) => mock.treePayload.tree.some((e) => e.path === videoName + ".part" + String(i).padStart(3, "0"))),
+      "treeに動画の全パート(.partNNN)が正しい命名で含まれる");
+    check(mock.treePayload && !mock.treePayload.tree.some((e) => e.path === videoName),
+      "分割時は結合前の動画本体パス自体はtreeに含まれない");
+    check(mock.treePayload && mock.treePayload.tree.some((e) => e.path === "manifest.json"),
+      "manifest.jsonがtreeに含まれる");
 
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
     await context.close();

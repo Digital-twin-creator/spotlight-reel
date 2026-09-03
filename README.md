@@ -156,9 +156,13 @@ spotlight-reel/
 
 1. 動画・`project.json` を、`spotlight-jobs` の一時ブランチ（`job-YYYYMMDD-HHMMSS`）に
    Git Data API（`api.github.com`）経由でコミットする（大きな動画でも進捗％が表示されます）。
-   **動画は1本100MBまで**です。超える場合はアップロード前にエラーを表示して中断します
-   （実機で `uploads.github.com` へのブラウザからの直接アップロードがCORSで拒否されることが
-   判明したため、この方式にしています）。
+   **動画・ロゴ・効果音が20MBを超える場合は自動的に20MBごとに分割してアップロードします**
+   （Git Data APIのblob作成は、base64化後の巨大な単一JSON POSTだと実機で422
+   「Sorry, your input was too large to process」を返すことがあるため）。進捗は
+   パート単位（例:「動画をアップロード中（パート3/8）… 45%」）で表示されます。
+   **アップロード対象の合計サイズは400MBまで**です。超える場合はアップロード開始前に
+   エラーを表示して中断します（実機で `uploads.github.com` へのブラウザからの直接
+   アップロードがCORSで拒否されることが判明したため、この方式にしています）。
 2. `spotlight-jobs` に空のReleaseを作成する（タグは同じ `job-YYYYMMDD-HHMMSS`）。
 3. `spotlight-jobs` の GitHub Actions ワークフロー（`render.yml`）を起動する。
    ワークフロー側は先のブランチをcheckoutしてrender.pyを実行し、`output.mp4` を
