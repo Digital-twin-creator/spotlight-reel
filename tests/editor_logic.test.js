@@ -1234,7 +1234,10 @@ test("parseProjectJSON: 新しいstyleキー・style.shadow・logo(background込
     shrinkSec: core.DEFAULT_LOGO_SHRINK_SEC,
     settleSec: core.DEFAULT_LOGO_SETTLE_SEC,
     durationSec: 1.2, sfx: "don", sfxLibraryId: null, sfxAlign: "start_at_landing", sfxMissingFile: "",
-    autoColorHex: "", autoTransparentBg: true
+    autoColorHex: "", autoTransparentBg: true,
+    spinEnabled: core.DEFAULT_LOGO_SPIN.enabled, spinSec: core.DEFAULT_LOGO_SPIN.sec,
+    spinDegrees: core.DEFAULT_LOGO_SPIN.degrees, spinEase: core.DEFAULT_LOGO_SPIN.ease,
+    spinPerspective: core.DEFAULT_LOGO_SPIN.perspective
   });
 });
 
@@ -1280,7 +1283,9 @@ test("buildProjectJSON: watermarkが有効かつimageNameがあればwatermark�
     shine: { enabled: core.DEFAULT_WATERMARK_SHINE.enabled,
              interval_sec: core.DEFAULT_WATERMARK_SHINE.intervalSec, sec: core.DEFAULT_WATERMARK_SHINE.sec },
     spin: { enabled: core.DEFAULT_WATERMARK_SPIN.enabled,
-            interval_sec: core.DEFAULT_WATERMARK_SPIN.intervalSec, sec: core.DEFAULT_WATERMARK_SPIN.sec }
+            interval_sec: core.DEFAULT_WATERMARK_SPIN.intervalSec, sec: core.DEFAULT_WATERMARK_SPIN.sec,
+            degrees: core.DEFAULT_WATERMARK_SPIN.degrees, ease: core.DEFAULT_WATERMARK_SPIN.ease,
+            perspective: core.DEFAULT_WATERMARK_SPIN.perspective }
   });
 
   const disabled = core.buildProjectJSON(Object.assign(sampleState(), {
@@ -1302,11 +1307,13 @@ test("buildProjectJSON: watermark.shine/spinを個別にenabled=falseにでき�
     watermark: Object.assign(core.defaultWatermarkState(), {
       enabled: true, imageName: "watermark.png",
       shineEnabled: false, shineIntervalSec: 2, shineSec: 0.3,
-      spinEnabled: false, spinIntervalSec: 5, spinSec: 1.0
+      spinEnabled: false, spinIntervalSec: 5, spinSec: 1.0,
+      spinDegrees: 180, spinEase: "linear", spinPerspective: 0.7
     })
   }));
   assert.deepStrictEqual(project.watermark.shine, { enabled: false, interval_sec: 2, sec: 0.3 });
-  assert.deepStrictEqual(project.watermark.spin, { enabled: false, interval_sec: 5, sec: 1.0 });
+  assert.deepStrictEqual(project.watermark.spin,
+    { enabled: false, interval_sec: 5, sec: 1.0, degrees: 180, ease: "linear", perspective: 0.7 });
 });
 
 test("parseProjectJSON: watermarkブロックを読み込める。省略時はdefaultWatermarkState()相当になる", () => {
@@ -1315,7 +1322,7 @@ test("parseProjectJSON: watermarkブロックを読み込める。省略時はde
     watermark: {
       image: "watermark.jpg", position: "top_right", width_ratio: 0.25, opacity: 0.7, margin: 0.04,
       shine: { enabled: false, interval_sec: 3, sec: 0.4 },
-      spin: { enabled: true, interval_sec: 10, sec: 1.2 }
+      spin: { enabled: true, interval_sec: 10, sec: 1.2, degrees: 180, ease: "linear", perspective: 0.9 }
     }
   });
   assert.deepStrictEqual(loaded.watermark, {
@@ -1323,6 +1330,7 @@ test("parseProjectJSON: watermarkブロックを読み込める。省略時はde
     widthRatio: 0.25, opacity: 0.7, margin: 0.04,
     shineEnabled: false, shineIntervalSec: 3, shineSec: 0.4,
     spinEnabled: true, spinIntervalSec: 10, spinSec: 1.2,
+    spinDegrees: 180, spinEase: "linear", spinPerspective: 0.9,
     autoTransparentBg: true
   });
 
@@ -1344,7 +1352,8 @@ test("buildProjectJSON/parseProjectJSON: watermarkの全フィールドが往復
       enabled: true, imageFile: null, imageName: "watermark.png", position: "bottom_left",
       widthRatio: 0.12, opacity: 0.6, margin: 0.02,
       shineEnabled: true, shineIntervalSec: 6, shineSec: 0.8,
-      spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5
+      spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5,
+      spinDegrees: 180, spinEase: "linear", spinPerspective: 0.6
     }
   });
   const project = core.buildProjectJSON(state);
@@ -1353,8 +1362,85 @@ test("buildProjectJSON/parseProjectJSON: watermarkの全フィールドが往復
     enabled: true, imageFile: null, imageName: "watermark.png", position: "bottom_left",
     widthRatio: 0.12, opacity: 0.6, margin: 0.02, autoTransparentBg: true,
     shineEnabled: true, shineIntervalSec: 6, shineSec: 0.8,
-    spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5
+    spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5,
+    spinDegrees: 180, spinEase: "linear", spinPerspective: 0.6
   });
+});
+
+/* ---- logo.spin（ラストロゴの3D回転演出） ---- */
+
+test("defaultLogoState: spinはrender.pyのLOGO_SPIN_DEFAULTSと同じ既定値（無効）を返す", () => {
+  const logo = core.defaultLogoState();
+  assert.strictEqual(logo.spinEnabled, core.DEFAULT_LOGO_SPIN.enabled);
+  assert.strictEqual(logo.spinEnabled, false);
+  assert.strictEqual(logo.spinSec, core.DEFAULT_LOGO_SPIN.sec);
+  assert.strictEqual(logo.spinDegrees, core.DEFAULT_LOGO_SPIN.degrees);
+  assert.strictEqual(logo.spinEase, core.DEFAULT_LOGO_SPIN.ease);
+  assert.strictEqual(logo.spinPerspective, core.DEFAULT_LOGO_SPIN.perspective);
+});
+
+test("buildProjectJSON: logo.spinEnabled=falseなら logo.spin キー自体を省略する（後方互換）", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: Object.assign(core.defaultLogoState(), { imageName: "logo.png", spinEnabled: false })
+  }));
+  assert.strictEqual(project.logo.spin, undefined);
+});
+
+test("buildProjectJSON: logo.spinEnabled=trueならlogo.spinブロックを出力する", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: Object.assign(core.defaultLogoState(), {
+      imageName: "logo.png", spinEnabled: true, spinSec: 1.0, spinDegrees: 180,
+      spinEase: "linear", spinPerspective: 0.7
+    })
+  }));
+  assert.deepStrictEqual(project.logo.spin,
+    { enabled: true, sec: 1.0, degrees: 180, ease: "linear", perspective: 0.7 });
+});
+
+test("parseProjectJSON: logo.spinを読み込める。省略時はDEFAULT_LOGO_SPIN相当になる", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    logo: { image: "logo.png", at: "end", duration_sec: 1.2,
+            spin: { enabled: true, degrees: 180, sec: 1.0, ease: "linear", perspective: 0.7 } }
+  });
+  assert.strictEqual(loaded.logo.spinEnabled, true);
+  assert.strictEqual(loaded.logo.spinSec, 1.0);
+  assert.strictEqual(loaded.logo.spinDegrees, 180);
+  assert.strictEqual(loaded.logo.spinEase, "linear");
+  assert.strictEqual(loaded.logo.spinPerspective, 0.7);
+
+  const loadedNoSpin = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    logo: { image: "logo.png", at: "end", duration_sec: 1.2 }
+  });
+  assert.strictEqual(loadedNoSpin.logo.spinEnabled, core.DEFAULT_LOGO_SPIN.enabled);
+  assert.strictEqual(loadedNoSpin.logo.spinSec, core.DEFAULT_LOGO_SPIN.sec);
+  assert.strictEqual(loadedNoSpin.logo.spinDegrees, core.DEFAULT_LOGO_SPIN.degrees);
+  assert.strictEqual(loadedNoSpin.logo.spinEase, core.DEFAULT_LOGO_SPIN.ease);
+  assert.strictEqual(loadedNoSpin.logo.spinPerspective, core.DEFAULT_LOGO_SPIN.perspective);
+});
+
+test("buildProjectJSON/parseProjectJSON: logo.spinの全フィールドが往復する", () => {
+  const state = Object.assign(sampleState(), {
+    logo: Object.assign(core.defaultLogoState(), {
+      imageName: "logo.png", spinEnabled: true, spinSec: 0.6, spinDegrees: 360,
+      spinEase: "in_out", spinPerspective: 0.25
+    })
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.logo.spinEnabled, true);
+  assert.strictEqual(loaded.logo.spinSec, 0.6);
+  assert.strictEqual(loaded.logo.spinDegrees, 360);
+  assert.strictEqual(loaded.logo.spinEase, "in_out");
+  assert.strictEqual(loaded.logo.spinPerspective, 0.25);
+});
+
+test("resolveSpinEase: 未知の値・未指定は既定(in_out)にフォールバックする", () => {
+  assert.strictEqual(core.resolveSpinEase("linear"), "linear");
+  assert.strictEqual(core.resolveSpinEase("in_out"), "in_out");
+  assert.strictEqual(core.resolveSpinEase("bogus"), core.DEFAULT_SPIN_EASE);
+  assert.strictEqual(core.resolveSpinEase(undefined), core.DEFAULT_SPIN_EASE);
 });
 
 /* ---- hashtags（ハッシュタグ表示） ---- */

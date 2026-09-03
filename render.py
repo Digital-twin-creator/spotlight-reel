@@ -195,6 +195,16 @@ LOGO_CUT_BLACKOUT_SEC = 0.1       # 直前のシーンから0.1秒かけて暗�
 LOGO_DURATION_SEC_DEFAULT = 2.2   # 着地からの表示時間の既定値（以前は1.2秒）
 LOGO_SFX_TAIL_SEC = 0.6           # logo.sfx_tail=true（既定）のときに付ける減衰ディレイの長さ（固定）
 
+# --- ロゴのY軸回転（spin。watermark.spin / logo.spinで共通）---
+# ロゴの水平中心を通る垂直の軸まわりに回転させ、透視投影(cv2.warpPerspective)で描く。
+# 90〜270度は裏面（実際の裏デザインは無いため、表面画像を左右反転したもの）を表示する。
+SPIN_VIEW_DISTANCE_RATIO = 2.5    # 視点距離 = ロゴ幅 × この倍率（固定）
+SPIN_EASE_KINDS = ("linear", "in_out")
+WATERMARK_SPIN_DEFAULTS = {"enabled": True, "interval_sec": 9.0, "sec": 0.8,
+                            "degrees": 360.0, "ease": "in_out", "perspective": 0.4}
+LOGO_SPIN_DEFAULTS = {"enabled": False, "interval_sec": 9.0, "sec": 0.8,
+                       "degrees": 360.0, "ease": "in_out", "perspective": 0.4}
+
 AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
 KEEP_LOOP_SEC = 0.5           # audio_during_freeze="keep" のときにループする長さ
@@ -2555,6 +2565,117 @@ def save_logo_crop_preview_png(logo_bgr, logo_alpha, out_path):
     cv2.imwrite(out_path, bgra)
 
 
+def resolve_spin_config(raw, defaults):
+    """
+    spin（{enabled, interval_sec, sec, degrees, ease, perspective}）を、
+    watermark.spin / logo.spin のどちらでも同じ形で解決する。
+    raw が dict でなければ defaults をそのまま使う（省略時の後方互換）。
+    """
+    spin = dict(defaults)
+    if isinstance(raw, dict):
+        spin.update(raw)
+    spin["enabled"] = bool(spin.get("enabled", defaults["enabled"]))
+    spin["interval_sec"] = max(0.1, float(spin.get("interval_sec") or defaults["interval_sec"]))
+    spin["sec"] = max(0.01, float(spin.get("sec") or defaults["sec"]))
+    degrees = spin.get("degrees")
+    spin["degrees"] = float(degrees) if degrees is not None else float(defaults["degrees"])
+    ease = spin.get("ease") or defaults["ease"]
+    if ease not in SPIN_EASE_KINDS:
+        warn(f"spin.ease='{ease}' は未知の値です。'{defaults['ease']}' として扱います。")
+        ease = defaults["ease"]
+    spin["ease"] = ease
+    perspective = spin.get("perspective")
+    perspective = float(perspective) if perspective is not None else float(defaults["perspective"])
+    spin["perspective"] = float(np.clip(perspective, 0.0, 1.0))
+    return spin
+
+
+def spin_ease_progress(local_t, kind):
+    """local_t(0〜1、spin区間内の進行度)を、easeの種類に応じた進行度(0〜1)に変換する"""
+    local_t = float(np.clip(local_t, 0.0, 1.0))
+    if kind == "linear":
+        return local_t
+    return local_t * local_t * (3.0 - 2.0 * local_t)  # in_out（smoothstep）
+
+
+def logo_spin_transform(logo_bgr, logo_alpha, angle_deg, perspective,
+                         view_distance_ratio=SPIN_VIEW_DISTANCE_RATIO):
+    """
+    ロゴ画像（BGR・アルファ(H,W,1)、0〜1）を、ロゴの水平中心を通る垂直の軸（Y軸）まわりに
+    angle_deg 度回転させた見た目を、4隅の3D座標＋透視投影で作る。
+      - 0度: 無回転（元画像そのまま）。90度/270度: 真横向き（幅がほぼ0の細い線）になる
+      - 90〜270度（裏面側）: 実際の裏デザインは無いため、表面画像を左右反転したものを使う
+      - perspective: 0で平面的な幅の縮小のみ（台形変形なし）、1で強い遠近
+        （視点距離 = ロゴ幅 × view_distance_ratio）
+    戻り値: (patch_bgr, patch_alpha, offset_x, offset_y)。patch は角度に応じた
+    バウンディングボックスサイズのRGBA画像。offset_x/yは元画像の中心を基準にした
+    patch左上のオフセット（元画像ピクセル単位。呼び出し側で中心合わせに使える）。
+    """
+    h, w = logo_bgr.shape[:2]
+    if w <= 0 or h <= 0:
+        return logo_bgr, logo_alpha, 0.0, 0.0
+
+    theta = float(angle_deg) % 360.0
+    if theta <= 90.0:
+        face_flip, phi_deg = False, theta
+    elif theta <= 180.0:
+        face_flip, phi_deg = True, 180.0 - theta
+    elif theta <= 270.0:
+        face_flip, phi_deg = True, theta - 180.0
+    else:
+        face_flip, phi_deg = False, 360.0 - theta
+
+    # cv2.flip()はチャンネル数1の(H,W,1)配列を渡すと末尾の次元を潰して(H,W)を返すため、
+    # アルファ用には明示的に次元を戻すヘルパーを使う
+    def flip_alpha(a):
+        return cv2.flip(a[:, :, 0], 1)[:, :, None]
+
+    if phi_deg < 1e-6:
+        # 無回転（0度、または180度＝裏面が正面を向く瞬間）：再サンプリングせずそのまま返す。
+        # face_flip=True（180度）の場合は左右反転だけ行う（裏面表示のため）
+        if face_flip:
+            return cv2.flip(logo_bgr, 1), flip_alpha(logo_alpha), 0.0, 0.0
+        return logo_bgr, logo_alpha, 0.0, 0.0
+
+    phi = math.radians(phi_deg)
+    hw, hh = w / 2.0, h / 2.0
+    d = max(1.0, view_distance_ratio * w)
+    perspective = float(np.clip(perspective, 0.0, 1.0))
+
+    corners_local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]  # TL, TR, BR, BL
+    proj = []
+    for x, y in corners_local:
+        xr = x * math.cos(phi)
+        zr = x * math.sin(phi) * perspective
+        scale = d / (d + zr) if (d + zr) > 1e-6 else 1.0
+        proj.append((xr * scale, y * scale))
+
+    xs = [p[0] for p in proj]
+    ys = [p[1] for p in proj]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    out_w = max(2, int(round(max_x - min_x)))
+    out_h = max(2, int(round(max_y - min_y)))
+
+    src_bgr = cv2.flip(logo_bgr, 1) if face_flip else logo_bgr
+    src_alpha = flip_alpha(logo_alpha) if face_flip else logo_alpha
+
+    src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    dst_pts = np.float32([[p[0] - min_x, p[1] - min_y] for p in proj])
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+    alpha_u8 = np.clip(src_alpha[:, :, 0] * 255.0, 0, 255).astype(np.uint8)
+    bgra = np.dstack([src_bgr, alpha_u8])
+    warped = cv2.warpPerspective(bgra, M, (out_w, out_h), flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    patch_bgr = warped[:, :, :3]
+    patch_alpha = (warped[:, :, 3:4].astype(np.float32)) / 255.0
+
+    offset_x = min_x + hw
+    offset_y = min_y + hh
+    return patch_bgr, patch_alpha, offset_x, offset_y
+
+
 def resolve_logo_background_color(bg_spec, logo_bgr):
     """
     logo.background を解決する。
@@ -2607,6 +2728,10 @@ def resolve_logo_params(logo_cfg):
         "sfx_tail": bool(logo_cfg.get("sfx_tail", True)),
         "width_ratio": width_ratio,
         "start_width_ratio": start_width_ratio,
+        # spin（Y軸回転）：着地演出のスイープ後に1回だけ発生する（enabled=trueの時のみ）。
+        # interval_secはwatermark.spinと形を揃えるためのフィールドで、logo.spinでは
+        # 使わない（一回きりの演出のため周期を持たない）
+        "spin": resolve_spin_config(logo_cfg.get("spin"), LOGO_SPIN_DEFAULTS),
     }
 
 
@@ -2628,9 +2753,20 @@ def logo_blackout_frames_for(fps):
     return max(1, int(round(LOGO_CUT_BLACKOUT_SEC * fps)))
 
 
+def logo_spin_extra_sec(params):
+    """spin.enabled=trueの場合、スイープ後に1回だけ挿入されるspin区間の長さ（秒）。無効なら0"""
+    spin = params.get("spin")
+    return float(spin["sec"]) if spin and spin.get("enabled") else 0.0
+
+
 def logo_total_frames_for(logo_params, fps):
-    """着地開始から終了までの合計フレーム数（＝着地演出(タメ+縮小+セトル) + duration_sec 分）"""
-    return max(1, int(round((logo_landing_total_sec(logo_params) + logo_params["duration_sec"]) * fps)))
+    """
+    着地開始から終了までの合計フレーム数（＝着地演出(タメ+縮小+セトル) + spin区間 + duration_sec 分）。
+    spinはスイープの直後に挿入され、その分だけ全体の尺が伸びる。
+    """
+    total_sec = (logo_landing_total_sec(logo_params) + logo_spin_extra_sec(logo_params)
+                 + logo_params["duration_sec"])
+    return max(1, int(round(total_sec * fps)))
 
 
 def build_logo_luminance_mask(logo_bgr, logo_alpha):
@@ -2669,11 +2805,14 @@ def screen_blend_white(img_f32, amount):
     return img_f32 + amount * (255.0 - img_f32)
 
 
-def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_ratio=LOGO_WIDTH_RATIO_DEFAULT):
+def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_ratio=LOGO_WIDTH_RATIO_DEFAULT,
+                    spin_angle_deg=0.0, spin_perspective=0.4):
     """
     frame の中央に、ロゴを「基準表示幅（width_ratio×W）× scale」のサイズで合成する。
     scale=1.0 が最終的な表示サイズ。opacity(0〜1)はロゴ全体の不透明度（着地時のフェードイン用）。
     width_ratio は logo.width_ratio（既定LOGO_WIDTH_RATIO_DEFAULT）で上書きできる。
+    spin_angle_deg!=0 なら、logo_spin_transform()でY軸回転させた見た目に差し替えてから
+    合成する（中央合わせのため、回転で生じる台形の重心ズレは特に補正不要）。
     """
     if logo_bgr is None or opacity <= 0:
         return frame
@@ -2682,12 +2821,20 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_
         return frame
 
     base_scale = (W * width_ratio) / lw
+    if abs(spin_angle_deg) > 1e-6:
+        src_bgr, src_alpha, _ox, _oy = logo_spin_transform(logo_bgr, logo_alpha, spin_angle_deg, spin_perspective)
+    else:
+        src_bgr, src_alpha = logo_bgr, logo_alpha
+    ph, pw = src_bgr.shape[:2]
+    if pw <= 0 or ph <= 0:
+        return frame
+
     final_scale = max(0.01, base_scale * scale)
-    new_w = max(1, int(round(lw * final_scale)))
-    new_h = max(1, int(round(lh * final_scale)))
+    new_w = max(1, int(round(pw * final_scale)))
+    new_h = max(1, int(round(ph * final_scale)))
     interp = cv2.INTER_AREA if final_scale < 1.0 else cv2.INTER_LINEAR
-    resized_bgr = cv2.resize(logo_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
-    resized_alpha = cv2.resize(logo_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
+    resized_bgr = cv2.resize(src_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
+    resized_alpha = cv2.resize(src_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
     resized_alpha = resized_alpha * float(np.clip(opacity, 0.0, 1.0))
 
     cx, cy = W // 2, H // 2
@@ -2718,14 +2865,17 @@ def logo_animation_state(elapsed_sec, params):
       shake_dx/dy : 画面全体のわずかな揺れ（出力幅に対する比率）
       sweep_t     : 光彩スイープの進行度(0〜1)。スイープ区間外は None
       fade_amt    : 画面全体を背景色へ暗転させる強さ(0〜1)
-    タイムライン（既定値の場合）:
+      spin_angle  : Y軸回転の角度（度）。spin.enabled=falseまたは区間外は0
+      spin_perspective : spin描画に使う遠近の強さ(0〜1)
+    タイムライン（既定値の場合。spin.enabled=falseの時）:
       0.00-0.15  タメ：start_width_ratioのまま静止（不透明度は最初から1.0）
       0.15-0.65  縮小：Ease-Inで最小サイズ（width_ratio×98%）まで縮む。ゆっくり入って
                  終盤に加速し、減速せずそのまま急停止する
       0.65       着地の瞬間（最小サイズに到達）：SE・白フラッシュ・画面の揺れが発火
       0.65-0.80  セトル：Ease-Outで最小サイズから最終サイズ(width_ratio)へ戻る
       1.15-1.85  光彩スイープ（着地演出完了から0.35秒後に開始、0.70秒かける）
-      1.85-終了  ゆっくり103%まで拡大、最後の0.4秒で背景色へ暗転
+      （spin.enabled=trueなら、この直後にspin.sec秒だけY軸回転が1回入る）
+      -終了      ゆっくり103%まで拡大、最後の0.4秒で背景色へ暗転
     """
     hold_big_sec = params["hold_big_sec"]
     shrink_sec = params["shrink_sec"]
@@ -2740,11 +2890,16 @@ def logo_animation_state(elapsed_sec, params):
     scale_from = params["scale_from"]
     min_scale = params["min_scale"]
     fade_sec = params["fade_sec"]
+    spin_cfg = params.get("spin") or LOGO_SPIN_DEFAULTS
+    spin_enabled = bool(spin_cfg.get("enabled"))
+    spin_sec = float(spin_cfg["sec"]) if spin_enabled else 0.0
 
-    seg_end = landing + duration_sec
+    seg_end = landing + duration_sec + spin_sec
     sweep_start = landing + params["sweep_start_sec"]
     sweep_end = sweep_start + sweep_sec
-    hold_start = sweep_end
+    spin_start = sweep_end          # スイープ後に1回だけ回転する
+    spin_end = spin_start + spin_sec
+    hold_start = spin_end
     fade_start = max(hold_start, seg_end - fade_sec)
 
     t = float(np.clip(elapsed_sec, 0.0, seg_end))
@@ -2782,10 +2937,23 @@ def logo_animation_state(elapsed_sec, params):
     else:
         fade_amt = 0.0
 
+    if spin_enabled and t < spin_start:
+        spin_angle = 0.0
+    elif spin_enabled and t < spin_end:
+        spin_local_t = (t - spin_start) / spin_sec
+        spin_angle = spin_cfg["degrees"] * spin_ease_progress(spin_local_t, spin_cfg["ease"])
+    elif spin_enabled:
+        # spin区間が終わった後は最終角度で静止する（degrees=180「裏返って止まる」を
+        # 保持表示するため。360なら360%360=0扱いと見た目上は変わらない）
+        spin_angle = spin_cfg["degrees"]
+    else:
+        spin_angle = 0.0
+
     return {
         "scale": scale, "opacity": opacity, "flash_amt": flash_amt,
         "shake_dx": shake_dx, "shake_dy": shake_dy,
         "sweep_t": sweep_t, "fade_amt": fade_amt,
+        "spin_angle": spin_angle, "spin_perspective": spin_cfg["perspective"],
     }
 
 
@@ -2821,7 +2989,9 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
     logo_layer = np.clip(logo_layer, 0, 255).astype(np.uint8)
 
     frame = composite_logo(backdrop, logo_layer, logo_alpha, W, H, state["scale"], opacity=state["opacity"],
-                            width_ratio=params.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT))
+                            width_ratio=params.get("width_ratio", LOGO_WIDTH_RATIO_DEFAULT),
+                            spin_angle_deg=state.get("spin_angle", 0.0),
+                            spin_perspective=state.get("spin_perspective", 0.4))
 
     if state["shake_dx"] != 0.0 or state["shake_dy"] != 0.0:
         frame = shake_translate(frame, state["shake_dx"] * W, state["shake_dy"] * W)
@@ -2842,8 +3012,9 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
 # ---------------------------------------------------------------------------
 # 常時表示の透かしロゴ（watermark）。ラストロゴ（着地演出、上のrender_logo_frame）とは
 # 別の、動画全体を通して表示され続ける小さいロゴのオーバーレイ。四隅のいずれかに固定表示し、
-# 周期的にshine（斜めの光沢がロゴの輝度マスクにscreen合成で走る）・spin（横幅をcosで
-# 縮めて戻す簡易Y軸回転）を行う。フリーズ中もロゴ演出中も表示し続けるが、ラストロゴの
+# 周期的にshine（斜めの光沢がロゴの輝度マスクにscreen合成で走る）・spin（ロゴの水平中心を
+# 通るY軸まわりの3D回転。透視投影で描画し、90〜270度は左右反転した裏面を見せる）を行う。
+# フリーズ中もロゴ演出中も表示し続けるが、ラストロゴの
 # 着地演出（タメ+縮小+セトル。着地後のhold/sweep/fadeは対象外）の間だけ非表示にする
 # （大きな着地ロゴと重なって煩雑に見えるのを避けるため）。
 # shine/spinの周期（interval_sec）は各区間（フリーズ1つ・末尾のロゴ演出等）の開始時点を
@@ -2855,7 +3026,7 @@ DEFAULT_WATERMARK_POSITION = "bottom_right"
 WATERMARK_DEFAULTS = {"position": DEFAULT_WATERMARK_POSITION, "width_ratio": 0.16,
                        "opacity": 0.85, "margin": 0.03, "auto_transparent_bg": True}
 WATERMARK_SHINE_DEFAULTS = {"enabled": True, "interval_sec": 4.0, "sec": 0.6}
-WATERMARK_SPIN_DEFAULTS = {"enabled": True, "interval_sec": 9.0, "sec": 0.8}
+# WATERMARK_SPIN_DEFAULTS / LOGO_SPIN_DEFAULTS はファイル冒頭の定数ブロックで定義済み
 
 
 def resolve_watermark_config(wm_cfg):
@@ -2886,22 +3057,17 @@ def resolve_watermark_config(wm_cfg):
     shine["sec"] = max(0.01, float(shine.get("sec") or WATERMARK_SHINE_DEFAULTS["sec"]))
     cfg["shine"] = shine
 
-    spin = dict(WATERMARK_SPIN_DEFAULTS)
-    if isinstance(wm_cfg.get("spin"), dict):
-        spin.update(wm_cfg["spin"])
-    spin["enabled"] = bool(spin.get("enabled", True))
-    spin["interval_sec"] = max(0.1, float(spin.get("interval_sec") or WATERMARK_SPIN_DEFAULTS["interval_sec"]))
-    spin["sec"] = max(0.01, float(spin.get("sec") or WATERMARK_SPIN_DEFAULTS["sec"]))
-    cfg["spin"] = spin
+    cfg["spin"] = resolve_spin_config(wm_cfg.get("spin"), WATERMARK_SPIN_DEFAULTS)
 
     return cfg
 
 
-def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, width_scale=1.0):
+def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, spin_perspective=0.4):
     """
-    frameの指定コーナー（cfg["position"]）に透かしロゴを合成する。width_scale(0〜1)は
-    spin演出用の横幅スケール（1.0で等倍、0に近いほど横につぶれる＝Y軸回転の見た目）。
-    アンカーした角の辺は width_scale によらず固定される（その角から縮む・伸びる）。
+    frameの指定コーナー（cfg["position"]）に透かしロゴを合成する。spin_angle_deg!=0なら
+    logo_spin_transform()でY軸回転させた見た目に差し替えてから合成する。
+    アンカーした角は、回転後のバウンディングボックスを基準に毎フレーム計算し直すため、
+    見た目としては引き続きその角から縮む・伸びるように見える。
     """
     if wm_bgr is None or cfg["opacity"] <= 0:
         return frame
@@ -2909,11 +3075,20 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, width_scale=1.0):
     if lw <= 0 or lh <= 0:
         return frame
     base_scale = (W * cfg["width_ratio"]) / lw
-    new_w = max(1, int(round(lw * base_scale * max(0.0, width_scale))))
-    new_h = max(1, int(round(lh * base_scale)))
+
+    if abs(spin_angle_deg) > 1e-6:
+        src_bgr, src_alpha, _ox, _oy = logo_spin_transform(wm_bgr, wm_alpha, spin_angle_deg, spin_perspective)
+    else:
+        src_bgr, src_alpha = wm_bgr, wm_alpha
+    ph, pw = src_bgr.shape[:2]
+    if pw <= 0 or ph <= 0:
+        return frame
+
+    new_w = max(1, int(round(pw * base_scale)))
+    new_h = max(1, int(round(ph * base_scale)))
     interp = cv2.INTER_AREA if base_scale < 1.0 else cv2.INTER_LINEAR
-    resized_bgr = cv2.resize(wm_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
-    resized_alpha = cv2.resize(wm_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
+    resized_bgr = cv2.resize(src_bgr, (new_w, new_h), interpolation=interp).astype(np.float32)
+    resized_alpha = cv2.resize(src_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
     resized_alpha = resized_alpha * cfg["opacity"]
 
     margin_px = int(round(cfg["margin"] * W))
@@ -2946,8 +3121,9 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, width_scale=1.0):
 def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
     """
     経過秒数tにおける透かしロゴをframeに合成して返す（wm_bgr/cfgが無ければ何もしない）。
-    shine（斜めの光沢）・spin（横幅cosの簡易Y軸回転）は、それぞれのinterval_secごとに
-    sec秒間だけ発生する（interval_sec周期のうち先頭sec秒間がアクティブ）。
+    shine（斜めの光沢）・spin（ロゴの水平中心を通るY軸まわりの3D回転、透視投影で描画）は、
+    それぞれのinterval_secごとにsec秒間だけ発生する（interval_sec周期のうち先頭sec秒間が
+    アクティブ）。spin中はdegrees分だけease（既定in_out）で0度から回転する。
     """
     if wm_bgr is None or cfg is None:
         return frame
@@ -2962,15 +3138,16 @@ def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
             layer_bgr = screen_blend_white(layer_bgr, strength)
     layer_bgr = np.clip(layer_bgr, 0, 255).astype(np.uint8)
 
-    width_scale = 1.0
+    spin_angle = 0.0
     spin = cfg["spin"]
     if spin["enabled"]:
         phase = math.fmod(t, spin["interval_sec"])
         if phase < spin["sec"]:
             local_t = phase / spin["sec"]
-            width_scale = abs(math.cos(math.pi * local_t))
+            spin_angle = spin["degrees"] * spin_ease_progress(local_t, spin["ease"])
 
-    return composite_watermark(frame, layer_bgr, wm_alpha, W, H, cfg, width_scale=width_scale)
+    return composite_watermark(frame, layer_bgr, wm_alpha, W, H, cfg,
+                                spin_angle_deg=spin_angle, spin_perspective=spin["perspective"])
 
 
 # ---------------------------------------------------------------------------
@@ -3532,6 +3709,40 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     return before_path, after_path, lines_path
 
 
+def save_logo_spin_preview_pngs(logo_bgr, logo_alpha, perspective, base_path):
+    """
+    --preview 用：spin（Y軸回転＋透視投影）の見た目を、回転途中の3角度
+    （45度・90度・135度）でそれぞれ1枚のアルファ付きPNG(BGRA)として確認できるよう書き出す。
+    135度は裏面側（左右反転した見た目）になる。ロゴ自身の背景色に関わらず見えるよう、
+    save_logo_crop_preview_pngと同じくアルファ付きで書き出す（不透明背景には敷かない）。
+    ファイル名は base_path から _spin45 / _spin90 / _spin135 を導く。
+    戻り値: 書き出したパスのリスト（3枚、角度の昇順）。
+    """
+    h, w = logo_bgr.shape[:2]
+    canvas_w, canvas_h = max(2, int(round(w * 1.3))), max(2, int(round(h * 1.3)))
+    base, ext = os.path.splitext(base_path)
+    ext = ext or ".png"
+    os.makedirs(os.path.dirname(os.path.abspath(base_path)) or ".", exist_ok=True)
+    paths = []
+    for angle in (45, 90, 135):
+        patch_bgr, patch_alpha, _ox, _oy = logo_spin_transform(logo_bgr, logo_alpha, angle, perspective)
+        canvas_bgr = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+        canvas_alpha = np.zeros((canvas_h, canvas_w, 1), dtype=np.float32)
+        ph, pw = patch_bgr.shape[:2]
+        x0, y0 = max(0, (canvas_w - pw) // 2), max(0, (canvas_h - ph) // 2)
+        x1, y1 = min(canvas_w, x0 + pw), min(canvas_h, y0 + ph)
+        pw_c, ph_c = x1 - x0, y1 - y0
+        if pw_c > 0 and ph_c > 0:
+            canvas_bgr[y0:y1, x0:x1] = patch_bgr[:ph_c, :pw_c]
+            canvas_alpha[y0:y1, x0:x1] = patch_alpha[:ph_c, :pw_c]
+        alpha_u8 = np.clip(canvas_alpha[:, :, 0] * 255.0, 0, 255).astype(np.uint8)
+        bgra = np.dstack([canvas_bgr, alpha_u8])
+        path = f"{base}_spin{angle}{ext}"
+        cv2.imwrite(path, bgra)
+        paths.append(path)
+    return paths
+
+
 # ---------------------------------------------------------------------------
 # 音声処理（numpyで切り貼り・ミックス）
 # ---------------------------------------------------------------------------
@@ -4003,6 +4214,12 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 logo_preview_path = f"{base}_logo{ext or '.png'}"
                 save_logo_crop_preview_png(logo_bgr, logo_alpha, logo_preview_path)
                 preview_msg += f" / {logo_preview_path}（クロップ後ロゴ単体）"
+                # spin（Y軸回転＋透視投影）の見た目を、回転途中の3角度で確認できるよう書き出す
+                # （logo.spin.enabledの有無に関わらず、回転の実装そのものを目視確認するため常に出す）
+                spin_paths = save_logo_spin_preview_pngs(
+                    logo_bgr, logo_alpha, logo_params["spin"]["perspective"], preview_path)
+                preview_msg += (" / " + " / ".join(spin_paths) +
+                                 "（spin回転45度/90度/135度の確認用）")
             log(preview_msg)
             return before_path, after_path, lines_path
 

@@ -2433,6 +2433,9 @@ try:
     check(abs(wm_cfg_default["margin"] - 0.03) < 1e-9, "margin省略時は0.03")
     check(wm_cfg_default["shine"] == dict(render.WATERMARK_SHINE_DEFAULTS), "shine省略時はWATERMARK_SHINE_DEFAULTS")
     check(wm_cfg_default["spin"] == dict(render.WATERMARK_SPIN_DEFAULTS), "spin省略時はWATERMARK_SPIN_DEFAULTS")
+    check(wm_cfg_default["spin"]["degrees"] == 360.0 and wm_cfg_default["spin"]["ease"] == "in_out"
+          and abs(wm_cfg_default["spin"]["perspective"] - 0.4) < 1e-9,
+          "spin省略時はdegrees=360/ease=in_out/perspective=0.4")
 
     wm_cfg_bad_pos = render.resolve_watermark_config({"image": "logo.png", "position": "center"})
     check(wm_cfg_bad_pos["position"] == "bottom_right", "未知のpositionはbottom_rightにフォールバックする")
@@ -2449,7 +2452,99 @@ try:
           "shine/spinはそれぞれ個別にenabled=falseにできる")
 
     print("")
-    print("=== watermark：composite_watermarkの四隅配置・width_scale（spin）・opacity ===")
+    print("=== spin：logo_spin_transformの3D回転（Y軸・透視投影）の基本挙動 ===")
+    spin_test_bgr, spin_test_alpha = render.load_logo_image(os.path.join("examples", "store_logo.png"))
+    check(spin_test_bgr is not None, "テスト用ロゴ画像を読み込めた（spin用）")
+    sp_h, sp_w = spin_test_bgr.shape[:2]
+
+    p0_bgr, p0_alpha, p0_ox, p0_oy = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 0.0, 0.4)
+    check(p0_bgr.shape[:2] == (sp_h, sp_w) and p0_ox == 0.0 and p0_oy == 0.0,
+          "0度は無回転（元画像と同じサイズ・オフセット0）")
+
+    p90_bgr, p90_alpha, _ox90, _oy90 = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 90.0, 0.4)
+    check(p90_bgr.shape[1] < sp_w * 0.15,
+          f"90度は真横向き（幅がほぼ0の細い線）になる: 元幅={sp_w} 90度時の幅={p90_bgr.shape[1]}")
+    p90_flat_bgr, _p90fa, _ox90f, _oy90f = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 90.0, 0.0)
+    check(p90_flat_bgr.shape[0] == sp_h,
+          "perspective=0なら90度でも高さは変わらない（Y軸＝垂直軸まわりの回転のみで、遠近による"
+          "台形変形が無いため）")
+
+    p45_bgr, p45_alpha, _ox45, _oy45 = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 45.0, 0.4)
+    check(0 < p45_bgr.shape[1] < sp_w,
+          f"45度は0度と90度の中間的な幅になる: 元幅={sp_w} 45度時の幅={p45_bgr.shape[1]}")
+
+    # 裏面（90〜270度）：実デザインが無いため、表面を左右反転したものを使う。
+    # 180度（裏面が正面を向く瞬間）は幅が元に戻り、中身が左右反転しているはず
+    p180_bgr, p180_alpha, _ox180, _oy180 = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 180.0, 0.4)
+    check(abs(p180_bgr.shape[1] - sp_w) <= 2,
+          f"180度（裏面が正面を向く瞬間）は幅がほぼ元どおりに戻る: 元幅={sp_w} 180度時の幅={p180_bgr.shape[1]}")
+    flipped_bgr = np.flip(spin_test_bgr, axis=1)
+    diff_from_flipped = float(np.abs(p180_bgr.astype(np.int32) - flipped_bgr.astype(np.int32)).mean())
+    diff_from_original = float(np.abs(p180_bgr.astype(np.int32) - spin_test_bgr.astype(np.int32)).mean())
+    check(diff_from_flipped < diff_from_original,
+          f"180度は元画像そのものより左右反転画像に近い（裏面＝左右反転で表示）: "
+          f"反転との差={diff_from_flipped:.2f} 元画像との差={diff_from_original:.2f}")
+
+    # perspective=0（平面的な幅の縮小のみ）とperspective=1（強い遠近）の違い：
+    # 45度における上辺の傾き（左右端のy座標差）は、perspectiveが強いほど大きくなるはず
+    def top_edge_tilt(bgr, alpha):
+        a = alpha[:, :, 0]
+        col_has_content = a.max(axis=0) > 0.05
+        cols = np.nonzero(col_has_content)[0]
+        if len(cols) < 2:
+            return 0.0
+        first_col, last_col = cols[0], cols[-1]
+        first_top = np.nonzero(a[:, first_col] > 0.05)[0]
+        last_top = np.nonzero(a[:, last_col] > 0.05)[0]
+        if len(first_top) == 0 or len(last_top) == 0:
+            return 0.0
+        return abs(float(first_top[0]) - float(last_top[0]))
+
+    p45_flat_bgr, p45_flat_alpha, _, _ = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 45.0, 0.0)
+    p45_persp_bgr, p45_persp_alpha, _, _ = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 45.0, 1.0)
+    tilt_flat = top_edge_tilt(p45_flat_bgr, p45_flat_alpha)
+    tilt_persp = top_edge_tilt(p45_persp_bgr, p45_persp_alpha)
+    check(p45_flat_bgr.shape[0] == sp_h,
+          "perspective=0でも高さ（バウンディングボックス）は元のまま＝台形変形しない（平面的な幅の縮小のみ）")
+    check(tilt_persp > tilt_flat,
+          f"perspective=1はperspective=0より強い台形変形（遠近）になる: flat_tilt={tilt_flat} persp_tilt={tilt_persp}")
+
+    print("")
+    print("=== spin：logo.spin（ラストロゴ）の設定解決とタイミング ===")
+    logo_params_no_spin = render.resolve_logo_params({})
+    check(logo_params_no_spin["spin"] == dict(render.LOGO_SPIN_DEFAULTS),
+          "logo.spin省略時はLOGO_SPIN_DEFAULTS（enabled=false）が使われる")
+    check(logo_params_no_spin["spin"]["enabled"] is False,
+          "logo.spinの既定はenabled=false（明示的にtrueにした時だけ回転する）")
+
+    logo_params_spin = render.resolve_logo_params({
+        "spin": {"enabled": True, "sec": 0.5, "degrees": 180, "ease": "linear", "perspective": 0.8}
+    })
+    check(logo_params_spin["spin"]["enabled"] is True and logo_params_spin["spin"]["sec"] == 0.5
+          and logo_params_spin["spin"]["degrees"] == 180.0 and logo_params_spin["spin"]["ease"] == "linear",
+          "logo.spinの指定値がそのまま解決される")
+
+    fps_test = 30
+    frames_no_spin = render.logo_total_frames_for(logo_params_no_spin, fps_test)
+    frames_with_spin = render.logo_total_frames_for(logo_params_spin, fps_test)
+    check(frames_with_spin > frames_no_spin,
+          f"logo.spin.enabled=trueだと、その分だけ全体の尺（フレーム数）が伸びる: "
+          f"spin無し={frames_no_spin} spin有り={frames_with_spin}")
+
+    landing_sec = render.logo_landing_total_sec(logo_params_spin)
+    sweep_end_sec = landing_sec + logo_params_spin["sweep_start_sec"] + logo_params_spin["sweep_sec"]
+    state_before_spin = render.logo_animation_state(sweep_end_sec - 0.01, logo_params_spin)
+    state_mid_spin = render.logo_animation_state(sweep_end_sec + 0.25, logo_params_spin)
+    state_after_spin = render.logo_animation_state(sweep_end_sec + 0.5 + 0.01, logo_params_spin)
+    check(state_before_spin["spin_angle"] == 0.0, "スイープ終了直前はまだ回転していない（spin_angle=0）")
+    check(0 < state_mid_spin["spin_angle"] < 180.0,
+          f"スイープ終了直後のspin区間中はspin_angleが0〜degreesの間で進行する: {state_mid_spin['spin_angle']}")
+    check(state_after_spin["spin_angle"] == 180.0,
+          f"spin区間が終わるとdegrees（180）で静止する（degrees=180は「裏返って止まる」演出のため、"
+          f"回転後の見た目を保持し続ける）: {state_after_spin['spin_angle']}")
+
+    print("")
+    print("=== watermark：composite_watermarkの四隅配置・spin（Y軸回転）・opacity ===")
     wm_font_test_bgr, wm_font_test_alpha = render.load_logo_image(os.path.join("examples", "store_logo.png"))
     check(wm_font_test_bgr is not None, "テスト用ロゴ画像を読み込めた")
     wm_luma_test = render.build_logo_luminance_mask(wm_font_test_bgr, wm_font_test_alpha)
@@ -2473,13 +2568,14 @@ try:
 
     cfg_full = render.resolve_watermark_config({"image": "x", "position": "bottom_right"})
     out_full = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
-                                           wm_w, wm_h, cfg_full, width_scale=1.0)
-    out_half = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
-                                           wm_w, wm_h, cfg_full, width_scale=0.3)
+                                           wm_w, wm_h, cfg_full, spin_angle_deg=0.0)
+    out_80 = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
+                                         wm_w, wm_h, cfg_full, spin_angle_deg=80.0)
     width_full = np.count_nonzero(np.any(out_full != wm_base_frame, axis=2).any(axis=0))
-    width_half = np.count_nonzero(np.any(out_half != wm_base_frame, axis=2).any(axis=0))
-    check(0 < width_half < width_full,
-          f"width_scaleを小さくすると横幅が実際に縮む（spin演出）: full={width_full} half={width_half}")
+    width_80 = np.count_nonzero(np.any(out_80 != wm_base_frame, axis=2).any(axis=0))
+    check(0 < width_80 < width_full,
+          f"spin_angle_degを80度にすると横幅が実際に縮む（Y軸回転で真横向きに近づく）: "
+          f"0度={width_full} 80度={width_80}")
 
     cfg_opaque = render.resolve_watermark_config({"image": "x", "opacity": 1.0})
     cfg_faint = render.resolve_watermark_config({"image": "x", "opacity": 0.1})
@@ -2496,7 +2592,7 @@ try:
     print("=== watermark：render_watermark_frameのshine/spinタイミング（interval_secごとにsec秒間だけ発生） ===")
     wm_cfg_timed = render.resolve_watermark_config({
         "image": "x", "shine": {"enabled": True, "interval_sec": 1.0, "sec": 0.4},
-        "spin": {"enabled": True, "interval_sec": 2.0, "sec": 0.5},
+        "spin": {"enabled": True, "interval_sec": 2.0, "sec": 0.5, "degrees": 360, "ease": "linear"},
     })
     f_no_shine = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
                                                 wm_luma_test, wm_w, wm_h, 0.8, wm_cfg_timed)  # shine非アクティブ(0.8%1.0=0.8>=0.4)
@@ -2506,15 +2602,16 @@ try:
           "shineアクティブな時刻とそうでない時刻とで見た目が異なる")
 
     f_no_spin_width = render.composite_watermark(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
-                                                  wm_w, wm_h, wm_cfg_timed, width_scale=1.0)
+                                                  wm_w, wm_h, wm_cfg_timed, spin_angle_deg=0.0)
+    # spin: interval_sec=2.0周期のうちsec=0.5がアクティブ。t=2.125 → phase=0.125 <0.5 → アクティブ、
+    # ease=linear・degrees=360なので local_t=0.125/0.5=0.25 → spin_angle=360*0.25=90度
+    # （Y軸回転で真横向き＝最も細くなる瞬間）
     f_spin_frame = render.render_watermark_frame(wm_base_frame.copy(), wm_font_test_bgr, wm_font_test_alpha,
-                                                  wm_luma_test, wm_w, wm_h, 2.25, wm_cfg_timed)
-    # spin: interval_sec=2.0周期のうちsec=0.5がアクティブ。t=2.25 → phase=0.25 <0.5 → アクティブ、
-    # local_t=0.5 → width_scale=|cos(pi*0.5)|=0（最も細くなる瞬間）
+                                                  wm_luma_test, wm_w, wm_h, 2.125, wm_cfg_timed)
     width_normal = np.count_nonzero(np.any(f_no_spin_width != wm_base_frame, axis=2).any(axis=0))
     width_spin = np.count_nonzero(np.any(f_spin_frame != wm_base_frame, axis=2).any(axis=0))
     check(width_spin < width_normal * 0.3,
-          f"spinアクティブ区間の中間（local_t=0.5）ではロゴがほぼ細い線状に潰れる: "
+          f"spinアクティブ区間中、90度に達する時刻ではロゴがほぼ細い線状に潰れる: "
           f"normal={width_normal} spin={width_spin}")
 
     f_disabled_cfg = render.resolve_watermark_config({"image": "x", "shine": {"enabled": False},

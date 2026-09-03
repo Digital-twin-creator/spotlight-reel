@@ -920,6 +920,30 @@
         <label>duration_sec（着地演出が終わってからの表示時間） <span class="brush-slider-value" id="logoDurationValue">2.2秒</span></label>
         <input type="range" id="logoDurationSlider" min="0.3" max="5" step="0.1" value="2.2">
       </div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="logoSpinEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="logoSpinEnabledCheckbox">spin（着地・光沢スイープの後にY軸で1回転させる）</label>
+      </div>
+      <div id="logoSpinOptionsBody" hidden>
+        <div class="field">
+          <label>角度 degrees</label>
+          <select id="logoSpinDegreesSelect">
+            <option value="360">360度（一回転して正面に戻る）</option>
+            <option value="180">180度（裏返って止まる）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>長さ sec <span class="brush-slider-value" id="logoSpinSecValue">0.8秒</span></label>
+          <input type="range" id="logoSpinSecSlider" min="0.2" max="3" step="0.1" value="0.8">
+        </div>
+        <div class="field">
+          <label>遠近の強さ perspective <span class="brush-slider-value" id="logoSpinPerspectiveValue">0.40</span></label>
+          <input type="range" id="logoSpinPerspectiveSlider" min="0" max="1" step="0.05" value="0.4">
+        </div>
+        <canvas id="logoSpinPreviewCanvas" width="140" height="140"
+                style="border-radius:8px;background:
+                  repeating-conic-gradient(#ccc 0% 25%, #fff 0% 50%) 0 0/16px 16px;"></canvas>
+      </div>
       <div class="field">
         <label>効果音（着地の瞬間に発火）</label>
         <select id="logoSfxSelect">
@@ -1005,6 +1029,20 @@
             <label>長さ sec <span class="brush-slider-value" id="watermarkSpinSecValue">0.8秒</span></label>
             <input type="range" id="watermarkSpinSecSlider" min="0.2" max="3" step="0.1" value="0.8">
           </div>
+          <div class="field">
+            <label>角度 degrees</label>
+            <select id="watermarkSpinDegreesSelect">
+              <option value="360">360度（一回転）</option>
+              <option value="180">180度（裏返って止まる）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>遠近の強さ perspective <span class="brush-slider-value" id="watermarkSpinPerspectiveValue">0.40</span></label>
+            <input type="range" id="watermarkSpinPerspectiveSlider" min="0" max="1" step="0.05" value="0.4">
+          </div>
+          <canvas id="watermarkSpinPreviewCanvas" width="140" height="140"
+                  style="border-radius:8px;background:
+                    repeating-conic-gradient(#ccc 0% 25%, #fff 0% 50%) 0 0/16px 16px;"></canvas>
         </div>
       </div>
     </div>
@@ -1845,6 +1883,17 @@ function buildProjectJSON(state) {
       duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2),
       auto_transparent_bg: state.logo.autoTransparentBg !== undefined ? !!state.logo.autoTransparentBg : true
     };
+    // spin（Y軸回転）はenabled=trueの時だけ出力する（既定はfalseなので、通常の
+    // ラストロゴでは従来どおりキー自体を省略し完全後方互換にする）
+    if (state.logo.spinEnabled) {
+      project.logo.spin = {
+        enabled: true,
+        sec: round(numOr(state.logo.spinSec, DEFAULT_LOGO_SPIN.sec), 2),
+        degrees: round(numOr(state.logo.spinDegrees, DEFAULT_LOGO_SPIN.degrees), 1),
+        ease: resolveSpinEase(state.logo.spinEase || DEFAULT_LOGO_SPIN.ease),
+        perspective: round(numOr(state.logo.spinPerspective, DEFAULT_LOGO_SPIN.perspective), 2)
+      };
+    }
     if (state.logo.sfxLibraryId) {
       var logoLibFile = (state.sfxLibrary || [])
         .filter(function (f) { return f.id === state.logo.sfxLibraryId; })[0];
@@ -1875,7 +1924,10 @@ function buildProjectJSON(state) {
         enabled: state.watermark.spinEnabled !== undefined ? !!state.watermark.spinEnabled
           : DEFAULT_WATERMARK_SPIN.enabled,
         interval_sec: round(numOr(state.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec), 2),
-        sec: round(numOr(state.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec), 2)
+        sec: round(numOr(state.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec), 2),
+        degrees: round(numOr(state.watermark.spinDegrees, DEFAULT_WATERMARK_SPIN.degrees), 1),
+        ease: resolveSpinEase(state.watermark.spinEase || DEFAULT_WATERMARK_SPIN.ease),
+        perspective: round(numOr(state.watermark.spinPerspective, DEFAULT_WATERMARK_SPIN.perspective), 2)
       }
     };
   }
@@ -2088,6 +2140,7 @@ function parseProjectJSON(json, sfxLibrary) {
   var logo = null;
   if (json.logo && json.logo.image) {
     var logoSfxFields = resolveSfxFieldsFromJSON(json.logo.sfx, sfxLibrary, SFX_ALIGNS_LOGO);
+    var logoSpin = json.logo.spin || {};
     logo = {
       imageFile: null,
       imageName: json.logo.image,
@@ -2103,7 +2156,12 @@ function parseProjectJSON(json, sfxLibrary) {
       sfxAlign: logoSfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
       sfxMissingFile: logoSfxFields.sfxMissingFile || "",
       autoColorHex: "",
-      autoTransparentBg: json.logo.auto_transparent_bg !== undefined ? !!json.logo.auto_transparent_bg : true
+      autoTransparentBg: json.logo.auto_transparent_bg !== undefined ? !!json.logo.auto_transparent_bg : true,
+      spinEnabled: logoSpin.enabled !== undefined ? !!logoSpin.enabled : DEFAULT_LOGO_SPIN.enabled,
+      spinSec: numOr(logoSpin.sec, DEFAULT_LOGO_SPIN.sec),
+      spinDegrees: numOr(logoSpin.degrees, DEFAULT_LOGO_SPIN.degrees),
+      spinEase: resolveSpinEase(logoSpin.ease),
+      spinPerspective: numOr(logoSpin.perspective, DEFAULT_LOGO_SPIN.perspective)
     };
   }
   var watermark = defaultWatermarkState();
@@ -2125,6 +2183,9 @@ function parseProjectJSON(json, sfxLibrary) {
     watermark.spinEnabled = wmSpin.enabled !== undefined ? !!wmSpin.enabled : DEFAULT_WATERMARK_SPIN.enabled;
     watermark.spinIntervalSec = numOr(wmSpin.interval_sec, DEFAULT_WATERMARK_SPIN.intervalSec);
     watermark.spinSec = numOr(wmSpin.sec, DEFAULT_WATERMARK_SPIN.sec);
+    watermark.spinDegrees = numOr(wmSpin.degrees, DEFAULT_WATERMARK_SPIN.degrees);
+    watermark.spinEase = resolveSpinEase(wmSpin.ease);
+    watermark.spinPerspective = numOr(wmSpin.perspective, DEFAULT_WATERMARK_SPIN.perspective);
   }
   var hashtags = defaultHashtagsState();
   if (json.hashtags && json.hashtags.text) {
@@ -2732,7 +2793,22 @@ var WATERMARK_POSITIONS = ["top_left", "top_right", "bottom_left", "bottom_right
 var DEFAULT_WATERMARK_POSITION = "bottom_right";
 var DEFAULT_WATERMARK = { position: DEFAULT_WATERMARK_POSITION, widthRatio: 0.16, opacity: 0.85, margin: 0.03 };
 var DEFAULT_WATERMARK_SHINE = { enabled: true, intervalSec: 4.0, sec: 0.6 };
-var DEFAULT_WATERMARK_SPIN = { enabled: true, intervalSec: 9.0, sec: 0.8 };
+/** spin（ロゴの水平中心を通るY軸まわりの3D回転。透視投影で描画）の既定値。
+    watermark.spin / logo.spinで共通の形（render.pyのWATERMARK_SPIN_DEFAULTS/LOGO_SPIN_DEFAULTSと同じ）。
+    logo.spinは着地演出のスイープ後に1回だけ発生するため、既定でenabled=falseにしている
+    （watermark.spinは常時表示ロゴの周期演出として従来どおりenabled=trueが既定）。 */
+var SPIN_EASE_KINDS = ["linear", "in_out"];
+var DEFAULT_SPIN_EASE = "in_out";
+var DEFAULT_SPIN_DEGREES = 360.0;
+var DEFAULT_SPIN_PERSPECTIVE = 0.4;
+var DEFAULT_WATERMARK_SPIN = { enabled: true, intervalSec: 9.0, sec: 0.8,
+  degrees: DEFAULT_SPIN_DEGREES, ease: DEFAULT_SPIN_EASE, perspective: DEFAULT_SPIN_PERSPECTIVE };
+var DEFAULT_LOGO_SPIN = { enabled: false, sec: 0.8,
+  degrees: DEFAULT_SPIN_DEGREES, ease: DEFAULT_SPIN_EASE, perspective: DEFAULT_SPIN_PERSPECTIVE };
+/** spin.easeの値を既知の種類にフォールバックする（render.pyのSPIN_EASE_KINDSと同じ方針） */
+function resolveSpinEase(v) {
+  return SPIN_EASE_KINDS.indexOf(v) >= 0 ? v : DEFAULT_SPIN_EASE;
+}
 var WATERMARK_POSITION_LABELS = [
   { value: "top_left", label: "左上" }, { value: "top_right", label: "右上" },
   { value: "bottom_left", label: "左下" }, { value: "bottom_right", label: "右下" }
@@ -2753,8 +2829,23 @@ function defaultWatermarkState() {
     shineEnabled: DEFAULT_WATERMARK_SHINE.enabled, shineIntervalSec: DEFAULT_WATERMARK_SHINE.intervalSec,
     shineSec: DEFAULT_WATERMARK_SHINE.sec,
     spinEnabled: DEFAULT_WATERMARK_SPIN.enabled, spinIntervalSec: DEFAULT_WATERMARK_SPIN.intervalSec,
-    spinSec: DEFAULT_WATERMARK_SPIN.sec,
+    spinSec: DEFAULT_WATERMARK_SPIN.sec, spinDegrees: DEFAULT_WATERMARK_SPIN.degrees,
+    spinEase: DEFAULT_WATERMARK_SPIN.ease, spinPerspective: DEFAULT_WATERMARK_SPIN.perspective,
     autoTransparentBg: true
+  };
+}
+
+/** appState.logo / draft相当の既定オブジェクトを新しく作る（毎回同じ参照を使い回さないため） */
+function defaultLogoState() {
+  return {
+    imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND,
+    startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC,
+    shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC,
+    durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null,
+    sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true,
+    spinEnabled: DEFAULT_LOGO_SPIN.enabled, spinSec: DEFAULT_LOGO_SPIN.sec,
+    spinDegrees: DEFAULT_LOGO_SPIN.degrees, spinEase: DEFAULT_LOGO_SPIN.ease,
+    spinPerspective: DEFAULT_LOGO_SPIN.perspective
   };
 }
 
@@ -3554,9 +3645,16 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_WATERMARK_POSITION: DEFAULT_WATERMARK_POSITION,
     DEFAULT_WATERMARK: DEFAULT_WATERMARK,
     DEFAULT_WATERMARK_SHINE: DEFAULT_WATERMARK_SHINE,
+    SPIN_EASE_KINDS: SPIN_EASE_KINDS,
+    DEFAULT_SPIN_EASE: DEFAULT_SPIN_EASE,
+    DEFAULT_SPIN_DEGREES: DEFAULT_SPIN_DEGREES,
+    DEFAULT_SPIN_PERSPECTIVE: DEFAULT_SPIN_PERSPECTIVE,
+    resolveSpinEase: resolveSpinEase,
     DEFAULT_WATERMARK_SPIN: DEFAULT_WATERMARK_SPIN,
+    DEFAULT_LOGO_SPIN: DEFAULT_LOGO_SPIN,
     watermarkAssetName: watermarkAssetName,
     defaultWatermarkState: defaultWatermarkState,
+    defaultLogoState: defaultLogoState,
     HASHTAGS_POSITIONS: HASHTAGS_POSITIONS,
     DEFAULT_HASHTAGS_POSITION: DEFAULT_HASHTAGS_POSITION,
     HASHTAGS_BACKINGS: HASHTAGS_BACKINGS,
@@ -3779,7 +3877,7 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true },
+  logo: defaultLogoState(),
   // 常時表示の透かしロゴ（watermark）。imageFileはラストロゴと同様、このセッション中のみ有効
   watermark: defaultWatermarkState(),
   // ハッシュタグ表示（hashtags）
@@ -3964,6 +4062,9 @@ function init() {
     "logoShrinkSecSlider", "logoShrinkSecValue",
     "logoSettleSecSlider", "logoSettleSecValue",
     "logoDurationSlider", "logoDurationValue",
+    "logoSpinEnabledCheckbox", "logoSpinOptionsBody",
+    "logoSpinDegreesSelect", "logoSpinSecSlider", "logoSpinSecValue",
+    "logoSpinPerspectiveSlider", "logoSpinPerspectiveValue", "logoSpinPreviewCanvas",
     "logoSfxSelect", "logoSfxAlignSelect", "clearLogoBtn",
     "watermarkSection", "watermarkEnabledCheckbox", "watermarkOptionsBody",
     "pickWatermarkBtn", "watermarkFileInput", "reuseLastLogoForWatermarkBtn", "watermarkFileName",
@@ -3978,6 +4079,8 @@ function init() {
     "watermarkSpinEnabledCheckbox", "watermarkSpinOptionsBody",
     "watermarkSpinIntervalSlider", "watermarkSpinIntervalValue",
     "watermarkSpinSecSlider", "watermarkSpinSecValue",
+    "watermarkSpinDegreesSelect", "watermarkSpinPerspectiveSlider", "watermarkSpinPerspectiveValue",
+    "watermarkSpinPreviewCanvas",
     "hashtagsSection", "hashtagsEnabledCheckbox", "hashtagsOptionsBody",
     "hashtagsTextInput", "hashtagsPositionSelect", "hashtagsCustomPosBody",
     "hashtagsPosXSlider", "hashtagsPosXValue", "hashtagsPosYSlider", "hashtagsPosYValue",
@@ -4441,6 +4544,25 @@ function init() {
     els.logoDurationValue.textContent = appState.logo.durationSec.toFixed(1) + "秒";
     saveToLocalStorage();
   });
+  els.logoSpinEnabledCheckbox.addEventListener("change", function () {
+    appState.logo.spinEnabled = els.logoSpinEnabledCheckbox.checked;
+    els.logoSpinOptionsBody.hidden = !appState.logo.spinEnabled;
+    saveToLocalStorage();
+  });
+  els.logoSpinDegreesSelect.addEventListener("change", function () {
+    appState.logo.spinDegrees = Number(els.logoSpinDegreesSelect.value);
+    saveToLocalStorage();
+  });
+  els.logoSpinSecSlider.addEventListener("input", function () {
+    appState.logo.spinSec = Number(els.logoSpinSecSlider.value);
+    els.logoSpinSecValue.textContent = appState.logo.spinSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+  });
+  els.logoSpinPerspectiveSlider.addEventListener("input", function () {
+    appState.logo.spinPerspective = Number(els.logoSpinPerspectiveSlider.value);
+    els.logoSpinPerspectiveValue.textContent = appState.logo.spinPerspective.toFixed(2);
+    saveToLocalStorage();
+  });
   els.logoSfxSelect.addEventListener("change", function () {
     var sfxFields = applySfxSelectValue(els.logoSfxSelect.value);
     appState.logo.sfx = sfxFields.sfx;
@@ -4544,6 +4666,17 @@ function init() {
     saveToLocalStorage();
     updateJsonPreview();
   });
+  els.watermarkSpinDegreesSelect.addEventListener("change", function () {
+    appState.watermark.spinDegrees = Number(els.watermarkSpinDegreesSelect.value);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkSpinPerspectiveSlider.addEventListener("input", function () {
+    appState.watermark.spinPerspective = Number(els.watermarkSpinPerspectiveSlider.value);
+    els.watermarkSpinPerspectiveValue.textContent = appState.watermark.spinPerspective.toFixed(2);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
 
   els.hashtagsEnabledCheckbox.addEventListener("change", function () {
     appState.hashtags.enabled = els.hashtagsEnabledCheckbox.checked;
@@ -4639,6 +4772,8 @@ function init() {
     els.sfxLibraryStatus.textContent = "効果音ライブラリの読み込みに失敗しました: " +
       (err && err.message ? err.message : err);
   });
+
+  startSpinPreviewLoops();
 }
 
 /* ---------------- 状態バー・エラー表示 ---------------- */
@@ -7823,7 +7958,7 @@ function cornerAverageColorHex(imgEl) {
 }
 
 function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
+  appState.logo = defaultLogoState();
   els.logoFileInput.value = "";
   els.logoAutoTransparentPreviewCanvas.style.display = "none";
   applyLogoSettingsToInputs();
@@ -7859,6 +7994,127 @@ function updateLogoColorRow() {
   }
 }
 
+/* ---------------- spin（Y軸回転）の簡易プレビュー ----------------
+ * 実際の書き出し(logo_spin_transform/cv2.warpPerspective)とは別実装の近似で、
+ * canvas 2Dには真の透視変換が無いため、画像を縦の細切りにして各切片の高さを
+ * 手前/奥の度合いに応じて変えることで台形の見た目を近似する（簡易描画）。 */
+
+var spinPreviewImageCache = {};
+
+/** File（appState.logo.imageFile / appState.watermark.imageFile）からImageを作り、
+ * 同じFileの間はobjectURLを作り直さないようキャッシュする */
+function ensureSpinPreviewImage(cacheKey, file) {
+  var st = spinPreviewImageCache[cacheKey];
+  if (!st) { st = { file: null, img: null, url: null }; spinPreviewImageCache[cacheKey] = st; }
+  if (st.file === file) return st.img;
+  if (st.url) { URL.revokeObjectURL(st.url); st.url = null; }
+  st.file = file;
+  if (!file) { st.img = null; return null; }
+  st.url = URL.createObjectURL(file);
+  var img = new Image();
+  img.src = st.url;
+  st.img = img;
+  return img;
+}
+
+/** spin角度(0-360度)を「正面から見た傾き0-90度」+「裏面(左右反転して見せる)かどうか」に
+ * 畳み込む（render.pyのlogo_spin_transformの角度畳み込みと同じ考え方の簡易版） */
+function foldSpinAnglePreview(angleDeg) {
+  var a = ((angleDeg % 360) + 360) % 360;
+  var faceFlip = a > 90 && a < 270;
+  var phi;
+  if (a <= 90) phi = a;
+  else if (a < 180) phi = 180 - a;
+  else if (a <= 270) phi = a - 180;
+  else phi = 360 - a;
+  return { phiDeg: phi, faceFlip: faceFlip };
+}
+
+function drawSpinPreviewFrame(ctx, img, canvasW, canvasH, angleDeg, perspective) {
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  if (!img || !img.complete || !img.naturalWidth) return;
+  var folded = foldSpinAnglePreview(angleDeg);
+  var phiRad = folded.phiDeg * Math.PI / 180;
+  var scaleX = Math.max(0.03, Math.cos(phiRad));
+  var iw = img.naturalWidth, ih = img.naturalHeight;
+  var boxW = canvasW * 0.7, boxH = boxW * (ih / iw);
+  if (boxH > canvasH * 0.7) { boxH = canvasH * 0.7; boxW = boxH * (iw / ih); }
+  var drawW = boxW * scaleX;
+  if (drawW < 1) return;
+  var cx = canvasW / 2, cy = canvasH / 2;
+  var trapAmt = clamp01(perspective) * Math.sin(phiRad);
+  var angleRad = ((angleDeg % 360) + 360) % 360 * Math.PI / 180;
+  var leftIsNear = Math.sin(angleRad) <= 0;
+  var nearScale = 1 + trapAmt * 0.5;
+  var farScale = 1 - trapAmt * 0.5;
+  var strips = 14;
+  var stripDrawW = drawW / strips;
+  for (var i = 0; i < strips; i++) {
+    var tc = (i + 0.5) / strips;
+    var localScale = leftIsNear ? (nearScale + (farScale - nearScale) * tc) : (farScale + (nearScale - farScale) * tc);
+    var stripDrawH = boxH * localScale;
+    var dx = cx - drawW / 2 + i * stripDrawW;
+    var dy = cy - stripDrawH / 2;
+    var t0 = i / strips, t1 = (i + 1) / strips;
+    var sxT0 = folded.faceFlip ? (1 - t1) : t0;
+    var sxT1 = folded.faceFlip ? (1 - t0) : t1;
+    var sx = sxT0 * iw;
+    var sw = Math.max(1, (sxT1 - sxT0) * iw);
+    ctx.drawImage(img, sx, 0, sw, ih, dx, dy, stripDrawW + 0.6, stripDrawH);
+  }
+}
+
+/** spin.easeに応じた0-1の進行度（render.py/core-logicのspin_ease_progressと同じ考え方） */
+function spinEasePreviewProgress(localT, kind) {
+  if (kind === "linear") return localT;
+  return localT * localT * (3 - 2 * localT); // in_out（smoothstep）
+}
+
+/** 透かしロゴ／ラストロゴのspin設定パネルにある簡易プレビューcanvasを、
+ * 現在のスライダー値のまま0→degrees→0で往復ループさせ続ける
+ * （enabled/OFFに関わらず動かし、値を調整しながら見た目を確認できるようにする） */
+function startSpinPreviewLoops() {
+  function loopFor(canvasEl, getFile, getConfig) {
+    if (!canvasEl) return;
+    var ctx = canvasEl.getContext("2d");
+    var startTime = null;
+    function tick(now) {
+      if (!startTime) startTime = now;
+      var cfg = getConfig();
+      var img = ensureSpinPreviewImage(canvasEl.id, getFile());
+      var cycleSec = Math.max(0.2, cfg.sec) * 2;
+      var t = ((now - startTime) / 1000) % cycleSec;
+      var half = cycleSec / 2;
+      var localT = t < half ? (t / half) : (1 - (t - half) / half);
+      var eased = spinEasePreviewProgress(localT, cfg.ease);
+      var angle = eased * cfg.degrees;
+      drawSpinPreviewFrame(ctx, img, canvasEl.width, canvasEl.height, angle, cfg.perspective);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+  loopFor(els.logoSpinPreviewCanvas,
+    function () { return appState.logo && appState.logo.imageFile; },
+    function () {
+      return {
+        sec: numOr(appState.logo.spinSec, DEFAULT_LOGO_SPIN.sec),
+        degrees: numOr(appState.logo.spinDegrees, DEFAULT_LOGO_SPIN.degrees),
+        ease: resolveSpinEase(appState.logo.spinEase),
+        perspective: numOr(appState.logo.spinPerspective, DEFAULT_LOGO_SPIN.perspective)
+      };
+    });
+  loopFor(els.watermarkSpinPreviewCanvas,
+    function () { return appState.watermark && appState.watermark.imageFile; },
+    function () {
+      return {
+        sec: numOr(appState.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec),
+        degrees: numOr(appState.watermark.spinDegrees, DEFAULT_WATERMARK_SPIN.degrees),
+        ease: resolveSpinEase(appState.watermark.spinEase),
+        perspective: numOr(appState.watermark.spinPerspective, DEFAULT_WATERMARK_SPIN.perspective)
+      };
+    });
+}
+
 function applyLogoSettingsToInputs() {
   var logo = appState.logo || {};
   if (logo.imageFile) {
@@ -7892,6 +8148,15 @@ function applyLogoSettingsToInputs() {
   var durationSec = numOr(logo.durationSec, DEFAULT_LOGO_DURATION_SEC);
   els.logoDurationSlider.value = durationSec;
   els.logoDurationValue.textContent = durationSec.toFixed(1) + "秒";
+  els.logoSpinEnabledCheckbox.checked = !!logo.spinEnabled;
+  els.logoSpinOptionsBody.hidden = !logo.spinEnabled;
+  els.logoSpinDegreesSelect.value = String(numOr(logo.spinDegrees, DEFAULT_LOGO_SPIN.degrees));
+  var logoSpinSec = numOr(logo.spinSec, DEFAULT_LOGO_SPIN.sec);
+  els.logoSpinSecSlider.value = logoSpinSec;
+  els.logoSpinSecValue.textContent = logoSpinSec.toFixed(1) + "秒";
+  var logoSpinPerspective = numOr(logo.spinPerspective, DEFAULT_LOGO_SPIN.perspective);
+  els.logoSpinPerspectiveSlider.value = logoSpinPerspective;
+  els.logoSpinPerspectiveValue.textContent = logoSpinPerspective.toFixed(2);
   populateSfxLibraryOptions(els.logoSfxSelect, sfxLibrary);
   els.logoSfxSelect.value = sfxSelectValue(logo.sfxLibraryId, logo.sfx);
   els.logoSfxAlignSelect.value = resolveSfxAlign(logo.sfxAlign, SFX_ALIGNS_LOGO);
@@ -7957,6 +8222,10 @@ function applyWatermarkSettingsToInputs() {
   var spinSec = numOr(wm.spinSec, DEFAULT_WATERMARK_SPIN.sec);
   els.watermarkSpinSecSlider.value = spinSec;
   els.watermarkSpinSecValue.textContent = spinSec.toFixed(1) + "秒";
+  els.watermarkSpinDegreesSelect.value = String(numOr(wm.spinDegrees, DEFAULT_WATERMARK_SPIN.degrees));
+  var spinPerspective = numOr(wm.spinPerspective, DEFAULT_WATERMARK_SPIN.perspective);
+  els.watermarkSpinPerspectiveSlider.value = spinPerspective;
+  els.watermarkSpinPerspectiveValue.textContent = spinPerspective.toFixed(2);
 }
 
 function applyHashtagsSettingsToInputs() {
@@ -8241,7 +8510,12 @@ function buildLocalStoragePayload(dropThumbs) {
       sfx: appState.logo.sfx,
       sfxLibraryId: appState.logo.sfxLibraryId || null,
       sfxAlign: appState.logo.sfxAlign || SFX_ALIGN_DEFAULT,
-      autoTransparentBg: appState.logo.autoTransparentBg !== false
+      autoTransparentBg: appState.logo.autoTransparentBg !== false,
+      spinEnabled: appState.logo.spinEnabled,
+      spinSec: appState.logo.spinSec,
+      spinDegrees: appState.logo.spinDegrees,
+      spinEase: appState.logo.spinEase,
+      spinPerspective: appState.logo.spinPerspective
     } : null,
     // watermark画像本体(File)も保存できないため、ファイル名等の設定だけ保存する
     watermark: (appState.watermark && appState.watermark.imageName) ? {
@@ -8257,6 +8531,9 @@ function buildLocalStoragePayload(dropThumbs) {
       spinEnabled: appState.watermark.spinEnabled,
       spinIntervalSec: appState.watermark.spinIntervalSec,
       spinSec: appState.watermark.spinSec,
+      spinDegrees: appState.watermark.spinDegrees,
+      spinEase: appState.watermark.spinEase,
+      spinPerspective: appState.watermark.spinPerspective,
       autoTransparentBg: appState.watermark.autoTransparentBg !== false
     } : null,
     hashtags: (appState.hashtags && appState.hashtags.text) ? {
@@ -8338,8 +8615,13 @@ function loadFromLocalStorage(videoFileName) {
       sfxLibraryId: data.logo.sfxLibraryId || null,
       sfxAlign: resolveSfxAlign(data.logo.sfxAlign, SFX_ALIGNS_LOGO),
       autoColorHex: "",
-      autoTransparentBg: data.logo.autoTransparentBg !== undefined ? !!data.logo.autoTransparentBg : true
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
+      autoTransparentBg: data.logo.autoTransparentBg !== undefined ? !!data.logo.autoTransparentBg : true,
+      spinEnabled: data.logo.spinEnabled !== undefined ? !!data.logo.spinEnabled : DEFAULT_LOGO_SPIN.enabled,
+      spinSec: numOr(data.logo.spinSec, DEFAULT_LOGO_SPIN.sec),
+      spinDegrees: numOr(data.logo.spinDegrees, DEFAULT_LOGO_SPIN.degrees),
+      spinEase: resolveSpinEase(data.logo.spinEase),
+      spinPerspective: numOr(data.logo.spinPerspective, DEFAULT_LOGO_SPIN.perspective)
+    } : defaultLogoState();
     appState.watermark = (data.watermark && data.watermark.imageName) ? {
       enabled: data.watermark.enabled !== undefined ? !!data.watermark.enabled : true,
       imageFile: null,
@@ -8357,6 +8639,9 @@ function loadFromLocalStorage(videoFileName) {
         : DEFAULT_WATERMARK_SPIN.enabled,
       spinIntervalSec: numOr(data.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec),
       spinSec: numOr(data.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec),
+      spinDegrees: numOr(data.watermark.spinDegrees, DEFAULT_WATERMARK_SPIN.degrees),
+      spinEase: resolveSpinEase(data.watermark.spinEase),
+      spinPerspective: numOr(data.watermark.spinPerspective, DEFAULT_WATERMARK_SPIN.perspective),
       autoTransparentBg: data.watermark.autoTransparentBg !== undefined ? !!data.watermark.autoTransparentBg : true
     } : defaultWatermarkState();
     appState.hashtags = (data.hashtags && data.hashtags.text) ? {
@@ -9110,7 +9395,7 @@ function handleJsonFileChange(e) {
       appState.shadowSource = loaded.shadowSource;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
+      appState.logo = loaded.logo || defaultLogoState();
       appState.watermark = loaded.watermark || defaultWatermarkState();
       appState.hashtags = loaded.hashtags || defaultHashtagsState();
       applySettingsToInputs();
