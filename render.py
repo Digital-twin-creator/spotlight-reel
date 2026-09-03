@@ -373,6 +373,8 @@ def probe_video(path):
         raise RuntimeError(f"映像ストリームが見つかりません: {path}")
 
     width, height = int(vs["width"]), int(vs["height"])
+    codec_name = vs.get("codec_name")
+    pix_fmt = vs.get("pix_fmt")
 
     # 回転メタデータ（コンテナのtagsか、display matrixのside_data）
     rotation = 0
@@ -427,6 +429,8 @@ def probe_video(path):
         "rotation": rotation,
         "has_audio": has_audio,
         "is_vfr": is_vfr,
+        "codec_name": codec_name,
+        "pix_fmt": pix_fmt,
     }
 
 
@@ -472,16 +476,27 @@ def build_scale_filter(W, H, fps):
             f"setsar=1")
 
 
-def open_frame_reader(path, W, H, fps):
+def open_frame_reader(path, W, H, fps, start_time=0.0, allow_early_close=False):
     """
     ffmpeg を rawvideo(bgr24) で吐かせるプロセスを開く。
     （回転はffmpeg側が自動適用するので、出てくるフレームは表示上の向き）
+    start_time を指定すると、その時刻のキーフレームまで高速シークしてからデコードを始める
+    （スマートレンダリングが、素通しコピー区間の続きからフレーム単位で読み直すのに使う。
+    シーク自体はキーフレーム丸めなので、呼び出し側で欲しいフレームまで読み進めて捨てること）。
+    allow_early_close=True の場合、呼び出し側が最後まで読み切らずに途中でパイプを閉じる
+    ことを想定し、stderrを捨てる（スマートレンダリングの帳尻合わせ区間は必要な分だけ
+    読んだら打ち切るため、そのままだとffmpeg側が「Broken pipe」を出す。実害は無いが
+    ログが紛らわしいため黙らせる）。
     """
     ffmpeg = find_exe("ffmpeg")
-    cmd = [ffmpeg, "-v", "error", "-i", path,
+    cmd = [ffmpeg, "-v", "error"]
+    if start_time > 0:
+        cmd += ["-ss", f"{start_time:.6f}"]
+    cmd += ["-i", path,
            "-vf", build_scale_filter(W, H, fps),
            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=10 ** 8)
+    stderr = subprocess.DEVNULL if allow_early_close else None
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, bufsize=10 ** 8)
 
 
 def iter_frames(proc, W, H):
@@ -527,6 +542,324 @@ def open_video_writer(out_path, W, H, fps, audio_wav):
         cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
     cmd += [out_path]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+
+def open_segment_video_writer(out_path, W, H, fps):
+    """
+    スマートレンダリング用：rawvideoをstdinで受け取り、音声無し・映像のみの
+    H.264(yuv420p, crf20)断片MP4を書くffmpegを開く（open_video_writerと同じ
+    エンコード設定。フリーズ区間の画素がフルレンダリングと一致することが前提のため）。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    cmd = [ffmpeg, "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{W}x{H}", "-r", f"{fps:.6f}", "-i", "pipe:0",
+           "-an",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+           "-pix_fmt", "yuv420p",
+           out_path]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+
+# ---------------------------------------------------------------------------
+# スマートレンダリング（フリーズ区間だけ再エンコードし、素通し区間は無劣化コピー）
+#
+# 現行のフル再エンコード（open_frame_reader→毎フレームPythonで合成→open_video_writer）は
+# 動画全体をデコード→（フリーズ以外は素通しのまま）再エンコードするため、所要時間が
+# 動画の長さに比例し、素通し区間も再圧縮による画質劣化を受ける。スマートレンダリングは
+# 素通し区間を元動画から `-c copy` で無劣化のまま切り出し、フリーズ演出の区間だけを
+# 従来どおりPythonで合成・エンコードして、最後にconcatデマルサで結合する。
+#
+# 前提・制約（decide_render_modeが判定）:
+#   - 元動画のコーデックがh264であること（自分のエンコーダ出力もh264固定のため、
+#     concatデマルサでの`-c copy`結合を安全に行うにはコーデックを揃える必要がある。
+#     HEVC/VP9等のソースはフルレンダリングにフォールバックする）
+#   - 出力解像度・fpsが元動画と一致していること（スケーリング/fps変換が要る場合は
+#     コピーできない）
+#   - watermark（常時表示の透かしロゴ）が設定されていない・hashtags.alwaysが有効でない
+#     こと（どちらも素通し区間にも合成が必要なため）
+#
+# 音声は現行どおりbuild_audio()でタイムライン全体を一括生成するため、映像の分割方式に
+# よらず変更不要（フレーム数の整合性さえ保てば音ズレは起きない）。
+# ---------------------------------------------------------------------------
+
+SMART_RENDER_COMPATIBLE_CODECS = ("h264",)
+SMART_RENDER_COMPATIBLE_PIX_FMTS = ("yuv420p", "yuvj420p")
+
+
+def decide_render_mode(mode_arg, info, W, H, out_fps, watermark_cfg, hashtags_cfg):
+    """
+    --mode（auto/smart/hybrid/full）と、元動画・出力設定からレンダリングモードを決める。
+    戻り値: (render_mode: "full"|"smart"|"hybrid", reason: str)。reasonはfullにした理由
+    （smart/hybrid採用時は空文字。ログ・render_timing.jsonのmode_reasonに使う）。
+
+    smartは素通し区間を無劣化コピー（-c copy）するため、watermark（常時表示の透かしロゴ）や
+    hashtags.always（常時表示のハッシュタグ）のように「フリーズ以外の区間にも合成が必要な
+    常時表示要素」が1つでもあれば使えない。hybridはそれらをffmpegのoverlayフィルタで
+    素通し区間に合成することでこの制約を回避するが、無劣化コピーは行わないためsmartより
+    画質面ではわずかに劣る（実質無劣化に近いcrf18）。そのため常時表示要素が無ければ
+    autoはsmartを優先する（無劣化コピーの方が高速・高画質なため）。
+    """
+    if mode_arg == "full":
+        return "full", "mode=full が指定されました"
+    codec_name = info.get("codec_name")
+    if codec_name not in SMART_RENDER_COMPATIBLE_CODECS:
+        return "full", (f"元動画のコーデック（{codec_name}）がスマート/hybridレンダリング非対応です"
+                         f"（対応: {', '.join(SMART_RENDER_COMPATIBLE_CODECS)}）")
+    pix_fmt = info.get("pix_fmt")
+    if pix_fmt not in SMART_RENDER_COMPATIBLE_PIX_FMTS:
+        return "full", f"元動画のピクセルフォーマット（{pix_fmt}）がスマート/hybridレンダリング非対応です"
+    if info["width"] != W or info["height"] != H:
+        return "full", (f"出力解像度({W}x{H})が元動画({info['width']}x{info['height']})と異なり"
+                         f"スケーリングが必要なため、素通し区間を高速処理できません")
+    if abs(info["fps"] - out_fps) > 0.01:
+        return "full", (f"出力fps({out_fps:.3f})が元動画のfps({info['fps']:.3f})と異なるため、"
+                         f"素通し区間を高速処理できません")
+
+    # watermarkには"always"のような切り替えは無く、設定されていれば常時表示が本来の用途
+    # （render()のwatermark_playback参照）なので、設定があるだけで素通し区間にも合成が必要
+    always_on = watermark_cfg is not None or bool(hashtags_cfg and hashtags_cfg.get("always"))
+
+    # watermarkのshine/spin周期（compute_watermark_loop_period_sec）がHYBRID_WATERMARK_LOOP_MAX_SECを
+    # 超える場合、hybridのループ素材生成（render_watermark_loop_asset）自体が使えないため、
+    # hybridも選べない（この場合はfullしか選択肢が無い）
+    watermark_loop_too_long = False
+    if watermark_cfg is not None:
+        is_static = not watermark_cfg["shine"]["enabled"] and not watermark_cfg["spin"]["enabled"]
+        if not is_static and compute_watermark_loop_period_sec(watermark_cfg) is None:
+            watermark_loop_too_long = True
+
+    if mode_arg == "smart":
+        if always_on:
+            return "full", ("常時表示要素(watermark/hashtags.always)があり、素通し区間にも合成が"
+                             "必要なためsmartでは扱えません（--mode hybrid をお試しください）")
+        return "smart", ""
+
+    if mode_arg == "hybrid":
+        if not always_on:
+            # 常時表示要素が無ければ無劣化コピーできるsmartの方が高速・高画質なので、
+            # hybridを明示指定してもsmartと同じ経路にする
+            return "smart", ""
+        if watermark_loop_too_long:
+            return "full", (f"透かしロゴのshine/spin周期がhybridの上限"
+                             f"（{HYBRID_WATERMARK_LOOP_MAX_SEC:.0f}秒）を超えるため使えません")
+        return "hybrid", ""
+
+    # auto
+    if not always_on:
+        return "smart", ""
+    if watermark_loop_too_long:
+        return "full", (f"常時表示の透かしロゴがあり、かつそのshine/spin周期がhybridの上限"
+                         f"（{HYBRID_WATERMARK_LOOP_MAX_SEC:.0f}秒）を超えるため使えません")
+    return "hybrid", ""
+
+
+def probe_keyframe_times(path):
+    """
+    入力動画のキーフレーム(IDR)のPTS秒を昇順で返す（key_frameフラグで判定）。
+    ffprobeのcsv出力は、-show_entriesで指定した順番どおりにフィールドが並ぶとは限らない
+    （実機検証で、frame=pts_time,key_frameと指定してもcsv出力はkey_frame,pts_timeの
+    順で返ってくるケースを確認した）ため、フィールド名で照合できるJSON出力を使う。
+    """
+    ffprobe = find_exe("ffprobe")
+    cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "frame=pts_time,key_frame",
+           "-of", "json", path]
+    out = subprocess.run(cmd, check=True, capture_output=True).stdout.decode("utf-8", "replace")
+    data = json.loads(out) if out.strip() else {}
+    times = []
+    for fr in data.get("frames") or []:
+        if str(fr.get("key_frame")) == "1":
+            try:
+                times.append(float(fr.get("pts_time")))
+            except (TypeError, ValueError):
+                pass
+    times.sort()
+    return times
+
+
+def build_keyframe_index(video_path, fps, src_frames):
+    """
+    キーフレームのフレーム番号（他の処理と同じ round(時刻 * fps) 基準）の昇順listと、
+    {フレーム番号: 実際のpts秒（ffmpegの-ssにそのまま渡す。丸め誤差でシークが1フレーム
+    前後のキーフレームにずれるのを防ぐため、フレーム番号からの逆算はしない）} を返す。
+    先頭(0フレーム目)は必ずキーフレームであるべきだが、念のため無ければ0.0を補う。
+    """
+    times = probe_keyframe_times(video_path)
+    idx_to_time = {}
+    for t in times:
+        idx = min(max(int(round(t * fps)), 0), max(src_frames - 1, 0))
+        if idx not in idx_to_time:
+            idx_to_time[idx] = t
+    if 0 not in idx_to_time:
+        idx_to_time[0] = 0.0
+    idxs = sorted(idx_to_time.keys())
+    return idxs, idx_to_time
+
+
+def keyframe_at_or_after(keyframe_idxs, idx, src_frames):
+    """idx以上の最小のキーフレーム番号。無ければ動画末尾（src_frames）を返す
+    （＝そこから先はキーフレームが無いので、末尾まで再エンコードするしかない）。"""
+    for k in keyframe_idxs:
+        if k >= idx:
+            return k
+    return src_frames
+
+
+def keyframe_at_or_before(keyframe_idxs, idx):
+    """idx以下の最大のキーフレーム番号（デコード再開位置のシーク用。無ければ0）"""
+    best = 0
+    for k in keyframe_idxs:
+        if k <= idx:
+            best = k
+        else:
+            break
+    return best
+
+
+def probe_segment_frame_count(path):
+    """
+    生成済みmp4断片の実際のデコード後フレーム数を数える。
+    ffprobeの`-count_frames`（パケット数ベース）は、Bフレームを含むストリームを
+    `-c copy`で途中カットした断片では実際のデコード結果と食い違うことがある
+    （検証中に、キーフレーム間の途中カットでBフレームの参照が壊れ、実デコードでは
+    1フレームの重複・欠落が起きるのに`-count_frames`はそれを検出しないケースを確認した）。
+    そのため、実際にデコードして数える（内容は使わず縦横2x2グレースケールへ
+    大幅に縮小し、フレーム数だけを安く数える）。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    cmd = [ffmpeg, "-v", "error", "-i", path, "-map", "0:v:0",
+           "-vf", "scale=2:2", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+    out = subprocess.run(cmd, capture_output=True).stdout
+    return len(out) // 4  # 2x2 grayscale = 4バイト/フレーム
+
+
+def extract_copy_segment(video_path, start_time, n_frames, out_path):
+    """
+    start_timeから元動画を `-c copy` で無劣化コピーする。n_frames=Noneなら動画末尾まで、
+    整数ならちょうどn_frames枚だけ。
+
+    フレーム数ではなく時間長（-t/-to）でカットすると、Bフレームを含むストリームでは
+    DTS/PTSの並び替えの影響で1フレーム前後の重複・欠落が実デコード時に起きることを
+    検証で確認した（時間指定では、キーフレーム同士のちょうどの境界を指定しても
+    数フレーム分ずれて多く/少なく出力されることがある）。`-frames:v` によるパケット数
+    指定はこの影響を受けないため、こちらを使う。
+
+    start_timeは、呼び出し側（build_keyframe_index）が実際にffprobeで取得した
+    キーフレームのpts秒そのものであること（フレーム番号からの逆算はしない。丸め誤差で
+    シークが1フレームずれるのを防ぐため）。GOP（キーフレーム区間）の境界だけで
+    開始することが必須で、キーフレームでない位置から始めると独立にデコードできない。
+
+    戻り値: 実際に書き出せたフレーム数（decode-based probe_segment_frame_countで検証）。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    cmd = [ffmpeg, "-y", "-v", "error",
+           "-ss", f"{start_time:.6f}", "-i", video_path]
+    if n_frames is not None:
+        cmd += ["-frames:v", str(n_frames)]
+    cmd += ["-map", "0:v:0", "-c:v", "copy", "-an",
+            "-avoid_negative_ts", "make_zero",
+            out_path]
+    res = subprocess.run(cmd)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"素通し区間の無劣化コピーに失敗しました（{start_time:.3f}秒〜）")
+    return probe_segment_frame_count(out_path)
+
+
+def build_watermark_loop_symlinks(seq_asset, start_time, tmpdir):
+    """
+    watermarkのループPNG連番（render_watermark_loop_assetのkind="sequence"の結果）から、
+    ある区間の開始時刻start_timeに対応する位相のフレームが先頭（0番）に来るよう
+    並べ替えたシンボリックリンク群を作る。hybrid合成では常にoffset=0のloopフィルタを
+    使う（start=0固定）ため、区間ごとにこの並べ替えを差し替えることで、動画全体の
+    絶対時刻に対して透かしの光沢・回転の位相が区間境界をまたいでも連続して見える。
+    同じ位相オフセットのディレクトリはtmpdir内でキャッシュ・再利用する
+    （複数のhybrid区間が同じフレーム境界（フレーム数の周期の倍数）から始まる場合がある）。
+    戻り値: (symlink_dir, pattern)
+    """
+    frame_count = seq_asset["frame_count"]
+    fps = seq_asset["fps"]
+    src_dir = seq_asset["dir"]
+    pattern = seq_asset["pattern"]
+    phase = int(round(start_time * fps)) % frame_count
+    symlink_dir = os.path.join(tmpdir, f"wm_phase_{phase:05d}")
+    if not os.path.isdir(symlink_dir):
+        os.makedirs(symlink_dir, exist_ok=True)
+        for i in range(frame_count):
+            src_idx = (phase + i) % frame_count
+            os.symlink(os.path.join(src_dir, pattern % src_idx),
+                       os.path.join(symlink_dir, pattern % i))
+    return symlink_dir, pattern
+
+
+def extract_hybrid_segment(video_path, start_time, n_frames, out_path, W, H, fps,
+                            watermark_asset=None, hashtags_asset=None, tmpdir=None):
+    """
+    素通し区間を、無劣化コピー（-c copy）ではなく実際にデコードし、ffmpegのoverlay
+    フィルタでwatermark/hashtagsを合成した上でlibx264に再エンコードして書き出す
+    （hybridモード。常時表示要素があるため無劣化コピーが使えない場合に、フル
+    レンダリング（Pythonで1フレームずつ合成）より高速にこの区間を処理する経路）。
+
+    watermark_asset: render_watermark_loop_assetの戻り値。
+      kind="image"なら静止画（shine/spinどちらも無効）をそのままoverlay。
+      kind="sequence"ならbuild_watermark_loop_symlinksで位相を合わせた上で
+      `loop`フィルタ（1周期分のPNG連番を無限ループ）＋overlayで合成する。
+      Noneならwatermarkなし。
+    hashtags_asset: render_hashtags_static_assetの戻り値（{"path","rect"}）。
+      テキストは常に静止画のため、位相合わせは不要（そのままoverlay）。Noneならなし。
+    重ねる位置は、どちらもrect（セーフゾーン計算後の座標を含む外接矩形）の左上を使う。
+
+    start_time/n_framesの意味・制約はextract_copy_segmentと同じ（n_frames=Noneで
+    末尾まで）。ただしこちらは実デコードするため、キーフレーム境界である必要は無い。
+
+    戻り値: 実際に書き出せたフレーム数（decode-based probe_segment_frame_countで検証）。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    cmd = [ffmpeg, "-y", "-v", "error", "-ss", f"{start_time:.6f}", "-i", video_path]
+
+    extra_inputs = []
+    filter_parts = []
+    cur_label = "0:v:0"
+    next_idx = 1
+
+    if watermark_asset is not None:
+        rx0, ry0, _, _ = watermark_asset["rect"]
+        if watermark_asset["kind"] == "image":
+            extra_inputs += ["-loop", "1", "-i", watermark_asset["path"]]
+            filter_parts.append(f"[{next_idx}:v]format=rgba[wm]")
+        else:
+            seq_dir, pattern = build_watermark_loop_symlinks(watermark_asset, start_time, tmpdir)
+            frame_count = watermark_asset["frame_count"]
+            extra_inputs += ["-framerate", f"{fps:.6f}", "-i", os.path.join(seq_dir, pattern)]
+            filter_parts.append(
+                f"[{next_idx}:v]format=rgba,loop=loop=-1:size={frame_count}:start=0,"
+                f"setpts=N/{fps}/TB[wm]")
+        next_idx += 1
+        filter_parts.append(f"[{cur_label}][wm]overlay={rx0}:{ry0}:shortest=1[v_wm]")
+        cur_label = "v_wm"
+
+    if hashtags_asset is not None:
+        rx0, ry0, _, _ = hashtags_asset["rect"]
+        extra_inputs += ["-loop", "1", "-i", hashtags_asset["path"]]
+        filter_parts.append(f"[{next_idx}:v]format=rgba[ht]")
+        next_idx += 1
+        filter_parts.append(f"[{cur_label}][ht]overlay={rx0}:{ry0}:shortest=1[v_ht]")
+        cur_label = "v_ht"
+
+    cmd += extra_inputs
+    if filter_parts:
+        cmd += ["-filter_complex", ";".join(filter_parts), "-map", f"[{cur_label}]"]
+    else:
+        cmd += ["-map", "0:v:0"]
+    if n_frames is not None:
+        cmd += ["-frames:v", str(n_frames)]
+    cmd += ["-an", "-r", f"{fps:.6f}", "-s", f"{W}x{H}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            out_path]
+    res = subprocess.run(cmd)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"hybrid素通し区間の合成に失敗しました（{start_time:.3f}秒〜）")
+    return probe_segment_frame_count(out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -3079,20 +3412,25 @@ def resolve_watermark_config(wm_cfg):
     return cfg
 
 
-def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, spin_perspective=0.4):
+def watermark_layer_placement(wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, spin_perspective=0.4):
     """
-    frameの指定コーナー（cfg["position"]）付近に透かしロゴを合成する。回転の軸（透かし
-    ロゴ自身の中心）は、無回転時にcfg["position"]・cfg["margin"]から決まる基準位置に
-    フレーム内でずっと固定される。spin_angle_deg!=0なら logo_spin_transform()でY軸回転
-    させた見た目に差し替えてから、その軸位置を基準にoffset_x/yで配置する（perspective>0
-    では台形の見た目の重心がバウンディングボックス中心からズレるため、回転後のバウンディング
-    ボックスをそのまま角に合わせて置くと軸がフレーム内で片側にズレて見えてしまう）。
+    透かしロゴの貼り付け先（フレーム内の矩形dx0,dy0,dx1,dy1）と、そこに貼るBGR/アルファの
+    パッチを計算する（frameへ実際に合成する処理はcomposite_watermark、透明キャンバスへ
+    描くのはrender_watermark_layer_rgbaと、用途ごとに分ける）。
+    フレーム内に収まる部分が無ければNoneを返す。
+
+    回転の軸（透かしロゴ自身の中心）は、無回転時にcfg["position"]・cfg["margin"]から
+    決まる基準位置にフレーム内でずっと固定される。spin_angle_deg!=0なら
+    logo_spin_transform()でY軸回転させた見た目に差し替えてから、その軸位置を基準に
+    offset_x/yで配置する（perspective>0では台形の見た目の重心がバウンディングボックス
+    中心からズレるため、回転後のバウンディングボックスをそのまま角に合わせて置くと
+    軸がフレーム内で片側にズレて見えてしまう）。
     """
     if wm_bgr is None or cfg["opacity"] <= 0:
-        return frame
+        return None
     lh, lw = wm_bgr.shape[:2]
     if lw <= 0 or lh <= 0:
-        return frame
+        return None
     base_scale = (W * cfg["width_ratio"]) / lw
 
     # 無回転時の基準サイズ・位置から、回転軸として使う固定中心点を求める
@@ -3120,7 +3458,7 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, 
         src_bgr, src_alpha = wm_bgr, wm_alpha
     ph, pw = src_bgr.shape[:2]
     if pw <= 0 or ph <= 0:
-        return frame
+        return None
 
     new_w = max(1, int(round(pw * base_scale)))
     new_h = max(1, int(round(ph * base_scale)))
@@ -3137,27 +3475,31 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, 
     dx0, dy0 = max(0, x0), max(0, y0)
     dx1, dy1 = min(W, x1), min(H, y1)
     if dx1 <= dx0 or dy1 <= dy0 or sx1 <= sx0 or sy1 <= sy0:
-        return frame
+        return None
 
-    out = frame.copy()
     patch_bgr = resized_bgr[sy0:sy1, sx0:sx1]
     patch_a = resized_alpha[sy0:sy1, sx0:sx1]
+    return dx0, dy0, dx1, dy1, patch_bgr, patch_a
+
+
+def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, spin_perspective=0.4):
+    """frameの指定コーナー（cfg["position"]）付近に透かしロゴを合成する（配置計算はwatermark_layer_placement参照）"""
+    placement = watermark_layer_placement(wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg, spin_perspective)
+    if placement is None:
+        return frame
+    dx0, dy0, dx1, dy1, patch_bgr, patch_a = placement
+    out = frame.copy()
     region = out[dy0:dy1, dx0:dx1].astype(np.float32)
     blended = region * (1.0 - patch_a) + patch_bgr * patch_a
     out[dy0:dy1, dx0:dx1] = np.clip(blended, 0, 255).astype(np.uint8)
     return out
 
 
-def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
+def watermark_layer_bgr_and_spin(wm_bgr, wm_luma, t, cfg):
     """
-    経過秒数tにおける透かしロゴをframeに合成して返す（wm_bgr/cfgが無ければ何もしない）。
-    shine（斜めの光沢）・spin（ロゴの水平中心を通るY軸まわりの3D回転、透視投影で描画）は、
-    それぞれのinterval_secごとにsec秒間だけ発生する（interval_sec周期のうち先頭sec秒間が
-    アクティブ）。spin中はdegrees分だけease（既定in_out）で0度から回転する。
+    経過秒数tにおける透かしロゴの見た目（shine適用後のBGR）と、spin角度(度)を計算する
+    （render_watermark_frame・render_watermark_layer_rgbaの共通処理）。
     """
-    if wm_bgr is None or cfg is None:
-        return frame
-
     layer_bgr = wm_bgr.astype(np.float32)
     shine = cfg["shine"]
     if shine["enabled"]:
@@ -3175,9 +3517,166 @@ def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
         if phase < spin["sec"]:
             local_t = phase / spin["sec"]
             spin_angle = spin["degrees"] * spin_ease_progress(local_t, spin["ease"])
+    return layer_bgr, spin_angle
 
+
+def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
+    """
+    経過秒数tにおける透かしロゴをframeに合成して返す（wm_bgr/cfgが無ければ何もしない）。
+    shine（斜めの光沢）・spin（ロゴの水平中心を通るY軸まわりの3D回転、透視投影で描画）は、
+    それぞれのinterval_secごとにsec秒間だけ発生する（interval_sec周期のうち先頭sec秒間が
+    アクティブ）。spin中はdegrees分だけease（既定in_out）で0度から回転する。
+    """
+    if wm_bgr is None or cfg is None:
+        return frame
+
+    layer_bgr, spin_angle = watermark_layer_bgr_and_spin(wm_bgr, wm_luma, t, cfg)
     return composite_watermark(frame, layer_bgr, wm_alpha, W, H, cfg,
-                                spin_angle_deg=spin_angle, spin_perspective=spin["perspective"])
+                                spin_angle_deg=spin_angle, spin_perspective=cfg["spin"]["perspective"])
+
+
+def render_watermark_layer_rgba(wm_bgr, wm_alpha, wm_luma, W, H, t, cfg, canvas_rect=None):
+    """
+    経過秒数tにおける透かしロゴ単体を、透明なBGRAキャンバスに描いて返す
+    （hybridレンダリングが、素通し区間へffmpegのoverlayフィルタで合成する透過ループ動画を
+    作るのに使う。render_watermark_frameと違い、動画フレームには一切触れない）。
+    canvas_rect=(cx0,cy0,cx1,cy1) を指定すると、そのキャンバス（フレーム全体ではなく
+    透かしロゴの外接矩形だけの小さな領域）のローカル座標へ描く（overlayフィルタの入力を
+    小さく保つことでエンコード・合成コストを抑えるため）。省略時はW×H全体に描く。
+    """
+    if canvas_rect is None:
+        cx0, cy0, cx1, cy1 = 0, 0, W, H
+    else:
+        cx0, cy0, cx1, cy1 = canvas_rect
+    canvas = np.zeros((cy1 - cy0, cx1 - cx0, 4), dtype=np.uint8)
+    if wm_bgr is None or cfg is None:
+        return canvas
+    layer_bgr, spin_angle = watermark_layer_bgr_and_spin(wm_bgr, wm_luma, t, cfg)
+    placement = watermark_layer_placement(layer_bgr, wm_alpha, W, H, cfg, spin_angle, cfg["spin"]["perspective"])
+    if placement is None:
+        return canvas
+    dx0, dy0, dx1, dy1, patch_bgr, patch_a = placement
+    # フレーム全体基準の(dx0,dy0,dx1,dy1)をキャンバスのローカル座標へ変換する
+    lx0, ly0, lx1, ly1 = dx0 - cx0, dy0 - cy0, dx1 - cx0, dy1 - cy0
+    lx0c, ly0c = max(0, lx0), max(0, ly0)
+    lx1c, ly1c = min(canvas.shape[1], lx1), min(canvas.shape[0], ly1)
+    if lx1c <= lx0c or ly1c <= ly0c:
+        return canvas
+    px0, py0 = lx0c - lx0, ly0c - ly0
+    px1, py1 = px0 + (lx1c - lx0c), py0 + (ly1c - ly0c)
+    canvas[ly0c:ly1c, lx0c:lx1c, :3] = np.clip(patch_bgr[py0:py1, px0:px1], 0, 255).astype(np.uint8)
+    canvas[ly0c:ly1c, lx0c:lx1c, 3] = np.clip(patch_a[py0:py1, px0:px1, 0] * 255, 0, 255).astype(np.uint8)
+    return canvas
+
+
+# hybridレンダリング（--mode hybrid/auto時、常時表示のwatermark/hashtagsがあっても
+# 素通し区間の合成をPythonの1フレームずつの処理ではなくffmpegのoverlayフィルタで行う経路）
+# が、watermarkのshine/spinをまとめて1周期分だけ事前レンダリングしループさせるための上限。
+# shine.interval_sec・spin.interval_secのLCM（最小公倍数）がこれを超える組み合わせ
+# （既定値同士なら4.0sと9.0sでLCM=36.0s、上限内）の場合は、素直にfull（または通常の
+# hybrid内Python合成）にフォールバックする。
+HYBRID_WATERMARK_LOOP_MAX_SEC = 60.0
+
+
+def compute_watermark_loop_period_sec(cfg):
+    """
+    watermarkのshine/spinの見た目がちょうど1周して元に戻るまでの秒数（ループ動画の
+    長さ）を求める。どちらも無効なら常時同じ見た目（静止画1枚で足りる）としてNoneを返す。
+    片方だけ有効ならそのinterval_secをそのまま使う。両方有効なら、フレーム単位に丸めた
+    上でLCM（最小公倍数）を取り、両方がちょうど同時に1周に戻る長さにする
+    （そうしないと、ループ境界でshine/spinの位相が不連続にジャンプして見える）。
+    HYBRID_WATERMARK_LOOP_MAX_SECを超える場合はNoneを返し、呼び出し側にフォールバックを促す
+    （戻り値の意味がオーバーロードするため、呼び出し側はcfgのshine/spin.enabledを見て
+    「静止画で良い」のか「長すぎて諦めた」のかを判別すること）。
+    """
+    shine = cfg["shine"]
+    spin = cfg["spin"]
+    if not shine["enabled"] and not spin["enabled"]:
+        return None
+    if shine["enabled"] and not spin["enabled"]:
+        return shine["interval_sec"]
+    if spin["enabled"] and not shine["enabled"]:
+        return spin["interval_sec"]
+    # 両方有効：フレーム単位（1/1000秒刻みで近似）でLCMを取る
+    unit = 1000
+    a = max(1, round(shine["interval_sec"] * unit))
+    b = max(1, round(spin["interval_sec"] * unit))
+    lcm = a * b // math.gcd(a, b)
+    period_sec = lcm / unit
+    if period_sec > HYBRID_WATERMARK_LOOP_MAX_SEC:
+        return None
+    return period_sec
+
+
+def watermark_bounding_rect(watermark_bgr, watermark_alpha, W, H, watermark_cfg, margin_ratio=0.2):
+    """
+    透かしロゴがどの角度（spin中含む）でも収まる、フレーム内の外接矩形(cx0,cy0,cx1,cy1)を
+    求める。spinの透視投影は見た目の幅を縮める方向にしか働かないため、無回転時
+    （spin_angle_deg=0）の配置を基準に、安全のためmargin_ratio分だけ余白を足したものを
+    上限として使う。
+    """
+    placement = watermark_layer_placement(watermark_bgr, watermark_alpha, W, H, watermark_cfg,
+                                           spin_angle_deg=0.0, spin_perspective=watermark_cfg["spin"]["perspective"])
+    if placement is None:
+        return 0, 0, 0, 0
+    dx0, dy0, dx1, dy1, _, _ = placement
+    pad_x = int(round((dx1 - dx0) * margin_ratio))
+    pad_y = int(round((dy1 - dy0) * margin_ratio))
+    cx0 = max(0, dx0 - pad_x)
+    cy0 = max(0, dy0 - pad_y)
+    cx1 = min(W, dx1 + pad_x)
+    cy1 = min(H, dy1 + pad_y)
+    return cx0, cy0, cx1, cy1
+
+
+def render_watermark_loop_asset(watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg, W, H, fps, out_dir):
+    """
+    watermarkの見た目を、ffmpegのoverlayフィルタで素通し区間へ合成するための素材として
+    書き出す。
+      - shine/spinが両方無効（静止画）: 1枚のRGBA PNGを書き出す
+      - どちらか有効: 1周期分（compute_watermark_loop_period_sec秒）のフレームを、
+        透かしロゴの外接矩形サイズのRGBA PNG連番として書き出す
+        （この環境のffmpegビルドではlibvpx-vp9のアルファチャンネルが実際には
+        保存されないことを確認済みのため、動画コンテナは使わずPNG連番+loopフィルタで
+        代替する。呼び出し側/extract_hybrid_segmentが`loop=loop=-1:size=N`＋overlayで
+        ループさせ、位相合わせが必要な場合はシンボリックリンクでフレーム順を巻き戻して使う）
+    戻り値: dict {"kind": "image", "path": ..., "rect": ..., "period_sec": None} または
+            dict {"kind": "sequence", "dir": ..., "pattern": ..., "frame_count": ...,
+                  "rect": (cx0,cy0,cx1,cy1), "period_sec": 周期秒数, "fps": fps}
+    watermark_bgr is None なら None を返す（watermark未設定）。
+    周期がHYBRID_WATERMARK_LOOP_MAX_SECを超える場合もNoneを返す（呼び出し側でfullへ
+    フォールバックすること）。
+    """
+    if watermark_bgr is None or watermark_cfg is None:
+        return None
+    period_sec = compute_watermark_loop_period_sec(watermark_cfg)
+    is_static = not watermark_cfg["shine"]["enabled"] and not watermark_cfg["spin"]["enabled"]
+    if not is_static and period_sec is None:
+        return None  # 周期が長すぎる（呼び出し側でfullへフォールバックすること）
+
+    rect = watermark_bounding_rect(watermark_bgr, watermark_alpha, W, H, watermark_cfg)
+    cx0, cy0, cx1, cy1 = rect
+    if cx1 <= cx0 or cy1 <= cy0:
+        return None
+
+    if is_static:
+        canvas = render_watermark_layer_rgba(watermark_bgr, watermark_alpha, watermark_luma,
+                                              W, H, 0.0, watermark_cfg, canvas_rect=rect)
+        png_path = os.path.join(out_dir, "watermark_loop.png")
+        cv2.imwrite(png_path, canvas)
+        return {"kind": "image", "path": png_path, "rect": rect, "period_sec": None}
+
+    period_frames = max(1, int(round(period_sec * fps)))
+    seq_dir = os.path.join(out_dir, "watermark_loop_frames")
+    os.makedirs(seq_dir, exist_ok=True)
+    pattern = "frame_%05d.png"
+    for i in range(period_frames):
+        t = i / fps
+        canvas = render_watermark_layer_rgba(watermark_bgr, watermark_alpha, watermark_luma,
+                                              W, H, t, watermark_cfg, canvas_rect=rect)
+        cv2.imwrite(os.path.join(seq_dir, pattern % i), canvas)
+    return {"kind": "sequence", "dir": seq_dir, "pattern": pattern, "frame_count": period_frames,
+            "rect": rect, "period_sec": period_sec, "fps": fps}
 
 
 # ---------------------------------------------------------------------------
@@ -3259,6 +3758,33 @@ def render_hashtags_layer(cfg, W, H, font_cache, safe_zone_rect):
         backing_options=TEXT_BACKING_OPTIONS_DEFAULTS, auto_contrast=False,
         safe_zone_rect=safe_zone_rect)
     return layers[0] if layers else None
+
+
+def render_hashtags_static_asset(cfg, W, H, font_cache, safe_zone_rect, out_dir):
+    """
+    hashtags（座布団込み）を、ffmpegのoverlayフィルタで素通し区間へ合成するための
+    1枚のRGBA PNGとして書き出す（hybridレンダリング用。テキスト自体は常に静止画な
+    ので、watermarkと違いループ動画やシンボリックリンク位相合わせは不要）。
+    戻り値: dict {"path": ..., "rect": (cx0,cy0,cx1,cy1)} または、cfgがNone/表示領域が
+    無い場合はNone。
+    """
+    if not cfg:
+        return None
+    layer = render_hashtags_layer(cfg, W, H, font_cache, safe_zone_rect)
+    if layer is None:
+        return None
+    alpha = layer["alpha"]
+    ys, xs = np.nonzero(alpha[:, :, 0] > 0)
+    if len(xs) == 0:
+        return None
+    cx0, cy0 = int(xs.min()), int(ys.min())
+    cx1, cy1 = int(xs.max()) + 1, int(ys.max()) + 1
+    canvas = np.zeros((cy1 - cy0, cx1 - cx0, 4), dtype=np.uint8)
+    canvas[:, :, :3] = np.clip(layer["bgr"][cy0:cy1, cx0:cx1], 0, 255).astype(np.uint8)
+    canvas[:, :, 3] = np.clip(alpha[cy0:cy1, cx0:cx1, 0] * 255, 0, 255).astype(np.uint8)
+    png_path = os.path.join(out_dir, "hashtags_static.png")
+    cv2.imwrite(png_path, canvas)
+    return {"path": png_path, "rect": (cx0, cy0, cx1, cy1)}
 
 
 # ---------------------------------------------------------------------------
@@ -4088,7 +4614,8 @@ def write_wav(path, samples, sr=AUDIO_SR):
 # メイン処理
 # ---------------------------------------------------------------------------
 
-def _write_timing_summary(render_seconds):
+def _write_timing_summary(render_seconds, render_mode=None, mode_reason=None,
+                           copied_seconds=None, reencoded_seconds=None):
     """
     フリーズごとの自動切り抜き所要時間・キャッシュ使用有無（_TIMING_LOG）と、
     render()全体の所要時間をTIMING_JSON_NAME（cwd基準）へ書き出す（ジョブサマリー表示用。
@@ -4096,6 +4623,10 @@ def _write_timing_summary(render_seconds):
     color_source/shadow.sourceが両方"auto"の同じフリーズでは、get_or_extract_alphaが
     2回（色用・影用）呼ばれることがあるため、同じ時刻のエントリは実際に抽出が
     走った方（cache_used=False）を優先して1件にまとめる。
+    render_mode（"smart"/"hybrid"/"full"）・mode_reason（フルにした理由。smart/hybrid時は空）・
+    copied_seconds/reencoded_seconds（smart/hybrid時のみ。hybridではcopied_secondsは
+    ffmpegフィルタで合成した秒数を表す）は、指定された場合だけsummaryに含める
+    （render.ymlのジョブサマリー表示用。フル経路では省略される）。
     書き出しに失敗してもレンダリング自体の成功を妨げないよう、例外は握りつぶしてwarnする。
     """
     try:
@@ -4111,14 +4642,442 @@ def _write_timing_summary(render_seconds):
             "extract_seconds_total": round(extract_total, 2),
             "render_seconds": round(render_seconds, 2),
         }
+        if render_mode is not None:
+            summary["render_mode"] = render_mode
+            summary["render_mode_reason"] = mode_reason or ""
+        if copied_seconds is not None:
+            summary["copied_seconds"] = round(copied_seconds, 2)
+        if reencoded_seconds is not None:
+            summary["reencoded_seconds"] = round(reencoded_seconds, 2)
         with open(TIMING_JSON_NAME, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
     except Exception as exc:  # noqa: BLE001 - 内訳の書き出し失敗はレンダリング成功を妨げない
         warn(f"所要時間の内訳（{TIMING_JSON_NAME}）の書き出しに失敗しました: {exc}")
 
 
+def iter_end_logo_frames(last_out_frame, logo_bgr, logo_alpha, logo_luma, W, H, fps,
+                          logo_params, logo_bg_color, logo_blackout_frames, logo_total_frames,
+                          watermark_bgr=None, watermark_alpha=None, watermark_luma=None, watermark_cfg=None):
+    """
+    logo.at=='end'の末尾ロゴ演出（最後に出力したフレームからの暗転→着地→表示）の
+    フレームを順に生成する（フルレンダリング・スマートレンダリングの末尾セグメント、
+    両方から使う共通処理）。
+    """
+    if logo_bg_color is not None:
+        backdrop = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
+    else:
+        backdrop = np.ascontiguousarray(last_out_frame)
+    last_frame_f32 = np.ascontiguousarray(last_out_frame).astype(np.float32)
+    # 透かしロゴは、着地演出（暗転＋タメ+縮小+セトル）の間だけ非表示にする
+    # （着地後のhold/sweep/fadeでは再び表示する。iter_freeze_frames内のロゴ演出と同じ方針）
+    landing_total_frames_end = int(round(logo_landing_total_sec(logo_params) * fps))
+    wm_logo_t = 0.0
+    for i in range(logo_blackout_frames):
+        bt = (i + 1) / float(logo_blackout_frames)
+        out_frame = np.clip(last_frame_f32 * (1.0 - bt), 0, 255).astype(np.uint8)
+        wm_logo_t += 1.0 / fps
+        yield out_frame
+    for i in range(logo_total_frames):
+        out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
+                                       W, H, i / float(fps), logo_params, logo_bg_color)
+        wm_logo_t += 1.0 / fps
+        if watermark_bgr is not None and i >= landing_total_frames_end:
+            out_frame = render_watermark_frame(out_frame, watermark_bgr, watermark_alpha,
+                                                 watermark_luma, W, H, wm_logo_t, watermark_cfg)
+        yield out_frame
+
+
+def render_smart_encode_run(video_path, remaining_groups, resume_from_idx, keyframe_idxs, idx_to_time,
+                             src_frames, W, H, fps, font_cache, cache_dir,
+                             logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
+                             hashtags_cfg, out_path):
+    """
+    スマートレンダリング：resume_from_idxから連続デコードを始め、remaining_groups
+    （frame_index昇順のフリーズ群のリスト）を先頭から処理できるだけ処理する1本の断片を作る。
+
+    各フリーズを挿入した直後、次のキーフレームに追いつけて、かつそのキーフレーム位置が
+    次に処理すべきフリーズ群のframe_index以下（＝間に無劣化コピー区間を挟める）なら、
+    そこでこの断片を打ち切る。挟めない場合（次のキーフレームより先に次のフリーズが
+    来てしまう。元動画のキーフレーム間隔が粗い場合に起こりうる）は、そのまま同じ断片内で
+    続けて次のフリーズも処理する（複数フリーズが1つの断片にまたがることがある）。
+
+    resume_from_idx（直前の無劣化コピー区間が実測で終わったフレーム番号。
+    probe_segment_frame_countの実測値を使うため、理論値と1フレームずれていても良い）以降、
+    最初のフリーズのframe_indexまでの素通しフレームも、この断片の先頭で合わせて書く
+    （コピー区間が実測でtarget_idxまで届かなかった端数の帳尻合わせ）。
+
+    戻り値: (処理したフリーズ群の数, 次に無劣化コピーを再開できるフレーム番号,
+             書き込んだフレーム数)
+    """
+    seek_idx = keyframe_at_or_before(keyframe_idxs, resume_from_idx)
+    seek_time = idx_to_time.get(seek_idx, 0.0)
+
+    reader = open_frame_reader(video_path, W, H, fps, start_time=seek_time, allow_early_close=True)
+    writer = open_segment_video_writer(out_path, W, H, fps)
+    written = 0
+    group_i = 0
+    freeze_pending_for = remaining_groups[0][0]["frame_index"]
+    stop_at = None
+    try:
+        cur = seek_idx
+        for frame in iter_frames(reader, W, H):
+            if cur < resume_from_idx:
+                cur += 1
+                continue
+            if freeze_pending_for is not None and cur == freeze_pending_for:
+                for plan in remaining_groups[group_i]:
+                    for f in iter_freeze_frames(frame, plan, W, H, fps, font_cache,
+                                                 cache_dir=cache_dir, video_path=video_path,
+                                                 logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
+                                                 logo_params=logo_params, logo_bg_color=logo_bg_color,
+                                                 watermark_bgr=None, watermark_alpha=None, watermark_luma=None,
+                                                 watermark_cfg=None, hashtags_cfg=hashtags_cfg):
+                        writer.stdin.write(f.tobytes())
+                        written += 1
+                group_i += 1
+                next_target = (remaining_groups[group_i][0]["frame_index"]
+                                if group_i < len(remaining_groups) else None)
+                candidate_stop = keyframe_at_or_after(keyframe_idxs, cur + 1, src_frames)
+                if next_target is None or candidate_stop <= next_target:
+                    # 次のキーフレームまでの帳尻合わせだけ続け、そこでこの断片を終える
+                    stop_at = candidate_stop
+                    freeze_pending_for = None
+                else:
+                    # 次のキーフレームより先に次のフリーズが来る＝間に無劣化コピーを
+                    # 挟む余地が無いので、この断片内で連続して次のフリーズも処理する
+                    freeze_pending_for = next_target
+            # フリーズを挿入したかどうかに関わらず、このフレーム自体もフル経路（render()の
+            # メインループ）と同じく通常どおり出力する（フリーズは種として使うだけで、
+            # 元動画のフレームを1枚も消費・置換しない）
+            out_frame = np.ascontiguousarray(frame)
+            writer.stdin.write(out_frame.tobytes())
+            written += 1
+            cur += 1
+            if stop_at is not None and cur >= stop_at:
+                break
+        if group_i == 0:
+            raise RuntimeError(f"スマートレンダリング: 目的のフレーム({freeze_pending_for})まで"
+                                f"デコードできませんでした（動画の実際の長さが想定より"
+                                f"短い可能性があります）")
+    finally:
+        writer.stdin.close()
+        writer.wait()
+        try:
+            reader.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            reader.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            reader.kill()
+    if writer.returncode != 0:
+        raise RuntimeError("スマートレンダリング: フリーズ区間のエンコードに失敗しました。")
+    if stop_at is None:
+        # 最後のフリーズの後、動画末尾までキーフレームが見つからないまま尽きた
+        # （＝末尾まで丸ごとこの断片に含まれている）
+        stop_at = src_frames
+    return group_i, stop_at, written
+
+
+def render_video_smart(video_path, out_path, W, H, fps, src_frames, plans,
+                        cache_dir, font_cache, tmpdir, wav_path,
+                        logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
+                        logo_blackout_frames, logo_total_frames, hashtags_cfg, total_out):
+    """
+    フリーズ区間だけを再エンコードし、素通し区間は元動画から無劣化コピーして結合する
+    スマートレンダリング本体。音声（wav_path）は呼び出し側ですでに構築済みのものを
+    最後にmuxするだけで、映像の分割方式によらず一切変更しない
+    （build_audioはフレーム番号ベースでタイムラインを組むため、映像の実現方法に依らない）。
+    戻り値: (無劣化コピーした秒数, 再エンコードした秒数)
+    """
+    keyframe_idxs, idx_to_time = build_keyframe_index(video_path, fps, max(src_frames, 1))
+
+    # 同じframe_indexを持つフリーズ（複数フリーズが同時刻）はまとめて1つの
+    # 再エンコード区間にする（その間に無劣化コピーを挟む余地が無いため）
+    groups = []
+    for plan in plans:
+        if groups and groups[-1][0]["frame_index"] == plan["frame_index"]:
+            groups[-1].append(plan)
+        else:
+            groups.append([plan])
+
+    parts = []
+    copied_frames = 0
+    reencoded_frames = 0
+    cur = 0
+    seg_i = 0
+    gi = 0
+    while gi < len(groups):
+        target_idx = groups[gi][0]["frame_index"]
+        # GOP（キーフレーム区間）の途中ではコピーを打ち切れない（Bフレームがカット後に
+        # 存在しない参照フレームを必要とし、実デコード時にフレームの重複・欠落を
+        # 引き起こすため。probe_segment_frame_countのコメント参照）。そのため、コピー区間の
+        # 終端はtarget_idx以下の最も近いキーフレームまでとし、そこからtarget_idxまでの
+        # 端数はrender_smart_encode_run側の「先頭の帳尻合わせ」として再エンコードする。
+        copy_end_idx = keyframe_at_or_before(keyframe_idxs, target_idx)
+        if copy_end_idx > cur:
+            copy_path = os.path.join(tmpdir, f"smart_seg_{seg_i:03d}_copy.mp4")
+            seg_i += 1
+            actual = extract_copy_segment(video_path, idx_to_time[cur], copy_end_idx - cur, copy_path)
+            copied_frames += actual
+            resume_from_idx = cur + actual
+            parts.append(copy_path)
+        else:
+            resume_from_idx = cur
+        enc_path = os.path.join(tmpdir, f"smart_seg_{seg_i:03d}_freeze.mp4")
+        seg_i += 1
+        consumed, next_copy_idx, written = render_smart_encode_run(
+            video_path, groups[gi:], resume_from_idx, keyframe_idxs, idx_to_time, src_frames,
+            W, H, fps, font_cache, cache_dir, logo_bgr, logo_alpha, logo_luma,
+            logo_params, logo_bg_color, hashtags_cfg, enc_path)
+        reencoded_frames += written
+        parts.append(enc_path)
+        cur = next_copy_idx
+        times_str = ", ".join(f"t={p[0]['fz']['time']:.2f}s" for p in groups[gi:gi + consumed])
+        log(f"スマートレンダリング: フリーズ({times_str})を再エンコード"
+            f"・無劣化コピー再開位置={cur}フレーム目")
+        gi += consumed
+
+    if cur < src_frames:
+        copy_path = os.path.join(tmpdir, f"smart_seg_{seg_i:03d}_copy.mp4")
+        seg_i += 1
+        actual = extract_copy_segment(video_path, idx_to_time[cur], None, copy_path)
+        copied_frames += actual
+        parts.append(copy_path)
+        cur += actual
+
+    if logo_at == "end" and logo_bgr is not None:
+        last_frame_for_logo = grab_frame_at(video_path, max(src_frames - 1, 0) / fps, W, H, fps)
+        logo_seg_path = os.path.join(tmpdir, f"smart_seg_{seg_i:03d}_endlogo.mp4")
+        seg_i += 1
+        writer = open_segment_video_writer(logo_seg_path, W, H, fps)
+        written_logo = 0
+        try:
+            for out_frame in iter_end_logo_frames(last_frame_for_logo, logo_bgr, logo_alpha, logo_luma,
+                                                   W, H, fps, logo_params, logo_bg_color,
+                                                   logo_blackout_frames, logo_total_frames):
+                writer.stdin.write(out_frame.tobytes())
+                written_logo += 1
+        finally:
+            writer.stdin.close()
+            writer.wait()
+        if writer.returncode != 0:
+            raise RuntimeError("スマートレンダリング: 末尾ロゴ区間のエンコードに失敗しました。")
+        reencoded_frames += written_logo
+        parts.append(logo_seg_path)
+
+    if not parts:
+        raise RuntimeError("スマートレンダリング: 結合するセグメントがありません（想定外）。")
+
+    concat_list_path = os.path.join(tmpdir, "smart_concat_list.txt")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for p in parts:
+            escaped = os.path.abspath(p).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+    concat_video_path = os.path.join(tmpdir, "smart_concat_video.mp4")
+    ffmpeg = find_exe("ffmpeg")
+    res = subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                          "-i", concat_list_path, "-map", "0:v:0", "-c:v", "copy", "-an",
+                          concat_video_path])
+    if res.returncode != 0 or not os.path.exists(concat_video_path):
+        raise RuntimeError("スマートレンダリング: 区間の結合(concat)に失敗しました。")
+
+    mux_cmd = [ffmpeg, "-y", "-v", "error", "-i", concat_video_path]
+    if wav_path:
+        mux_cmd += ["-i", wav_path]
+    mux_cmd += ["-map", "0:v:0"]
+    if wav_path:
+        mux_cmd += ["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    mux_cmd += ["-c:v", "copy", "-movflags", "+faststart", out_path]
+    res2 = subprocess.run(mux_cmd)
+    if res2.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError("スマートレンダリング: 音声のmuxに失敗しました。")
+
+    final_frames = probe_segment_frame_count(out_path)
+    if abs(final_frames - total_out) > 1:
+        raise RuntimeError(f"スマートレンダリング: 出力フレーム数が想定と一致しません"
+                            f"（想定{total_out}・実際{final_frames}）。フレームの欠落/重複の"
+                            f"可能性があるため、--mode full でのレンダリングをお試しください。")
+    if final_frames != total_out:
+        warn(f"スマートレンダリング: 出力フレーム数が想定と{abs(final_frames - total_out)}枚だけ"
+             f"ずれています（想定{total_out}・実際{final_frames}。誤差1フレームまでは許容）。")
+
+    return copied_frames / fps, reencoded_frames / fps
+
+
+def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
+                         cache_dir, font_cache, tmpdir, wav_path,
+                         logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
+                         logo_blackout_frames, logo_total_frames,
+                         hashtags_cfg, watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg,
+                         watermark_asset, hashtags_asset, hashtags_playback_layer, total_out):
+    """
+    hybridレンダリング本体：常時表示のwatermark/hashtags.alwaysがあり無劣化コピー
+    （smart）が使えない場合に、素通し区間をPythonの1フレームずつの処理ではなく
+    ffmpegのoverlayフィルタ（extract_hybrid_segment）で高速に合成し、フリーズ区間だけ
+    従来どおりPythonで合成・再エンコードする。
+
+    smartと違い-c copyを使わないため、区間の開始・終了をキーフレーム境界に揃える必要が
+    無く（build_keyframe_index等は使わない）、各区間は単純にフレーム番号（秒）で
+    直接切り出せる。そのぶんorchestrator側の分岐はsmartより単純になる。
+
+    watermark_asset/hashtags_assetは呼び出し側（render()）で1回だけ生成した素材
+    （render_watermark_loop_asset/render_hashtags_static_assetの戻り値）を渡してもらう
+    （区間ごとに毎回生成し直すと、watermarkのPNG連番書き出しコストが積み上がるため）。
+    hashtags_playback_layerはrender_hashtags_layerのWxH全体版（{"bgr","alpha"}）で、
+    フリーズ直後の「own frame」（下記参照）へPythonで直接blend_telopするために使う
+    （hashtags_assetはffmpeg overlay用の外接矩形PNGで別物）。
+
+    フリーズ挿入直後に書く「own frame」（iter_freeze_frames自体は元フレームを消費・
+    置換しないため、フリーズ後もそのフレーム自身を通常どおり出力する必要がある。
+    render_smart_encode_runの「own frame」書き込みと同じ理由）は、素通し区間の
+    タイムラインに含まれる1フレームであるため、watermark/hashtagsがあれば
+    素通し区間と同じく合成が必要（フリーズ内部の独自時計ではなく、動画全体の
+    絶対時刻cur/fpsを使う。iter_freeze_frames内の合成とは別軸）。
+
+    音声（wav_path）は呼び出し側ですでに構築済みのものを最後にmuxするだけ
+    （render_video_smartと同じ方針）。
+    戻り値: (ffmpegフィルタ合成した秒数, Pythonで再エンコードした秒数)
+    """
+    groups = []
+    for plan in plans:
+        if groups and groups[-1][0]["frame_index"] == plan["frame_index"]:
+            groups[-1].append(plan)
+        else:
+            groups.append([plan])
+
+    parts = []
+    passthrough_frames = 0
+    reencoded_frames = 0
+    cur = 0
+    seg_i = 0
+
+    for group in groups:
+        target_idx = group[0]["frame_index"]
+        if target_idx > cur:
+            seg_path = os.path.join(tmpdir, f"hybrid_seg_{seg_i:03d}_pass.mp4")
+            seg_i += 1
+            actual = extract_hybrid_segment(video_path, cur / fps, target_idx - cur, seg_path,
+                                             W, H, fps, watermark_asset=watermark_asset,
+                                             hashtags_asset=hashtags_asset, tmpdir=tmpdir)
+            passthrough_frames += actual
+            cur += actual
+            parts.append(seg_path)
+
+        # フリーズ演出区間（このフレーム位置に来た全フリーズをまとめて処理）を合成する。
+        # watermark（設定があれば）はフリーズ内独自の簡易時計（t=0開始）で合成する
+        # （iter_freeze_frames自体の既存の挙動。フルレンダリングと同じ）。
+        seed_frame = grab_frame_at(video_path, cur / fps, W, H, fps)
+        enc_path = os.path.join(tmpdir, f"hybrid_seg_{seg_i:03d}_freeze.mp4")
+        seg_i += 1
+        writer = open_segment_video_writer(enc_path, W, H, fps)
+        written = 0
+        try:
+            for plan in group:
+                for f in iter_freeze_frames(seed_frame, plan, W, H, fps, font_cache,
+                                             cache_dir=cache_dir, video_path=video_path,
+                                             logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
+                                             logo_params=logo_params, logo_bg_color=logo_bg_color,
+                                             watermark_bgr=watermark_bgr, watermark_alpha=watermark_alpha,
+                                             watermark_luma=watermark_luma, watermark_cfg=watermark_cfg,
+                                             hashtags_cfg=hashtags_cfg):
+                    writer.stdin.write(f.tobytes())
+                    written += 1
+            # フリーズは元フレームを消費・置換しないため、このフレーム自身も通常どおり書く
+            # （render_smart_encode_runの「own frame」書き込みと同じ方針）。素通し区間と
+            # 同じ絶対時刻の1フレームなので、watermark/hashtagsがあればここでも合成する
+            own_frame = np.ascontiguousarray(seed_frame)
+            if watermark_bgr is not None:
+                own_frame = render_watermark_frame(own_frame, watermark_bgr, watermark_alpha,
+                                                     watermark_luma, W, H, cur / fps, watermark_cfg)
+            if hashtags_playback_layer is not None:
+                own_frame = blend_telop(own_frame, hashtags_playback_layer["bgr"],
+                                         hashtags_playback_layer["alpha"], 1.0)
+            writer.stdin.write(own_frame.tobytes())
+            written += 1
+        finally:
+            writer.stdin.close()
+            writer.wait()
+        if writer.returncode != 0:
+            raise RuntimeError("hybridレンダリング: フリーズ区間のエンコードに失敗しました。")
+        reencoded_frames += written
+        parts.append(enc_path)
+        cur += 1
+
+    if cur < src_frames:
+        seg_path = os.path.join(tmpdir, f"hybrid_seg_{seg_i:03d}_pass.mp4")
+        seg_i += 1
+        actual = extract_hybrid_segment(video_path, cur / fps, None, seg_path, W, H, fps,
+                                         watermark_asset=watermark_asset, hashtags_asset=hashtags_asset,
+                                         tmpdir=tmpdir)
+        passthrough_frames += actual
+        parts.append(seg_path)
+        cur += actual
+
+    if logo_at == "end" and logo_bgr is not None:
+        last_frame_for_logo = grab_frame_at(video_path, max(src_frames - 1, 0) / fps, W, H, fps)
+        logo_seg_path = os.path.join(tmpdir, f"hybrid_seg_{seg_i:03d}_endlogo.mp4")
+        seg_i += 1
+        writer = open_segment_video_writer(logo_seg_path, W, H, fps)
+        written_logo = 0
+        try:
+            for out_frame in iter_end_logo_frames(last_frame_for_logo, logo_bgr, logo_alpha, logo_luma,
+                                                   W, H, fps, logo_params, logo_bg_color,
+                                                   logo_blackout_frames, logo_total_frames,
+                                                   watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg):
+                writer.stdin.write(out_frame.tobytes())
+                written_logo += 1
+        finally:
+            writer.stdin.close()
+            writer.wait()
+        if writer.returncode != 0:
+            raise RuntimeError("hybridレンダリング: 末尾ロゴ区間のエンコードに失敗しました。")
+        reencoded_frames += written_logo
+        parts.append(logo_seg_path)
+
+    if not parts:
+        raise RuntimeError("hybridレンダリング: 結合するセグメントがありません（想定外）。")
+
+    concat_list_path = os.path.join(tmpdir, "hybrid_concat_list.txt")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for p in parts:
+            escaped = os.path.abspath(p).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+    concat_video_path = os.path.join(tmpdir, "hybrid_concat_video.mp4")
+    ffmpeg = find_exe("ffmpeg")
+    res = subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                          "-i", concat_list_path, "-map", "0:v:0", "-c:v", "copy", "-an",
+                          concat_video_path])
+    if res.returncode != 0 or not os.path.exists(concat_video_path):
+        raise RuntimeError("hybridレンダリング: 区間の結合(concat)に失敗しました。")
+
+    mux_cmd = [ffmpeg, "-y", "-v", "error", "-i", concat_video_path]
+    if wav_path:
+        mux_cmd += ["-i", wav_path]
+    mux_cmd += ["-map", "0:v:0"]
+    if wav_path:
+        mux_cmd += ["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    mux_cmd += ["-c:v", "copy", "-movflags", "+faststart", out_path]
+    res2 = subprocess.run(mux_cmd)
+    if res2.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError("hybridレンダリング: 音声のmuxに失敗しました。")
+
+    final_frames = probe_segment_frame_count(out_path)
+    if abs(final_frames - total_out) > 1:
+        raise RuntimeError(f"hybridレンダリング: 出力フレーム数が想定と一致しません"
+                            f"（想定{total_out}・実際{final_frames}）。フレームの欠落/重複の"
+                            f"可能性があるため、--mode full でのレンダリングをお試しください。")
+    if final_frames != total_out:
+        warn(f"hybridレンダリング: 出力フレーム数が想定と{abs(final_frames - total_out)}枚だけ"
+             f"ずれています（想定{total_out}・実際{final_frames}。誤差1フレームまでは許容）。")
+
+    return passthrough_frames / fps, reencoded_frames / fps
+
+
 def render(project, json_path, video_path, out_path, preview_path=None,
-           extract_frames_for=None, extract_frames_out=None):
+           extract_frames_for=None, extract_frames_out=None, mode="auto"):
     """プロジェクト定義に従って1本のMP4（または確認用PNG）を作る"""
     _TIMING_LOG.clear()
     render_start = time.time()
@@ -4209,6 +5168,17 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         # --- ハッシュタグ表示（hashtags）の解決（無指定ならhashtags_cfg=Noneで以後素通り） ---
         hashtags_cfg = resolve_hashtags_config(project)
 
+        # --- レンダリングモード（smart/hybrid/full）を決める。--mode full/条件不足の場合は
+        #     従来どおりのフル再エンコードにフォールバックする（decide_render_mode参照）。 ---
+        render_mode, mode_reason = decide_render_mode(mode, info, W, H, fps, watermark_cfg, hashtags_cfg)
+        if render_mode == "smart":
+            log("レンダリングモード: smart（素通し区間は無劣化コピー、フリーズ区間のみ再エンコード）")
+        elif render_mode == "hybrid":
+            log("レンダリングモード: hybrid（素通し区間はffmpegフィルタで常時表示要素を合成、"
+                "フリーズ区間のみPythonで合成・再エンコード）")
+        else:
+            log(f"レンダリングモード: full（{mode_reason}）" if mode_reason else "レンダリングモード: full")
+
         plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_blackout_frames=(logo_blackout_frames if logo_at == "last_freeze" else 0))
@@ -4266,6 +5236,54 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         log(f"音声トラック: {len(audio) / AUDIO_SR:.2f} 秒")
 
         total_out = src_frames + sum(p["n_total"] for p in plans) + logo_extra_frames
+
+        if render_mode == "smart":
+            copied_seconds, reencoded_seconds = render_video_smart(
+                video_path, out_path, W, H, fps, src_frames, plans, cache_dir, {}, tmpdir, wav_path,
+                logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
+                logo_blackout_frames, logo_total_frames, hashtags_cfg, total_out)
+            log(f"完成: {out_path}  （スマートレンダリング: 無劣化コピー{copied_seconds:.2f}秒 / "
+                f"再エンコード{reencoded_seconds:.2f}秒 / 合計{total_out / fps:.2f}秒）")
+            _write_timing_summary(time.time() - render_start, render_mode="smart", mode_reason="",
+                                   copied_seconds=copied_seconds, reencoded_seconds=reencoded_seconds)
+            return out_path
+
+        if render_mode == "hybrid":
+            hybrid_asset_dir = os.path.join(tmpdir, "hybrid_assets")
+            os.makedirs(hybrid_asset_dir, exist_ok=True)
+            hybrid_font_cache = {}
+            watermark_asset = None
+            if watermark_cfg is not None:
+                watermark_asset = render_watermark_loop_asset(
+                    watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg, W, H, fps,
+                    hybrid_asset_dir)
+                if watermark_asset is None:
+                    raise RuntimeError("hybridレンダリング: watermarkのループ素材生成に失敗しました"
+                                        "（decide_render_modeの判定と矛盾しています）。")
+            hashtags_asset = None
+            hashtags_playback_layer = None
+            if hashtags_cfg and hashtags_cfg.get("always"):
+                playback_safe_zone_rect = safe_zone_rect_px(resolve_safe_zone(project["style"]), W, H)
+                hashtags_asset = render_hashtags_static_asset(
+                    hashtags_cfg, W, H, hybrid_font_cache, playback_safe_zone_rect, hybrid_asset_dir)
+                # extract_hybrid_segment用（ffmpeg overlay）のhashtags_assetとは別に、
+                # フリーズ直後の「own frame」（1枚だけ）をPythonでそのままblend_telopする
+                # 用のWxH全体レイヤーも作る（render_video_hybridのdocstring参照）
+                hashtags_playback_layer = render_hashtags_layer(
+                    hashtags_cfg, W, H, hybrid_font_cache, playback_safe_zone_rect)
+
+            copied_seconds, reencoded_seconds = render_video_hybrid(
+                video_path, out_path, W, H, fps, src_frames, plans, cache_dir, hybrid_font_cache,
+                tmpdir, wav_path, logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
+                logo_blackout_frames, logo_total_frames, hashtags_cfg,
+                watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg,
+                watermark_asset, hashtags_asset, hashtags_playback_layer, total_out)
+            log(f"完成: {out_path}  （hybridレンダリング: ffmpegフィルタ合成{copied_seconds:.2f}秒 / "
+                f"再エンコード{reencoded_seconds:.2f}秒 / 合計{total_out / fps:.2f}秒）")
+            _write_timing_summary(time.time() - render_start, render_mode="hybrid", mode_reason="",
+                                   copied_seconds=copied_seconds, reencoded_seconds=reencoded_seconds)
+            return out_path
+
         reader = open_frame_reader(video_path, W, H, fps)
         writer = open_video_writer(out_path, W, H, fps, wav_path)
 
@@ -4337,31 +5355,10 @@ def render(project, json_path, video_path, out_path, preview_path=None,
             # 最後に出力したフレームから0.1秒（LOGO_CUT_BLACKOUT_SEC）かけて暗転し、
             # そこでロゴ演出へカットする（クロスフェードではない）。
             if logo_at == "end" and logo_bgr is not None and last_out_frame is not None:
-                if logo_bg_color is not None:
-                    backdrop = np.full((H, W, 3), logo_bg_color, dtype=np.uint8)
-                else:
-                    backdrop = np.ascontiguousarray(last_out_frame)
-                blackout_frames = logo_blackout_frames_for(fps)
-                last_frame_f32 = np.ascontiguousarray(last_out_frame).astype(np.float32)
-                # 透かしロゴは、着地演出（暗転＋タメ+縮小+セトル）の間だけ非表示にする
-                # （着地後のhold/sweep/fadeでは再び表示する。iter_freeze_frames内のロゴ演出と同じ方針）
-                landing_total_frames_end = int(round(logo_landing_total_sec(logo_params) * fps))
-                wm_logo_t = 0.0
-                for i in range(blackout_frames):
-                    bt = (i + 1) / float(blackout_frames)
-                    out_frame = np.clip(last_frame_f32 * (1.0 - bt), 0, 255).astype(np.uint8)
-                    wm_logo_t += 1.0 / fps
-                    writer.stdin.write(out_frame.tobytes())
-                    written += 1
-                    if written % 15 == 0:
-                        print(f"\r  {written}/{total_out} フレーム", end="", flush=True)
-                for i in range(logo_total_frames):
-                    out_frame = render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma,
-                                                   W, H, i / float(fps), logo_params, logo_bg_color)
-                    wm_logo_t += 1.0 / fps
-                    if watermark_bgr is not None and i >= landing_total_frames_end:
-                        out_frame = render_watermark_frame(out_frame, watermark_bgr, watermark_alpha,
-                                                             watermark_luma, W, H, wm_logo_t, watermark_cfg)
+                for out_frame in iter_end_logo_frames(
+                        last_out_frame, logo_bgr, logo_alpha, logo_luma, W, H, fps,
+                        logo_params, logo_bg_color, logo_blackout_frames, logo_total_frames,
+                        watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg):
                     writer.stdin.write(out_frame.tobytes())
                     written += 1
                     if written % 15 == 0:
@@ -4374,10 +5371,13 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         if writer.returncode != 0:
             raise RuntimeError("ffmpeg のエンコードに失敗しました。")
         log(f"完成: {out_path}  ({written} フレーム / {written / fps:.2f} 秒)")
-        _write_timing_summary(time.time() - render_start)
+        _write_timing_summary(time.time() - render_start, render_mode="full", mode_reason=mode_reason)
         return out_path
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not os.environ.get("SPOTLIGHT_KEEP_TMPDIR"):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            print(f"[debug] tmpdir kept: {tmpdir}")
 
 
 def main(argv=None):
@@ -4395,6 +5395,15 @@ def main(argv=None):
                               "（spotlight-jobsのprepare段が使う。動画の合成・エンコードは行わない）")
     parser.add_argument("--extract-apple-frames-out", default="apple_frames",
                          help="--extract-apple-frames の出力先ディレクトリ（既定: apple_frames）")
+    parser.add_argument("--mode", choices=["auto", "smart", "hybrid", "full"], default="auto",
+                         help="auto（既定）: 条件を満たせばスマートレンダリング（フリーズ区間だけ"
+                              "再エンコードし、素通し区間は元動画から無劣化コピー）、常時表示の"
+                              "watermark/hashtags.alwaysがある場合はhybrid（素通し区間をffmpegの"
+                              "フィルタで合成）、それ以外の条件不足はフル再エンコード。"
+                              "smart: 常時表示要素がある等smartの条件を満たさない場合はフルに"
+                              "フォールバック（理由をログ表示）。hybrid: 常時表示要素が無ければ"
+                              "smartと同じ経路になり、それ以外の条件不足はフルにフォールバック。"
+                              "full: 常にフル再エンコード")
     args = parser.parse_args(argv)
 
     project = load_project(args.project)
@@ -4416,7 +5425,8 @@ def main(argv=None):
 
     render(project, args.project, video, args.out, preview_path,
            extract_frames_for=args.extract_apple_frames,
-           extract_frames_out=args.extract_apple_frames_out)
+           extract_frames_out=args.extract_apple_frames_out,
+           mode=args.mode)
     return 0
 
 
