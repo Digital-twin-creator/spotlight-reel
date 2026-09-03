@@ -278,14 +278,37 @@ async function main() {
 
   await page.fill("#backgroundScaleSlider", "0.04");
   await page.dispatchEvent("#backgroundScaleSlider", "input");
+  await page.waitForTimeout(50);
+
+  // angle欄はstripes/gridのみ、opacity欄はgrainのみで表示される（A1修正：種類ごとに関連項目のみ表示）。
+  // 実際のユーザー操作を模してモードを切り替えながら、それぞれ表示されているときだけ入力する。
+  const angleHiddenAtHalftone = await page.evaluate(() => document.getElementById("backgroundAngleField").hidden);
+  check(angleHiddenAtHalftone, "halftoneでは角度(angle)欄は表示されない（stripes/gridのみで使う項目のため）");
+  await page.selectOption("#backgroundModeSelect", "grid");
+  await page.waitForTimeout(50);
+  const angleShownAtGrid = await page.evaluate(() => !document.getElementById("backgroundAngleField").hidden);
+  check(angleShownAtGrid, "gridでは角度(angle)欄が表示される");
   await page.fill("#backgroundAngleSlider", "60");
   await page.dispatchEvent("#backgroundAngleSlider", "input");
+  await page.waitForTimeout(50);
+
+  await page.selectOption("#backgroundModeSelect", "grain");
+  await page.waitForTimeout(50);
+  const opacityShownAtGrain = await page.evaluate(() => !document.getElementById("backgroundOpacityField").hidden);
+  check(opacityShownAtGrain, "grainでは不透明度(opacity)欄が表示される");
   await page.fill("#backgroundOpacitySlider", "0.4");
   await page.dispatchEvent("#backgroundOpacitySlider", "input");
   await page.waitForTimeout(50);
+
+  // 元のhalftoneに戻す（以降のJSON確認・後続テストとの整合のため）。scale/angle/opacityは
+  // モードを切り替えても保持されたままのはず。
+  await page.selectOption("#backgroundModeSelect", "halftone");
+  await page.waitForTimeout(50);
+
   const bgOptsAfterSliders = await page.evaluate(() => appState.backgroundOptions);
   check(bgOptsAfterSliders.scale === 0.04 && bgOptsAfterSliders.angle === 60 && bgOptsAfterSliders.opacity === 0.4,
-    "scale/angle/opacityスライダーがappState.backgroundOptionsに反映される: " + JSON.stringify(bgOptsAfterSliders));
+    "モードを切り替えても、それぞれ入力したscale/angle/opacityの値はbackgroundOptionsに保持される: "
+    + JSON.stringify(bgOptsAfterSliders));
 
   const projectBg = await page.evaluate(() => buildProjectJSON(appState));
   check(projectBg.style.background === "halftone", "JSON出力：style.backgroundに'halftone'が反映される: " + projectBg.style.background);
@@ -376,6 +399,49 @@ async function main() {
     + JSON.stringify(projectMaskStyleFreeze.freezes.map((f) => f.mask_style)));
   check(projectMaskStyleFreeze.style.mask_style === "outline",
     "フリーズ単位の上書きをしても全体設定(style.mask_style)は変わらない: " + projectMaskStyleFreeze.style.mask_style);
+
+  console.log("");
+  console.log("=== text_backing：全体設定でbox/bandを選ぶとオプション欄が表示され、行ごとにも上書きできる ===");
+  const backingOptionsHiddenAtOutline = await page.evaluate(() => document.getElementById("textBackingOptionsBody").hidden);
+  check(backingOptionsHiddenAtOutline, "既定(outline)ではtextBackingOptionsBodyは隠れている");
+  await page.selectOption("#textBackingDefaultSelect", "box");
+  await page.waitForTimeout(50);
+  const backingAfterSelect = await page.evaluate(() => appState.textBacking);
+  check(backingAfterSelect === "box", "セレクトで'box'を選ぶとappState.textBackingに反映される: " + backingAfterSelect);
+  const backingOptionsShown = await page.evaluate(() => !document.getElementById("textBackingOptionsBody").hidden);
+  check(backingOptionsShown, "boxを選ぶとtextBackingOptionsBodyが表示される");
+
+  await page.click("#textBackingColorRow .text-backing-color-btn[title=\"赤\"]");
+  await page.waitForTimeout(50);
+  const backingColorAfterPreset = await page.evaluate(() => appState.textBackingOptions.color);
+  check(backingColorAfterPreset === "#FF3B30", "色プリセット「赤」を選ぶとappState.textBackingOptions.color=#FF3B30になる: " + backingColorAfterPreset);
+
+  await page.uncheck("#autoContrastCheckbox");
+  await page.waitForTimeout(50);
+  const autoContrastAfterUncheck = await page.evaluate(() => appState.autoContrast);
+  check(autoContrastAfterUncheck === false, "auto_contrastチェックを外すとappState.autoContrast=falseになる");
+
+  const projectBacking = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectBacking.style.text_backing === "box", "JSON出力：style.text_backingに'box'が反映される: " + projectBacking.style.text_backing);
+  check(projectBacking.style.auto_contrast === false, "JSON出力：style.auto_contrastがfalseになる");
+  check(!!projectBacking.style.text_backing_options && projectBacking.style.text_backing_options.color === "#FF3B30",
+    "JSON出力：style.text_backing_options.colorが反映される: " + JSON.stringify(projectBacking.style.text_backing_options));
+
+  console.log("");
+  console.log("=== text_backing：既存フリーズの行ごとの「座布団」セレクトで全体設定を上書きでき、その行だけJSONに反映される ===");
+  const backingFreezeId = await page.evaluate(() => appState.freezes[0].id);
+  await page.evaluate((id) => { editFreeze(id); }, backingFreezeId);
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  await page.selectOption(".title-line-row:nth-child(1) .title-line-backing-select", "shadow");
+  await page.waitForTimeout(50);
+  const line1Backing = await page.evaluate(() => draft.titleLines[0].backing);
+  check(line1Backing === "shadow", "1行目の座布団セレクトで'shadow'を選ぶとdraft.titleLines[0].backing='shadow'になる: " + line1Backing);
+  const fzBacking = await page.evaluate(() => freezeToJSON(draft, appState.sfxLibrary));
+  const jsonLine1Backing = typeof fzBacking.name === "object" ? fzBacking.name.lines[0].text_backing : undefined;
+  check(jsonLine1Backing === "shadow", "JSON出力：1行目のtext_backingが反映される: " + jsonLine1Backing);
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 

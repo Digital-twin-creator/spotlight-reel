@@ -909,6 +909,94 @@ test("buildProjectJSON: 旧JSON相当（maskStyleOptions未設定）はmask_styl
   project.freezes.forEach(fz => assert.strictEqual(fz.mask_style, "solid"));
 });
 
+/* ---- text_backing（テロップの可読性：座布団等） ---- */
+
+test("resolveTextBacking: 5種の既知の値はそのまま、未知の値はoutlineにフォールバックする", () => {
+  ["none", "outline", "shadow", "box", "band"].forEach(m => {
+    assert.strictEqual(core.resolveTextBacking(m), m);
+  });
+  assert.strictEqual(core.resolveTextBacking("rainbow"), "outline");
+  assert.strictEqual(core.resolveTextBacking(undefined), "outline");
+  assert.strictEqual(core.resolveTextBacking(null), "outline");
+});
+
+test("resolveTextBackingOptions: 未指定/不正値はDEFAULT_TEXT_BACKING_OPTIONSで補う", () => {
+  const opts = core.resolveTextBackingOptions({});
+  assert.deepStrictEqual(opts, core.DEFAULT_TEXT_BACKING_OPTIONS);
+  const invalid = core.resolveTextBackingOptions({ color: "not-a-color", opacity: -1, radius: -1, padding: -1 });
+  assert.strictEqual(invalid.color, core.DEFAULT_TEXT_BACKING_OPTIONS.color);
+  assert.strictEqual(invalid.opacity, 0);
+  assert.ok(invalid.radius >= 0 && invalid.padding >= 0);
+});
+
+test("buildProjectJSON: state.textBackingが既定(outline)ならstyle.text_backingは'outline'、text_backing_optionsキーは省略する", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual(project.style.text_backing, "outline");
+  assert.strictEqual("text_backing_options" in project.style, false);
+  assert.strictEqual(project.style.auto_contrast, true);
+});
+
+test("buildProjectJSON: state.textBacking/autoContrastが指定されていればstyleに反映される", () => {
+  const state = Object.assign(sampleState(), { textBacking: "box", autoContrast: false });
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.style.text_backing, "box");
+  assert.strictEqual(project.style.auto_contrast, false);
+});
+
+test("buildProjectJSON: state.textBackingOptionsが既定と異なればstyle.text_backing_optionsを明示的に出力する", () => {
+  const state = Object.assign(sampleState(), {
+    textBacking: "box",
+    textBackingOptions: { color: "#123456", opacity: 0.8, radius: 0.1, padding: 0.2 }
+  });
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.text_backing_options,
+    { color: "#123456", opacity: 0.8, radius: 0.1, padding: 0.2 });
+});
+
+test("parseProjectJSON: style.text_backing/auto_contrast/text_backing_optionsを読み込める", () => {
+  const loaded = core.parseProjectJSON({
+    style: { text_backing: "shadow", auto_contrast: false,
+             text_backing_options: { color: "#010203", opacity: 0.4, radius: 0.15, padding: 0.25 } },
+    freezes: [],
+  });
+  assert.strictEqual(loaded.textBacking, "shadow");
+  assert.strictEqual(loaded.autoContrast, false);
+  assert.deepStrictEqual(loaded.textBackingOptions, { color: "#010203", opacity: 0.4, radius: 0.15, padding: 0.25 });
+});
+
+test("parseProjectJSON: style.text_backingが省略されていれば既定値'outline'/true/DEFAULT_TEXT_BACKING_OPTIONSを補う", () => {
+  const loaded = core.parseProjectJSON({ freezes: [] });
+  assert.strictEqual(loaded.textBacking, "outline");
+  assert.strictEqual(loaded.autoContrast, true);
+  assert.deepStrictEqual(loaded.textBackingOptions, core.DEFAULT_TEXT_BACKING_OPTIONS);
+});
+
+test("buildProjectJSON/parseProjectJSON: 全体設定のtextBacking/autoContrast/textBackingOptionsを往復できる", () => {
+  const state = Object.assign(sampleState(), {
+    textBacking: "band",
+    autoContrast: false,
+    textBackingOptions: { color: "#ABCDEF", opacity: 0.3, radius: 0.5, padding: 0.6 }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.textBacking, "band");
+  assert.strictEqual(loaded.autoContrast, false);
+  assert.deepStrictEqual(loaded.textBackingOptions, state.textBackingOptions);
+});
+
+test("normalizeTitleLines/titleLineToJSON: 行ごとのtext_backingは値がある時だけ出力され、往復できる", () => {
+  const lines = core.normalizeTitleLines({ lines: [
+    { text: "行1" }, { text: "行2", text_backing: "box" }, { text: "行3", text_backing: "invalid" }
+  ] });
+  assert.strictEqual(lines[0].backing, "");
+  assert.strictEqual(lines[1].backing, "box");
+  assert.strictEqual(lines[2].backing, "", "不明な値は既定（空文字＝全体継承）にフォールバックする");
+  const json1 = core.titleLineToJSON(lines[0], [], true);
+  const json2 = core.titleLineToJSON(lines[1], [], false);
+  assert.strictEqual("text_backing" in json1, false);
+  assert.strictEqual(json2.text_backing, "box");
+});
+
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }
@@ -1240,7 +1328,7 @@ test("buildProjectJSON/parseProjectJSON: title_pos/title_size/title_alignを全�
 function defaultLine(overrides) {
   return Object.assign({
     text: "", size: 1.0, underline: false, color: "", align: "", anim: "", animSec: null, delaySec: 0,
-    sfx: "", sfxLibraryId: null, sfxAlign: "start_at_landing"
+    sfx: "", sfxLibraryId: null, sfxAlign: "start_at_landing", backing: ""
   }, overrides || {});
 }
 

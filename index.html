@@ -705,6 +705,39 @@
         </div>
       </div>
       <div class="field">
+        <label>text_backing（テロップの可読性・全体既定） <span class="muted">行ごとに上書き可</span></label>
+        <select id="textBackingDefaultSelect">
+          <option value="none">none（加工なし）</option>
+          <option value="outline">outline（縁取り・既定）</option>
+          <option value="shadow">shadow（ドロップシャドウ）</option>
+          <option value="box">box（座布団）</option>
+          <option value="band">band（帯）</option>
+        </select>
+      </div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="autoContrastCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="autoContrastCheckbox">auto_contrast（outline適用時、背景とのコントラストが低い行は自動でboxに格上げする）</label>
+      </div>
+      <div id="textBackingOptionsBody" hidden>
+        <div class="field">
+          <label>座布団の色 color（box/bandのみ）</label>
+          <div class="row wrap" id="textBackingColorRow"></div>
+          <input type="text" id="textBackingColorInput" placeholder="#000000" inputmode="none" style="width:7em;margin-top:4px;">
+        </div>
+        <div class="field">
+          <label>座布団の不透明度 opacity <span class="brush-slider-value" id="textBackingOpacityValue">0.55</span></label>
+          <input type="range" id="textBackingOpacitySlider" min="0" max="1" step="0.05" value="0.55">
+        </div>
+        <div class="field">
+          <label>角丸 radius（boxのみ・文字高比） <span class="brush-slider-value" id="textBackingRadiusValue">0.25</span></label>
+          <input type="range" id="textBackingRadiusSlider" min="0" max="1" step="0.05" value="0.25">
+        </div>
+        <div class="field">
+          <label>余白 padding（文字高比） <span class="brush-slider-value" id="textBackingPaddingValue">0.35</span></label>
+          <input type="range" id="textBackingPaddingSlider" min="0" max="1" step="0.05" value="0.35">
+        </div>
+      </div>
+      <div class="field">
         <label>出力解像度</label>
         <select id="outputModeSelect">
           <option value="original">元のまま</option>
@@ -913,6 +946,8 @@ var DEFAULT_STYLE = {
   mask: "brush",
   mask_options: null,
   mask_style: "solid",
+  text_backing: "outline",
+  auto_contrast: true,
   reveal: "wipe"
   // 影（フィルム色）演出はここに既定値を含めない（意図的。render.pyのDEFAULT_STYLEと同じ理由）。
   // JSON側に"shadow"キーが無ければ既定で有効（parseProjectJSON参照）。ここに既定値を
@@ -984,6 +1019,41 @@ function resolveMaskStyleOptions(opts) {
   var color = isValidHexColor(opts.color) ? opts.color.toUpperCase() : DEFAULT_MASK_STYLE_OPTIONS.color;
   var width = Math.max(0.0005, Number(opts.width) || DEFAULT_MASK_STYLE_OPTIONS.width);
   return { scale: scale, color: color, width: width };
+}
+/** テロップの可読性（縁取り/座布団等。render.pyのTEXT_BACKINGSと同じ値） */
+var TEXT_BACKINGS = ["none", "outline", "shadow", "box", "band"];
+var DEFAULT_TEXT_BACKING = "outline";
+/** text_backing_optionsの既定値（render.pyのTEXT_BACKING_OPTIONS_DEFAULTSと同じ値） */
+var DEFAULT_TEXT_BACKING_OPTIONS = { color: "#000000", opacity: 0.55, radius: 0.25, padding: 0.35 };
+/** 未知の値・未指定はoutlineにフォールバックする（render.pyのresolve_text_backingと同じ方針） */
+function resolveTextBacking(mode) {
+  return TEXT_BACKINGS.indexOf(mode) >= 0 ? mode : DEFAULT_TEXT_BACKING;
+}
+/** text_backing種類<select>の選択肢（value/label） */
+var TEXT_BACKING_LABELS = [
+  { value: "none", label: "none（加工なし）" },
+  { value: "outline", label: "outline（縁取り・既定）" },
+  { value: "shadow", label: "shadow（ドロップシャドウ）" },
+  { value: "box", label: "box（座布団）" },
+  { value: "band", label: "band（帯）" }
+];
+/** 行ごとの寄せ<select>と同じく、空文字＝全体設定を継承する行選択肢 */
+var TITLE_LINE_BACKING_LABELS = [{ value: "", label: "座布団：既定（全体設定）" }].concat(
+  TEXT_BACKING_LABELS.map(function (o) { return { value: o.value, label: "座布団：" + o.label }; }));
+/** text_backing_optionsが実際に意味を持つ種類（box/bandのみ使用） */
+var TEXT_BACKING_MODES_WITH_OPTIONS = ["box", "band"];
+/**
+ * text_backing_options（color/opacity/radius/padding）を解決する
+ * （render.pyのresolve_text_backing_optionsと同じ方針：不正/未指定はDEFAULT_TEXT_BACKING_OPTIONSで補う）
+ */
+function resolveTextBackingOptions(opts) {
+  opts = opts || {};
+  var color = isValidHexColor(opts.color) ? opts.color.toUpperCase() : DEFAULT_TEXT_BACKING_OPTIONS.color;
+  var opacityRaw = (opts.opacity !== null && opts.opacity !== undefined && !isNaN(Number(opts.opacity)))
+    ? Number(opts.opacity) : DEFAULT_TEXT_BACKING_OPTIONS.opacity;
+  var radius = Math.max(0, Number(opts.radius) || DEFAULT_TEXT_BACKING_OPTIONS.radius);
+  var padding = Math.max(0, Number(opts.padding) || DEFAULT_TEXT_BACKING_OPTIONS.padding);
+  return { color: color, opacity: clamp01(opacityRaw), radius: radius, padding: padding };
 }
 /** 行ごとのテロップ出現アクション（render.pyのTITLE_LINE_ANIMSと同じ値）。"" は未指定（従来のbounce/fade一斉表示） */
 var TITLE_LINE_ANIMS = ["bounce", "slide_right", "slide_left", "slide_up", "slide_down", "fade", "none"];
@@ -1352,6 +1422,8 @@ function buildProjectJSON(state) {
       mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
       background: resolveBackgroundMode(state.background),
       mask_style: resolveMaskStyle(state.maskStyle),
+      text_backing: resolveTextBacking(state.textBacking),
+      auto_contrast: state.autoContrast !== undefined ? !!state.autoContrast : DEFAULT_STYLE.auto_contrast,
       font: DEFAULT_FONT_PATH,
       title_bounce: !!state.titleBounce,
       title_pos: [
@@ -1406,6 +1478,20 @@ function buildProjectJSON(state) {
       scale: round(maskStyleOpts.scale, 4),
       color: maskStyleOpts.color,
       width: round(maskStyleOpts.width, 4)
+    };
+  }
+  // text_backing_options（座布団の色・不透明度・角丸・余白）は全既定値のときはキー自体を
+  // 省略する（完全後方互換）。ひとつでも既定と異なれば明示的に書き出す。
+  var textBackingOpts = resolveTextBackingOptions(state.textBackingOptions);
+  if (textBackingOpts.color !== DEFAULT_TEXT_BACKING_OPTIONS.color ||
+      textBackingOpts.opacity !== DEFAULT_TEXT_BACKING_OPTIONS.opacity ||
+      textBackingOpts.radius !== DEFAULT_TEXT_BACKING_OPTIONS.radius ||
+      textBackingOpts.padding !== DEFAULT_TEXT_BACKING_OPTIONS.padding) {
+    project.style.text_backing_options = {
+      color: textBackingOpts.color,
+      opacity: round(textBackingOpts.opacity, 2),
+      radius: round(textBackingOpts.radius, 3),
+      padding: round(textBackingOpts.padding, 3)
     };
   }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
@@ -1678,6 +1764,9 @@ function parseProjectJSON(json, sfxLibrary) {
     backgroundOptions: resolveBackgroundOptions(style.background_options),
     maskStyle: resolveMaskStyle(style.mask_style),
     maskStyleOptions: resolveMaskStyleOptions(style.mask_style_options),
+    textBacking: resolveTextBacking(style.text_backing),
+    autoContrast: style.auto_contrast !== undefined ? !!style.auto_contrast : DEFAULT_STYLE.auto_contrast,
+    textBackingOptions: resolveTextBackingOptions(style.text_backing_options),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -1908,7 +1997,7 @@ function computeLineFrameState(anim, animSec, delaySec, elapsedHoldSec, W, H) {
 /** テロップ1行の既定値（サイズ倍率1.0・アンダーラインなし・色/寄せ/アニメ/効果音は未指定） */
 var DEFAULT_TITLE_LINE = {
   text: "", size: 1.0, underline: false, color: "", align: "", anim: "", animSec: null, delaySec: 0,
-  sfx: "", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT
+  sfx: "", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, backing: ""
 };
 
 /**
@@ -1937,7 +2026,8 @@ function normalizeTitleLines(name) {
           // （freeze.sfx自身と同じ2段階の扱い）。
           sfx: (typeof line.sfx === "string" || (line.sfx && typeof line.sfx === "object")) ? line.sfx : "",
           sfxLibraryId: null,
-          sfxAlign: SFX_ALIGN_DEFAULT
+          sfxAlign: SFX_ALIGN_DEFAULT,
+          backing: TEXT_BACKINGS.indexOf(line.text_backing) >= 0 ? line.text_backing : ""
         };
       }
       return Object.assign({}, DEFAULT_TITLE_LINE, { text: String(line || "") });
@@ -1958,7 +2048,7 @@ function titleLinesAllDefault(lines) {
   if (!l) return false;
   return (lines || []).length === 1 &&
     Math.abs(numOr(l.size, 1.0) - 1.0) < 1e-6 &&
-    !l.underline && !l.color && !l.align && !l.anim &&
+    !l.underline && !l.color && !l.align && !l.anim && !l.backing &&
     (l.animSec === null || l.animSec === undefined || l.animSec === "") &&
     !l.sfxLibraryId && !l.sfx;
 }
@@ -1968,6 +2058,7 @@ function titleLineToJSON(l, sfxLibrary, isFirst) {
   var out = { text: l.text, size: round(numOr(l.size, 1.0), 2), underline: !!l.underline };
   if (l.color) out.color = l.color;
   if (l.align) out.align = l.align;
+  if (l.backing) out.text_backing = l.backing;
   if (l.anim) out.anim = l.anim;
   if (l.animSec !== null && l.animSec !== undefined && l.animSec !== "") out.anim_sec = round(numOr(l.animSec, 0), 2);
   if (!isFirst && numOr(l.delaySec, 0) > 0) out.delay_sec = round(numOr(l.delaySec, 0), 2);
@@ -2830,6 +2921,12 @@ if (typeof module !== "undefined" && module.exports) {
     MASK_STYLE_LABELS: MASK_STYLE_LABELS,
     MASK_STYLE_MODES_WITH_OPTIONS: MASK_STYLE_MODES_WITH_OPTIONS,
     resolveMaskStyleOptions: resolveMaskStyleOptions,
+    TEXT_BACKINGS: TEXT_BACKINGS,
+    DEFAULT_TEXT_BACKING: DEFAULT_TEXT_BACKING,
+    DEFAULT_TEXT_BACKING_OPTIONS: DEFAULT_TEXT_BACKING_OPTIONS,
+    resolveTextBacking: resolveTextBacking,
+    resolveTextBackingOptions: resolveTextBackingOptions,
+    TEXT_BACKING_MODES_WITH_OPTIONS: TEXT_BACKING_MODES_WITH_OPTIONS,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3016,6 +3113,9 @@ var appState = {
   backgroundOptions: Object.assign({}, DEFAULT_BACKGROUND_OPTIONS),
   maskStyle: DEFAULT_STYLE.mask_style,
   maskStyleOptions: Object.assign({}, DEFAULT_MASK_STYLE_OPTIONS),
+  textBacking: DEFAULT_STYLE.text_backing,
+  autoContrast: DEFAULT_STYLE.auto_contrast,
+  textBackingOptions: Object.assign({}, DEFAULT_TEXT_BACKING_OPTIONS),
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -3178,6 +3278,11 @@ function init() {
     "maskStyleColorRow", "maskStyleColorInput",
     "maskStyleScaleSlider", "maskStyleScaleValue",
     "maskStyleWidthSlider", "maskStyleWidthValue",
+    "textBackingDefaultSelect", "autoContrastCheckbox", "textBackingOptionsBody",
+    "textBackingColorRow", "textBackingColorInput",
+    "textBackingOpacitySlider", "textBackingOpacityValue",
+    "textBackingRadiusSlider", "textBackingRadiusValue",
+    "textBackingPaddingSlider", "textBackingPaddingValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
@@ -3207,6 +3312,7 @@ function init() {
   buildFilmColorControls();
   buildBackgroundColorControls();
   buildMaskStyleColorControls();
+  buildTextBackingColorControls();
   populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
   populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
 
@@ -3392,6 +3498,38 @@ function init() {
   els.maskStyleWidthSlider.addEventListener("input", function () {
     appState.maskStyleOptions.width = Number(els.maskStyleWidthSlider.value);
     els.maskStyleWidthValue.textContent = appState.maskStyleOptions.width.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.textBackingDefaultSelect.addEventListener("change", function () {
+    appState.textBacking = resolveTextBacking(els.textBackingDefaultSelect.value);
+    els.textBackingOptionsBody.hidden = TEXT_BACKING_MODES_WITH_OPTIONS.indexOf(appState.textBacking) < 0;
+    saveToLocalStorage();
+  });
+  els.autoContrastCheckbox.addEventListener("change", function () {
+    appState.autoContrast = els.autoContrastCheckbox.checked;
+    saveToLocalStorage();
+  });
+  els.textBackingColorInput.addEventListener("input", function () {
+    var v = els.textBackingColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      appState.textBackingOptions.color = v.toUpperCase();
+      updateTextBackingColorPresetSelection();
+      saveToLocalStorage();
+    }
+  });
+  els.textBackingOpacitySlider.addEventListener("input", function () {
+    appState.textBackingOptions.opacity = Number(els.textBackingOpacitySlider.value);
+    els.textBackingOpacityValue.textContent = appState.textBackingOptions.opacity.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.textBackingRadiusSlider.addEventListener("input", function () {
+    appState.textBackingOptions.radius = Number(els.textBackingRadiusSlider.value);
+    els.textBackingRadiusValue.textContent = appState.textBackingOptions.radius.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.textBackingPaddingSlider.addEventListener("input", function () {
+    appState.textBackingOptions.padding = Number(els.textBackingPaddingSlider.value);
+    els.textBackingPaddingValue.textContent = appState.textBackingOptions.padding.toFixed(2);
     saveToLocalStorage();
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
@@ -4568,6 +4706,20 @@ function renderTitleLinesEditor() {
       redrawTelopOverlay();
     });
 
+    var backingSelect = document.createElement("select");
+    backingSelect.className = "title-line-backing-select";
+    TITLE_LINE_BACKING_LABELS.forEach(function (opt) {
+      var o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label;
+      backingSelect.appendChild(o);
+    });
+    backingSelect.value = TEXT_BACKINGS.indexOf(line.backing) >= 0 ? line.backing : "";
+    backingSelect.addEventListener("change", function () {
+      draft.titleLines[i].backing = backingSelect.value;
+      redrawTelopOverlay();
+    });
+
     var underlineBtn = document.createElement("button");
     underlineBtn.type = "button";
     underlineBtn.className = "small ghost mode-toggle-btn title-line-underline-btn";
@@ -4598,6 +4750,7 @@ function renderTitleLinesEditor() {
     row.appendChild(textInput);
     row.appendChild(sizeSelect);
     row.appendChild(alignSelect);
+    row.appendChild(backingSelect);
     row.appendChild(underlineBtn);
     row.appendChild(removeBtn);
 
@@ -6398,6 +6551,40 @@ function updateMaskStyleColorPresetSelection() {
   }
 }
 
+function buildTextBackingColorRow(rowEl, onPick) {
+  rowEl.innerHTML = "";
+  TITLE_COLOR_PRESETS.forEach(function (preset) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small ghost text-backing-color-btn";
+    btn.title = preset.label;
+    btn.dataset.hex = preset.hex;
+    btn.innerHTML = '<span class="swatch" style="background:' + preset.hex + '"></span>';
+    btn.addEventListener("click", function () {
+      onPick(preset.hex);
+      updateTextBackingColorPresetSelection();
+    });
+    rowEl.appendChild(btn);
+  });
+}
+
+function buildTextBackingColorControls() {
+  buildTextBackingColorRow(els.textBackingColorRow, function (hex) {
+    appState.textBackingOptions.color = hex;
+    els.textBackingColorInput.value = hex;
+    saveToLocalStorage();
+  });
+  updateTextBackingColorPresetSelection();
+}
+
+function updateTextBackingColorPresetSelection() {
+  var buttons = els.textBackingColorRow.querySelectorAll(".text-backing-color-btn");
+  for (var i = 0; i < buttons.length; i++) {
+    var match = (buttons[i].dataset.hex || "").toLowerCase() === (appState.textBackingOptions.color || "").toLowerCase();
+    buttons[i].classList.toggle("selected", match);
+  }
+}
+
 /* ---------------- ラストロゴ ---------------- */
 
 function handleLogoFileChange(e) {
@@ -6595,6 +6782,19 @@ function applySettingsToInputs() {
   els.maskStyleWidthSlider.value = appState.maskStyleOptions.width;
   els.maskStyleWidthValue.textContent = Number(appState.maskStyleOptions.width).toFixed(3);
   updateMaskStyleColorPresetSelection();
+  appState.textBacking = resolveTextBacking(appState.textBacking);
+  appState.textBackingOptions = resolveTextBackingOptions(appState.textBackingOptions);
+  els.textBackingDefaultSelect.value = appState.textBacking;
+  els.autoContrastCheckbox.checked = appState.autoContrast !== false;
+  els.textBackingOptionsBody.hidden = TEXT_BACKING_MODES_WITH_OPTIONS.indexOf(appState.textBacking) < 0;
+  els.textBackingColorInput.value = appState.textBackingOptions.color;
+  els.textBackingOpacitySlider.value = appState.textBackingOptions.opacity;
+  els.textBackingOpacityValue.textContent = Number(appState.textBackingOptions.opacity).toFixed(2);
+  els.textBackingRadiusSlider.value = appState.textBackingOptions.radius;
+  els.textBackingRadiusValue.textContent = Number(appState.textBackingOptions.radius).toFixed(2);
+  els.textBackingPaddingSlider.value = appState.textBackingOptions.padding;
+  els.textBackingPaddingValue.textContent = Number(appState.textBackingOptions.padding).toFixed(2);
+  updateTextBackingColorPresetSelection();
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
@@ -6722,6 +6922,9 @@ function buildLocalStoragePayload(dropThumbs) {
     backgroundOptions: appState.backgroundOptions,
     maskStyle: appState.maskStyle,
     maskStyleOptions: appState.maskStyleOptions,
+    textBacking: appState.textBacking,
+    autoContrast: appState.autoContrast,
+    textBackingOptions: appState.textBackingOptions,
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
@@ -6791,6 +6994,9 @@ function loadFromLocalStorage(videoFileName) {
     appState.backgroundOptions = resolveBackgroundOptions(data.backgroundOptions);
     appState.maskStyle = resolveMaskStyle(data.maskStyle);
     appState.maskStyleOptions = resolveMaskStyleOptions(data.maskStyleOptions);
+    appState.textBacking = resolveTextBacking(data.textBacking);
+    appState.autoContrast = data.autoContrast !== undefined ? !!data.autoContrast : DEFAULT_STYLE.auto_contrast;
+    appState.textBackingOptions = resolveTextBackingOptions(data.textBackingOptions);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
@@ -7511,6 +7717,9 @@ function handleJsonFileChange(e) {
       appState.backgroundOptions = loaded.backgroundOptions;
       appState.maskStyle = loaded.maskStyle;
       appState.maskStyleOptions = loaded.maskStyleOptions;
+      appState.textBacking = loaded.textBacking;
+      appState.autoContrast = loaded.autoContrast;
+      appState.textBackingOptions = loaded.textBackingOptions;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;
