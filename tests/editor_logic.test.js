@@ -1028,32 +1028,54 @@ test("buildProjectJSON/parseProjectJSON: title_pos/title_size/title_alignを全�
 
 /* ---- テロップの複数行対応（title.lines契約：normalizeTitleLines/titleLinesForJSON） ---- */
 
-test("normalizeTitleLines: 文字列は1行（size=1.0・underline=false）として扱う", () => {
-  assert.deepStrictEqual(core.normalizeTitleLines("山田 太郎"), [{ text: "山田 太郎", size: 1.0, underline: false }]);
+// normalizeTitleLines/DEFAULT_TITLE_LINEが返す行は、size/underlineに加えて
+// color/anim/animSec/delaySec/sfx/sfxLibraryId/sfxAlignも持つ（いずれも未指定を表す既定値）。
+// テストではこのヘルパーで「他はすべて既定値」の行を簡潔に組み立てる。
+function defaultLine(overrides) {
+  return Object.assign({
+    text: "", size: 1.0, underline: false, color: "", anim: "", animSec: null, delaySec: 0,
+    sfx: "", sfxLibraryId: null, sfxAlign: "start_at_landing"
+  }, overrides || {});
+}
+
+test("normalizeTitleLines: 文字列は1行（size=1.0・underline=false・他は未指定）として扱う", () => {
+  assert.deepStrictEqual(core.normalizeTitleLines("山田 太郎"), [defaultLine({ text: "山田 太郎" })]);
 });
 test("normalizeTitleLines: 空・未指定は空文字1行になる（配列自体は空にならない）", () => {
-  assert.deepStrictEqual(core.normalizeTitleLines(""), [{ text: "", size: 1.0, underline: false }]);
-  assert.deepStrictEqual(core.normalizeTitleLines(undefined), [{ text: "", size: 1.0, underline: false }]);
-  assert.deepStrictEqual(core.normalizeTitleLines(null), [{ text: "", size: 1.0, underline: false }]);
+  assert.deepStrictEqual(core.normalizeTitleLines(""), [defaultLine()]);
+  assert.deepStrictEqual(core.normalizeTitleLines(undefined), [defaultLine()]);
+  assert.deepStrictEqual(core.normalizeTitleLines(null), [defaultLine()]);
 });
 test("normalizeTitleLines: {lines:[...]}形式を行ごとのsize/underline込みで読み取る", () => {
   const lines = core.normalizeTitleLines({
     lines: [{ text: "山田 太郎", size: 1.0, underline: true }, { text: "エースストライカー", size: 0.55 }]
   });
   assert.deepStrictEqual(lines, [
-    { text: "山田 太郎", size: 1.0, underline: true },
-    { text: "エースストライカー", size: 0.55, underline: false }
+    defaultLine({ text: "山田 太郎", underline: true }),
+    defaultLine({ text: "エースストライカー", size: 0.55 })
   ]);
 });
 test("normalizeTitleLines: 行に文字列だけが混ざっていてもtext扱いで正規化される", () => {
   const lines = core.normalizeTitleLines({ lines: ["ただの文字列", { text: "オブジェクト行" }] });
   assert.deepStrictEqual(lines, [
-    { text: "ただの文字列", size: 1.0, underline: false },
-    { text: "オブジェクト行", size: 1.0, underline: false }
+    defaultLine({ text: "ただの文字列" }),
+    defaultLine({ text: "オブジェクト行" })
   ]);
 });
 test("normalizeTitleLines: lines配列が空のオブジェクトは空文字1行にフォールバックする", () => {
-  assert.deepStrictEqual(core.normalizeTitleLines({ lines: [] }), [{ text: "", size: 1.0, underline: false }]);
+  assert.deepStrictEqual(core.normalizeTitleLines({ lines: [] }), [defaultLine()]);
+});
+test("normalizeTitleLines: 行ごとのcolor/anim/anim_sec/delay_sec/sfxを読み取る（1行目のdelay_secは常に0に強制）", () => {
+  const lines = core.normalizeTitleLines({
+    lines: [
+      { text: "1行目", color: "#e6c15c", anim: "slide_right", anim_sec: 0.4, delay_sec: 99 },
+      { text: "2行目", color: "not-a-color", anim: "unknown-anim", delay_sec: 0.3, sfx: "shakin" }
+    ]
+  });
+  assert.deepStrictEqual(lines, [
+    defaultLine({ text: "1行目", color: "#E6C15C", anim: "slide_right", animSec: 0.4, delaySec: 0 }),
+    defaultLine({ text: "2行目", delaySec: 0.3, sfx: "shakin" })
+  ]);
 });
 
 test("titleLinesToPlainText: 空でない行のtextをスペース区切りで1行にまとめる", () => {
@@ -1067,22 +1089,24 @@ test("titleLinesToPlainText: 空文字の行は無視される", () => {
   ]), "本文");
 });
 
-test("titleLinesAllDefault: 1行・サイズ1.0・アンダーラインなしならtrue", () => {
-  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田 太郎", size: 1.0, underline: false }]), true);
+test("titleLinesAllDefault: 1行・サイズ1.0・アンダーラインなし・色/アニメ/効果音とも未指定ならtrue", () => {
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "山田 太郎" })]), true);
 });
-test("titleLinesAllDefault: 複数行・サイズ違い・アンダーラインありのいずれでもfalse", () => {
-  assert.strictEqual(core.titleLinesAllDefault([{ text: "A" }, { text: "B" }].map(l => ({ text: l.text, size: 1.0, underline: false }))), false);
-  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田", size: 0.8, underline: false }]), false);
-  assert.strictEqual(core.titleLinesAllDefault([{ text: "山田", size: 1.0, underline: true }]), false);
+test("titleLinesAllDefault: 複数行・サイズ違い・アンダーラインあり・色/アニメ指定のいずれでもfalse", () => {
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "A" }), defaultLine({ text: "B" })]), false);
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "山田", size: 0.8 })]), false);
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "山田", underline: true })]), false);
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "山田", color: "#FF0000" })]), false);
+  assert.strictEqual(core.titleLinesAllDefault([defaultLine({ text: "山田", anim: "fade" })]), false);
 });
 
 test("titleLinesForJSON: 既定の1行はプレーンな文字列として出力する（JSON後方互換）", () => {
-  assert.strictEqual(core.titleLinesForJSON([{ text: "山田 太郎", size: 1.0, underline: false }]), "山田 太郎");
+  assert.strictEqual(core.titleLinesForJSON([defaultLine({ text: "山田 太郎" })]), "山田 太郎");
 });
 test("titleLinesForJSON: 複数行は{lines:[...]}のオブジェクト形式で出力する", () => {
   const out = core.titleLinesForJSON([
-    { text: "山田 太郎", size: 1.0, underline: true },
-    { text: "エースストライカー", size: 0.55, underline: false }
+    defaultLine({ text: "山田 太郎", underline: true }),
+    defaultLine({ text: "エースストライカー", size: 0.55 })
   ]);
   assert.deepStrictEqual(out, {
     lines: [
@@ -1092,8 +1116,82 @@ test("titleLinesForJSON: 複数行は{lines:[...]}のオブジェクト形式で
   });
 });
 test("titleLinesForJSON: 1行でもサイズやアンダーラインを既定から変えていればオブジェクト形式になる", () => {
-  const out = core.titleLinesForJSON([{ text: "山田 太郎", size: 1.3, underline: false }]);
+  const out = core.titleLinesForJSON([defaultLine({ text: "山田 太郎", size: 1.3 })]);
   assert.deepStrictEqual(out, { lines: [{ text: "山田 太郎", size: 1.3, underline: false }] });
+});
+test("titleLinesForJSON: 行ごとのcolor/anim/anim_sec/delay_secは値がある時だけ出力される（1行目はdelay_secを出力しない）", () => {
+  const out = core.titleLinesForJSON([
+    defaultLine({ text: "1行目", color: "#E6C15C", anim: "slide_right", animSec: 0.4, delaySec: 5 }),
+    defaultLine({ text: "2行目", anim: "slide_left", delaySec: 0.3 })
+  ]);
+  assert.deepStrictEqual(out, {
+    lines: [
+      { text: "1行目", size: 1, underline: false, color: "#E6C15C", anim: "slide_right", anim_sec: 0.4 },
+      { text: "2行目", size: 1, underline: false, anim: "slide_left", delay_sec: 0.3 }
+    ]
+  });
+});
+test("titleLinesForJSON: 行ごとのsfxプリセット/ライブラリファイルが出力される", () => {
+  const sfxLibrary = [{ id: "lib1", name: "custom.mp3" }];
+  const out = core.titleLinesForJSON([
+    defaultLine({ text: "1行目", sfx: "shakin" }),
+    defaultLine({ text: "2行目", sfxLibraryId: "lib1", sfxAlign: "end_at_landing" })
+  ], sfxLibrary);
+  assert.deepStrictEqual(out.lines[0].sfx, "shakin");
+  assert.deepStrictEqual(out.lines[1].sfx, {
+    file: core.sfxLibraryAssetPath("lib1", "custom.mp3"), align: "end_at_landing"
+  });
+});
+
+/* ---- 行ごとのテロップ出現アクション（isValidHexColor/autoOutlineColor/resolveLineAnimParams/computeLineFrameState） ---- */
+
+test("isValidHexColor: #RRGGBB形式のみtrue", () => {
+  assert.strictEqual(core.isValidHexColor("#E6C15C"), true);
+  assert.strictEqual(core.isValidHexColor("#fff"), false);
+  assert.strictEqual(core.isValidHexColor("E6C15C"), false);
+  assert.strictEqual(core.isValidHexColor(""), false);
+  assert.strictEqual(core.isValidHexColor(null), false);
+});
+
+test("autoOutlineColor: 明るい色には黒、暗い色には白（render.pyのauto_outline_rgbと同じ閾値140）", () => {
+  assert.strictEqual(core.autoOutlineColor("#FFFFFF"), "#000000");
+  assert.strictEqual(core.autoOutlineColor("#E6C15C"), "#000000");
+  assert.strictEqual(core.autoOutlineColor("#000000"), "#FFFFFF");
+  assert.strictEqual(core.autoOutlineColor("#FF3B30"), "#FFFFFF");
+});
+
+test("resolveLineAnimParams: anim未指定はtitleBounceに従いbounce/fade、時間は常にTELOP_FADE_SEC(0.15秒)", () => {
+  assert.deepStrictEqual(core.resolveLineAnimParams({ anim: "" }, true), { anim: "bounce", animSec: core.TELOP_FADE_SEC });
+  assert.deepStrictEqual(core.resolveLineAnimParams({ anim: "" }, false), { anim: "fade", animSec: core.TELOP_FADE_SEC });
+});
+test("resolveLineAnimParams: anim明示時はanim_sec省略ならbounce=0.15秒・それ以外=0.25秒が既定", () => {
+  assert.deepStrictEqual(core.resolveLineAnimParams({ anim: "bounce" }, false), { anim: "bounce", animSec: core.TELOP_FADE_SEC });
+  assert.deepStrictEqual(core.resolveLineAnimParams({ anim: "slide_right" }, false), { anim: "slide_right", animSec: core.TITLE_LINE_ANIM_SEC_DEFAULT });
+  assert.deepStrictEqual(core.resolveLineAnimParams({ anim: "fade", animSec: 0.4 }, false), { anim: "fade", animSec: 0.4 });
+});
+
+test("computeLineFrameState: delay_sec経過前はfade=0（非表示）", () => {
+  const state = core.computeLineFrameState("fade", 0.25, 0.3, 0.1, 1080, 1920);
+  assert.strictEqual(state.fade, 0);
+});
+test("computeLineFrameState: slide_rightは画面右外(+W)から0へ、slide_leftは-Wから0へ、Ease-Out Cubicで近づく", () => {
+  const right = core.computeLineFrameState("slide_right", 0.5, 0, 0.25, 1000, 2000);
+  assert.strictEqual(right.fade, 1);
+  assert.ok(right.tx > 0 && right.tx < 1000, "0<tx<W の範囲で中間地点にいる: " + right.tx);
+  assert.strictEqual(right.ty, 0);
+  const left = core.computeLineFrameState("slide_left", 0.5, 0, 0.25, 1000, 2000);
+  assert.ok(left.tx < 0 && left.tx > -1000);
+  const done = core.computeLineFrameState("slide_right", 0.5, 0, 0.5, 1000, 2000);
+  assert.strictEqual(done.tx, 0, "アニメ完了後は最終位置(tx=0)に到達する");
+});
+test("computeLineFrameState: noneはdelay経過後ただちに完全表示・変形なし", () => {
+  const state = core.computeLineFrameState("none", 0.25, 0, 0.001, 1000, 2000);
+  assert.deepStrictEqual(state, { fade: 1, scale: 1, tx: 0, ty: 0 });
+});
+test("computeLineFrameState: bounceはfade同様に進行し、完了前はtelopBounceScaleでスケールが1より大きい", () => {
+  const state = core.computeLineFrameState("bounce", 0.15, 0, 0.05, 1000, 2000);
+  assert.ok(state.fade > 0 && state.fade < 1);
+  assert.ok(state.scale > 1, "バウンス中は1.3→1.0のスケールなので1より大きい: " + state.scale);
 });
 
 test("freezeToJSON経由：titleLinesが無いフリーズは従来どおりnameが文字列になる（完全後方互換）", () => {
@@ -1129,7 +1227,7 @@ test("buildProjectJSON/parseProjectJSON: 複数行タイトルを往復できる
   const project = core.buildProjectJSON(state);
   const loaded = core.parseProjectJSON(project);
   const loadedFz = loaded.freezes.filter(f => f.time === state.freezes[0].time)[0];
-  assert.deepStrictEqual(loadedFz.titleLines, [
+  assert.deepStrictEqual(loadedFz.titleLines.map(l => ({ text: l.text, size: l.size, underline: l.underline })), [
     { text: "山田 太郎", size: 1.0, underline: true },
     { text: "エースストライカー", size: 0.55, underline: false }
   ]);

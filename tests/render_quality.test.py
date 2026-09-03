@@ -233,39 +233,54 @@ try:
     # ------------------------------------------------------------------
     # 2.5) テロップの複数行対応（title.lines契約：resolve_title_lines/render_telop_layer）
     # ------------------------------------------------------------------
+    def title_line(text, size=1.0, underline=False, color="#FFFFFF", anim=None,
+                    anim_sec=None, delay_sec=0.0, sfx=None):
+        """resolve_title_lines()が返す1行分の辞書を、テストで期待値として組み立てるヘルパー"""
+        return {"text": text, "size": size, "underline": underline, "color": color,
+                "anim": anim, "anim_sec": anim_sec, "delay_sec": delay_sec, "sfx": sfx}
+
     print("")
     print("=== テロップの複数行対応：resolve_title_lines（JSON契約の正規化） ===")
-    check(render.resolve_title_lines({"name": "山田 太郎"}) ==
-          [{"text": "山田 太郎", "size": 1.0, "underline": False}],
-          "文字列は1行（size=1.0・underline=False）として正規化される")
-    check(render.resolve_title_lines({"name": ""}) == [{"text": "", "size": 1.0, "underline": False}],
+    check(render.resolve_title_lines({"name": "山田 太郎"}) == [title_line("山田 太郎")],
+          "文字列は1行（size=1.0・underline=False・色/アニメ等は未指定）として正規化される")
+    check(render.resolve_title_lines({"name": ""}) == [title_line("")],
           "空文字・未指定は空文字1行に正規化される（配列自体は空にならない）")
     multi = render.resolve_title_lines({"name": {"lines": [
         {"text": "山田 太郎", "size": 1.0, "underline": True},
         {"text": "エースストライカー", "size": 0.55},
     ]}})
     check(multi == [
-        {"text": "山田 太郎", "size": 1.0, "underline": True},
-        {"text": "エースストライカー", "size": 0.55, "underline": False},
+        title_line("山田 太郎", underline=True),
+        title_line("エースストライカー", size=0.55),
     ], f"{{lines:[...]}}形式は行ごとのsize/underlineを保ったまま正規化される: {multi}")
 
     print("")
-    print("=== テロップの複数行対応：render_telop_layerが複数行・サイズ違い・アンダーラインを描く ===")
+    print("=== テロップの複数行対応：render_telop_line_layersが複数行・サイズ違い・アンダーラインを描く ===")
     font_path_default = render.resolve_title_font_path(dict(render.DEFAULT_STYLE, name="山田 太郎"))
     W2, H2 = 540, 960
     size_px_base = max(8, int(round(H2 * render.DEFAULT_STYLE["title_size"])))
 
-    single_bgr, single_alpha, _cx, _cy = render.render_telop_layer(
+    def combined_alpha(layers):
+        """行ごとのレイヤー群を、旧テストが前提にしていた「1枚に合成したアルファ」相当へまとめる
+        （行同士は重ならないよう積み上げられているので、maxで合成しても等価）"""
+        return np.maximum.reduce([l["alpha"] for l in layers])
+
+    single_layers = render.render_telop_line_layers(
         render.resolve_title_lines({"name": "山田 太郎"}), W2, H2, {}, font_path_default, size_px_base)
-    check(single_bgr is not None and float(single_alpha.sum()) > 0, "1行のテロップが従来どおり描画される")
+    check(len(single_layers) == 1, "1行のテロップは1件のレイヤーとして返る")
+    single_alpha = single_layers[0]["alpha"]
+    check(single_layers[0]["bgr"] is not None and float(single_alpha.sum()) > 0,
+          "1行のテロップが従来どおり描画される")
 
     multi_lines = [
-        {"text": "山田 太郎", "size": 1.0, "underline": True},
-        {"text": "エースストライカー", "size": 0.55, "underline": False},
+        title_line("山田 太郎", underline=True),
+        title_line("エースストライカー", size=0.55),
     ]
-    multi_bgr, multi_alpha, _cx2, cy2 = render.render_telop_layer(
-        multi_lines, W2, H2, {}, font_path_default, size_px_base)
-    check(multi_bgr is not None and float(multi_alpha.sum()) > 0, "複数行のテロップが描画される")
+    multi_layers = render.render_telop_line_layers(multi_lines, W2, H2, {}, font_path_default, size_px_base)
+    check(len(multi_layers) == 2, "複数行のテロップは行数ぶんのレイヤーとして返る（行ごとに独立した合成ができる）")
+    multi_alpha = combined_alpha(multi_layers)
+    check(all(l["bgr"] is not None and float(l["alpha"].sum()) > 0 for l in multi_layers),
+          "複数行それぞれが描画される")
 
     # 複数行の方が縦方向に描画されている行数が多く、非透明画素の縦方向の広がり(行の高さの合計相当)が
     # 1行のときより大きくなるはず（複数行対応が実際に効いていることの確認）
@@ -386,12 +401,12 @@ try:
     print("=== フォント読み込み失敗時はエラー終了する ===")
     raised = False
     try:
-        render.render_telop_layer(
+        render.render_telop_line_layers(
             render.resolve_title_lines({"name": "テスト"}), 200, 100, {},
             "assets/fonts/存在しないフォント.ttf", 24)
     except RuntimeError:
         raised = True
-    check(raised, "フォントが読み込めない場合、render_telop_layerがRuntimeErrorを送出する")
+    check(raised, "フォントが読み込めない場合、render_telop_line_layersがRuntimeErrorを送出する")
 
     raised_pipeline = False
     err_msg = ""
@@ -708,12 +723,13 @@ try:
         json_mod.dump(preview_project, f, ensure_ascii=False)
     loaded_preview = render.load_project(preview_json_path)
     preview_png_arg = os.path.join(tmpdir, "shadow_preview.png")
-    before_path, after_path = render.render(loaded_preview, preview_json_path, video_path, "unused.mp4",
-                                             preview_path=preview_png_arg)
+    before_path, after_path, lines_preview_path = render.render(
+        loaded_preview, preview_json_path, video_path, "unused.mp4", preview_path=preview_png_arg)
     check(before_path == os.path.join(tmpdir, "shadow_preview_before.png"),
           f"スライド前PNGのパスが_before付きになる: {before_path}")
     check(after_path == os.path.join(tmpdir, "shadow_preview_after.png"),
           f"スライド後PNGのパスが_after付きになる: {after_path}")
+    check(lines_preview_path is None, "可視行が2行未満（このプロジェクトはname=\"\"）なら行アニメ確認PNGは作られない")
     check(os.path.exists(before_path) and os.path.getsize(before_path) > 0, "スライド前PNGが実際に書き出される")
     check(os.path.exists(after_path) and os.path.getsize(after_path) > 0, "スライド後PNGが実際に書き出される")
     before_img = cv2.imread(before_path)
@@ -1599,6 +1615,222 @@ try:
     check(abs(measured_peak_sample - logo_landing_sample) <= 2,
           f"align=peak_at_landing：ミックス後の衝撃音のピークがロゴ着地位置と一致する"
           f"（着地={logo_landing_sample}, 実測ピーク={measured_peak_sample}）")
+
+    # ------------------------------------------------------------------
+    # 9) reveal_sec=0：ブラシの塗りアニメを即時化できる
+    # ------------------------------------------------------------------
+    print("")
+    print("=== reveal_sec=0：ブラシの塗りアニメを即時化できる（①塗りフレーム無し・白い絵の具の描画も無し） ===")
+    fz_instant = make_dot_freeze(shadow=None, extra={"reveal_sec": 0.0, "brush_fade_sec": 0.5})
+    plan_instant = render.plan_freezes([fz_instant], fps, src_frames, ".")[0]
+    check(plan_instant["n_reveal"] == 0,
+          f"reveal_sec=0はn_reveal=0になる（他フェーズと違い1フレームに切り上げない）: {plan_instant['n_reveal']}")
+
+    frame_instant = render.grab_frame_at(video_path, plan_instant["frame_index"] / fps, W, H, fps)
+    frames_instant = list(render.iter_freeze_frames(frame_instant, plan_instant, W, H, fps, {}))
+    first_after_pre = frames_instant[plan_instant["n_pre"]]
+
+    ctx_instant = render.build_mask_context(fz_instant, frame_instant, W, H,
+                                             os.path.join(tmpdir, "cache_instant"), video_path)
+    done_mask_instant, _ = render.mask_and_paint_at(ctx_instant, W, H, 1.0)
+    bg_instant = render.make_background(frame_instant, fz_instant.get("background", "mono"),
+                                         float(fz_instant.get("mono_contrast", 1.0)))
+    expected_instant = render.composite_layers(bg_instant, frame_instant, done_mask_instant, W, H)
+    diff_instant = int(np.abs(first_after_pre.astype(int) - expected_instant.astype(int)).sum())
+    check(diff_instant == 0,
+          f"reveal_sec=0：静止直後のフレームがいきなり完全カラー化された状態と一致する（塗りアニメ無し）: diff={diff_instant}")
+
+    last_frame_instant = frames_instant[-1]
+    diff_paint = int(np.abs(first_after_pre.astype(int) - last_frame_instant.astype(int)).sum())
+    check(diff_paint == 0,
+          f"reveal_sec=0：brush_fade_secを設定していても白い絵の具のフェードは発生しない"
+          f"（hold開始フレーム=hold終端フレーム): diff={diff_paint}")
+
+    # ------------------------------------------------------------------
+    # 10) テロップ文字色：lines[].color / style.title_color と自動縁取り色
+    # ------------------------------------------------------------------
+    print("")
+    print("=== テロップ文字色：lines[].color（#RRGGBB）と自動選択される縁取り色 ===")
+    check(render.validate_hex_color("#e6c15c", "#FFFFFF", "test") == "#e6c15c",
+          "validate_hex_color：妥当な#RRGGBBはそのまま使われる")
+    check(render.validate_hex_color("not-a-color", "#FFFFFF", "test") == "#FFFFFF",
+          "validate_hex_color：不正な#RRGGBB文字列は既定色にフォールバックする")
+    check(render.auto_outline_rgb((0xE6, 0xC1, 0x5C)) == (0, 0, 0),
+          "auto_outline_rgb：明るい金色(#E6C15C)には黒い縁取りが自動選択される")
+    check(render.auto_outline_rgb((0xFF, 0x3B, 0x30)) == (255, 255, 255),
+          "auto_outline_rgb：赤(#FF3B30)には白い縁取りが自動選択される")
+    check(render.resolve_title_outline_color(freezes[0]) is None,
+          "resolve_title_outline_color：title_outline_color未指定はNone（行ごとの自動選択に任せる）")
+    override_fz = dict(freezes[0])
+    override_fz["title_outline_color"] = "#00FF00"
+    check(render.resolve_title_outline_color(override_fz) == (0, 255, 0),
+          "resolve_title_outline_color：明示指定は自動選択より優先される")
+
+    color_lines = render.resolve_title_lines(
+        {"name": {"lines": [{"text": "ゴールド", "color": "#E6C15C"}, {"text": "レッド", "color": "#FF3B30"}]}})
+    color_layers = render.render_telop_line_layers(
+        color_lines, W2, H2, {}, font_path_default, size_px_base)
+
+    def dominant_bgr(layer, alpha_thresh=0.8):
+        mask = layer["alpha"][:, :, 0] > alpha_thresh
+        return layer["bgr"][mask].mean(axis=0) if mask.any() else None
+
+    gold_bgr = dominant_bgr(color_layers[0])
+    red_bgr = dominant_bgr(color_layers[1])
+    check(gold_bgr is not None and abs(gold_bgr[2] - 0xE6) < 10 and abs(gold_bgr[1] - 0xC1) < 10
+          and abs(gold_bgr[0] - 0x5C) < 10,
+          f"1行目（color=#E6C15C）の文字本体の色がgoldに一致する（BGR平均={gold_bgr}）")
+    check(red_bgr is not None and abs(red_bgr[2] - 0xFF) < 10 and abs(red_bgr[1] - 0x3B) < 10
+          and abs(red_bgr[0] - 0x30) < 10,
+          f"2行目（color=#FF3B30）の文字本体の色がredに一致する（BGR平均={red_bgr}）")
+
+    # ------------------------------------------------------------------
+    # 11) 行ごとのテロップ出現アクション：anim/anim_sec/delay_sec
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 行ごとのテロップ出現アクション：anim='none'は即時表示、delay_secぶん2行目の出現が遅れる ===")
+    fz_lines = make_dot_freeze(shadow=None, extra={
+        "reveal_sec": 0.0, "hold_sec": 1.0,
+        "name": {"lines": [
+            {"text": "ライン1", "anim": "none"},
+            {"text": "ライン2", "anim": "fade", "anim_sec": 0.4, "delay_sec": 0.3},
+        ]},
+    })
+    plan_lines = render.plan_freezes([fz_lines], fps, src_frames, ".")[0]
+    frame_lines = render.grab_frame_at(video_path, plan_lines["frame_index"] / fps, W, H, fps)
+    frames_lines = list(render.iter_freeze_frames(frame_lines, plan_lines, W, H, fps, {}))
+
+    fz_no_telop = dict(fz_lines)
+    fz_no_telop["name"] = ""
+    plan_no_telop = render.plan_freezes([fz_no_telop], fps, src_frames, ".")[0]
+    frames_no_telop = list(render.iter_freeze_frames(frame_lines, plan_no_telop, W, H, fps, {}))
+
+    layers_lines = render.render_telop_line_layers(
+        render.resolve_title_lines(fz_lines), W, H, {}, render.resolve_title_font_path(fz_lines),
+        max(8, int(round(H * fz_lines.get("title_size", render.DEFAULT_STYLE["title_size"])))),
+        fz_lines.get("title_pos") or render.DEFAULT_STYLE["title_pos"],
+        fz_lines.get("title_align", render.DEFAULT_STYLE["title_align"]))
+    check(len(layers_lines) == 2, "2行分のテロップレイヤーが得られる")
+
+    def region_diff(frame_a, frame_b, layer, alpha_thresh=0.3):
+        mask = layer["alpha"][:, :, 0] > alpha_thresh
+        return int(np.abs(frame_a[mask].astype(int) - frame_b[mask].astype(int)).sum())
+
+    n_pre_lines = plan_lines["n_pre"]
+    diff_line1_at_start = region_diff(frames_lines[n_pre_lines], frames_no_telop[n_pre_lines], layers_lines[0])
+    check(diff_line1_at_start > 0,
+          f"anim='none'の1行目は着地直後（holdの最初のフレーム）から表示されている: diff={diff_line1_at_start}")
+
+    diff_line2_at_start = region_diff(frames_lines[n_pre_lines], frames_no_telop[n_pre_lines], layers_lines[1])
+    check(diff_line2_at_start == 0,
+          f"delay_sec=0.3の2行目は着地直後はまだ表示されない: diff={diff_line2_at_start}")
+
+    after_delay_idx = n_pre_lines + int(round(0.35 * fps))
+    diff_line2_after_delay = region_diff(
+        frames_lines[after_delay_idx], frames_no_telop[after_delay_idx], layers_lines[1])
+    check(diff_line2_after_delay > 0,
+          f"delay_sec=0.3秒経過後は2行目も表示され始める: diff={diff_line2_after_delay}")
+
+    # ------------------------------------------------------------------
+    # 12) 行ごとの効果音（lines[].sfx）：その行の出現開始（delay_sec経過後）に鳴る
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 効果音：行ごとのsfx（lines[].sfx）がその行の出現開始（delay_sec経過後）に鳴る ===")
+    fz_sfx_lines = make_dot_freeze(shadow=None, extra={
+        "reveal_sec": 0.0, "hold_sec": 1.0,
+        "name": {"lines": [
+            {"text": "1行目"},
+            {"text": "2行目", "delay_sec": 0.3, "sfx": "shakin"},
+        ]},
+    })
+    plans_sfx_lines = render.plan_freezes([fz_sfx_lines], fps, src_frames, ".")
+    plan0_sfx_lines = plans_sfx_lines[0]
+    check(len(plan0_sfx_lines["line_sfx"]) == 1 and abs(plan0_sfx_lines["line_sfx"][0][0] - 0.3) < 1e-9,
+          f"plan_freezes：行ごとのsfxが(delay_sec, spec)としてline_sfxに集約される: {plan0_sfx_lines['line_sfx']}")
+
+    audio_sfx_lines = render.build_audio(video_path, plans_sfx_lines, fps, src_frames, True)
+    landed_frame_offset_lines = (plan0_sfx_lines["n_pre"] + plan0_sfx_lines["n_reveal"]
+                                  + plan0_sfx_lines.get("n_slide_in", 0))
+    line_sfx_frame = plan0_sfx_lines["frame_index"] + landed_frame_offset_lines + int(round(0.3 * fps))
+    line_sfx_sample = render.frames_to_samples(line_sfx_frame, fps, render.AUDIO_SR)
+    before_window = audio_sfx_lines[max(0, line_sfx_sample - 4000):line_sfx_sample]
+    after_window = audio_sfx_lines[line_sfx_sample:line_sfx_sample + 4000]
+    check(bool(np.max(np.abs(before_window)) < 0.02),
+          f"行ごとのsfx：2行目の出現（delay_sec=0.3秒）より前は無音: peak={float(np.max(np.abs(before_window))):.4f}")
+    check(bool(np.max(np.abs(after_window)) > 0.05),
+          f"行ごとのsfx：2行目の出現の瞬間から効果音が鳴り始める: peak={float(np.max(np.abs(after_window))):.4f}")
+
+    # ------------------------------------------------------------------
+    # 13) 回帰確認：lines[]にanimを指定しない旧形式は、title_bounceに応じた
+    #     従来どおりのbounce/fadeとTELOP_FADE_SEC(0.15秒)のタイミングをビット単位で再現する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 回帰確認：旧形式（lines[]にanim無し／文字列name）は従来のbounce/fadeとビット単位で一致する ===")
+    for bounce_flag, label in ((False, "title_bounce=False（フェードのみ）"), (True, "title_bounce=True（バウンス）")):
+        fz_legacy = make_dot_freeze(shadow=None, extra={
+            "reveal_sec": 0.0, "hold_sec": 1.0, "title_bounce": bounce_flag, "name": "旧形式のテロップ",
+        })
+        plan_legacy, frames_legacy = render_freeze_frames(fz_legacy)
+        n_pre_legacy = plan_legacy["n_pre"]
+        check_i = 2   # elapsed_hold_sec = 3/fps秒 ≈ TELOP_FADE_SEC(0.15秒)の途中
+        elapsed = (check_i + 1) / fps
+        expected_fade = min(1.0, elapsed / render.TELOP_FADE_SEC)
+
+        frame0 = render.grab_frame_at(video_path, plan_legacy["frame_index"] / fps, W, H, fps)
+        bg0 = render.make_background(frame0, fz_legacy.get("background", "mono"),
+                                      float(fz_legacy.get("mono_contrast", 1.0)))
+        ctx0 = render.build_mask_context(fz_legacy, frame0, W, H,
+                                          os.path.join(tmpdir, "cache_legacy"), video_path)
+        done_mask0, _ = render.mask_and_paint_at(ctx0, W, H, 1.0)
+        landed0 = render.composite_layers(bg0, frame0, done_mask0, W, H)
+        layers0 = render.render_telop_line_layers(
+            render.resolve_title_lines(fz_legacy), W, H, {}, render.resolve_title_font_path(fz_legacy),
+            max(8, int(round(H * fz_legacy.get("title_size", render.DEFAULT_STYLE["title_size"])))),
+            fz_legacy.get("title_pos") or render.DEFAULT_STYLE["title_pos"],
+            fz_legacy.get("title_align", render.DEFAULT_STYLE["title_align"]))
+        check(len(layers0) == 1, "旧形式（文字列name）は1行のレイヤーになる")
+        scale0 = render.telop_bounce_scale(expected_fade) if bounce_flag and expected_fade < 1.0 else 1.0
+        bgr0, alpha0 = render.transform_telop_layer(
+            layers0[0]["bgr"], layers0[0]["alpha"], scale0, 0.0, 0.0, layers0[0]["cx"], layers0[0]["cy"])
+        expected_frame = render.blend_telop(landed0, bgr0, alpha0, expected_fade)
+        actual_frame = frames_legacy[n_pre_legacy + check_i]
+        diff = int(np.abs(expected_frame.astype(int) - actual_frame.astype(int)).sum())
+        check(diff == 0,
+              f"{label}：新しい行ごとの合成でも、旧式の単一ブロック計算"
+              f"（fade={expected_fade:.4f}, scale={scale0:.4f}）とビット単位で一致する: diff={diff}")
+
+    # ------------------------------------------------------------------
+    # 14) --preview の3枚目：行ごとのアニメ確認PNG（1行目が到達済み・2行目が移動中）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== --preview：行ごとのアニメが異なる2行以上のテロップでは3枚目（_lines）のPNGも書き出す ===")
+    import json as json_mod2
+    lines_preview_project = {
+        "version": 1, "video": "dummy_input.mp4",
+        "output": {"width": W, "height": H},
+        "style": {"hold_sec": 2.0, "audio_during_freeze": "mute"},
+        "freezes": [{
+            "time": 2.5, "reveal_sec": 0.0,
+            "name": {"lines": [
+                {"text": "1行目", "anim": "slide_right", "anim_sec": 0.5},
+                {"text": "2行目", "anim": "slide_left", "anim_sec": 0.6, "delay_sec": 0.3},
+            ]},
+            "strokes": [{"width": 0.1, "points": [[0.5, 0.5], [0.5, 0.55]]}],
+        }],
+    }
+    lines_preview_json_path = os.path.join(tmpdir, "lines_preview_project.json")
+    with open(lines_preview_json_path, "w", encoding="utf-8") as f:
+        json_mod2.dump(lines_preview_project, f, ensure_ascii=False)
+    loaded_lines_preview = render.load_project(lines_preview_json_path)
+    lines_preview_png_arg = os.path.join(tmpdir, "lines_anim_preview.png")
+    _bp, _ap, lines_anim_path = render.render(
+        loaded_lines_preview, lines_preview_json_path, video_path, "unused.mp4",
+        preview_path=lines_preview_png_arg)
+    check(lines_anim_path == os.path.join(tmpdir, "lines_anim_preview_lines.png"),
+          f"行アニメ確認PNGのパスが_lines付きになる: {lines_anim_path}")
+    check(lines_anim_path is not None and os.path.exists(lines_anim_path)
+          and os.path.getsize(lines_anim_path) > 0,
+          "行アニメ確認PNGが実際に書き出される")
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)

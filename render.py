@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,10 +60,13 @@ DEFAULT_STYLE = {
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     # title_font / title_font_jp は省略時 font にフォールバックする（use_style_font()参照）。
     # ここではキー自体を持たせず、未指定であることを判別できるようにする。
-    "title_bounce": False,        # テロップ出現時に130%→100%のバウンスを付けるか
+    "title_bounce": False,        # テロップ出現時に130%→100%のバウンスを付けるか（lines[].anim省略時の既定演出）
     "title_pos": [0.5, 0.78],     # テロップ中心の位置（出力サイズに対する比率、[x, y]）
     "title_size": 0.06,           # 文字サイズ（高さに対する比率）
     "title_align": "center",      # テロップの水平寄せ（left | center | right、title_posのxを基準）
+    "title_color": "#FFFFFF",     # テロップ文字色の全体既定（#RRGGBB。行ごとにlines[].colorで上書き可）
+    "title_outline_color": None,  # 縁取り/ドロップシャドウ色の明示上書き（#RRGGBB）。
+                                   # 未指定(None)なら行の文字色の明るさから黒/白を自動選択する
     "brush_fade_sec": 0.3,        # ブラシ完了後、先端に残る白い絵の具をフェードアウトさせる時間（秒）。0でフェードなし
     "audio_during_freeze": "mute",  # mute | keep
     # mask は廃止（color_source/shadow.sourceに分離）。旧JSONとの後方互換のためだけに
@@ -89,6 +93,11 @@ DEFAULT_STYLE = {
 }
 
 TITLE_ALIGNS = ("left", "center", "right")
+# 行ごとのテロップ出現アクション（lines[].anim）。省略時はNoneのまま扱い、
+# title_bounceに従って全行同時にbounce/fadeする従来の挙動にフォールバックする。
+TITLE_LINE_ANIMS = ("bounce", "slide_right", "slide_left", "slide_up", "slide_down", "fade", "none")
+# lines[].anim_secの既定値（anim明示時のみ使用。bounceだけは従来のTELOP_FADE_SECを既定にする）。
+TITLE_LINE_ANIM_SEC_DEFAULT = 0.25
 
 BRUSH_SHAPES = ("round", "hake", "marker", "spray")
 BRUSH_ASSET_DIR = os.path.join("assets", "brushes")
@@ -506,6 +515,39 @@ def hex_to_bgr(hex_color, default=(50, 100, 255)):
     except ValueError:
         warn(f"film_color='{hex_color}' は不正な値です。既定色を使います。")
         return default
+
+
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def validate_hex_color(value, default_hex, context_label):
+    """"#RRGGBB" 形式かどうか検証し、不正なら警告のうえdefault_hexにフォールバックする"""
+    if value and HEX_COLOR_RE.match(value):
+        return value
+    if value:
+        warn(f"{context_label}='{value}' は不正な色指定です（#RRGGBBで指定してください）。既定色を使います。")
+    return default_hex if HEX_COLOR_RE.match(default_hex or "") else "#FFFFFF"
+
+
+def hex_to_rgb(hex_color):
+    """検証済みの"#RRGGBB"をPIL用のRGBタプルに変換する"""
+    s = (hex_color or "#FFFFFF").lstrip("#")
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+
+def auto_outline_rgb(text_rgb):
+    """文字色(RGB)の明るさ（知覚輝度）から、縁取り/ドロップシャドウに使う黒/白を選ぶ"""
+    r, g, b = text_rgb
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return (0, 0, 0) if luminance >= 140 else (255, 255, 255)
+
+
+def resolve_title_outline_color(fz):
+    """title_outline_color（#RRGGBB、既定None）を解決する。Noneなら行ごとの自動選択に任せる"""
+    value = fz.get("title_outline_color", DEFAULT_STYLE["title_outline_color"])
+    if not value:
+        return None
+    return hex_to_rgb(validate_hex_color(value, "#000000", "title_outline_color"))
 
 
 def translate_mask(img, dx, dy):
@@ -1344,32 +1386,64 @@ def contains_japanese(text):
     return False
 
 
-def resolve_title_lines(fz):
-    """
-    fz["name"] を、テロップ描画用の行リスト [{"text","size","underline"}, ...] に正規化する。
+def resolve_title_line_anim(value, context_label):
+    """lines[].anim を検証する。未指定(None)はNoneのまま返す（従来挙動へのフォールバック用）"""
+    if value is None:
+        return None
+    if value not in TITLE_LINE_ANIMS:
+        warn(f"{context_label}.anim='{value}' は未知の値です。無視します（従来どおりの表示になります）。")
+        return None
+    return value
 
-    - 文字列（従来形式）は1行として扱う（size=1.0倍・underline=false）。
-    - {"lines": [{"text","size","underline"}, ...]} 形式にも対応する。各行のtextは
-      文字列化し、sizeは指定が無ければ1.0倍、underlineは指定が無ければfalse。
+
+def resolve_title_lines(fz, json_dir=None):
+    """
+    fz["name"] を、テロップ描画用の行リスト
+    [{"text","size","underline","color","anim","anim_sec","delay_sec","sfx"}, ...] に正規化する。
+
+    - 文字列（従来形式）は1行として扱う（size=1.0倍・underline=false・anim等は全て未指定扱い）。
+    - {"lines": [{"text","size","underline","color","anim","anim_sec","delay_sec","sfx"}, ...]}
+      形式にも対応する。各行のtextは文字列化し、sizeは指定が無ければ1.0倍、underlineは
+      指定が無ければfalse。
+        - color: "#RRGGBB"（既定はfz["title_color"]、さらに未指定ならDEFAULT_STYLE）
+        - anim/anim_sec: 未指定ならNone（呼び出し側で従来のbounce/fade一斉表示にフォールバック）
+        - delay_sec: 1行目（index 0）は常に0.0に強制する（2行目以降のみ有効）
+        - sfx: json_dirがNoneでない場合のみ resolve_sfx_spec() で解決する（フォント解決など
+          json_dirを持たない呼び出し元では効果音の解決自体を省略する）
     - 空でも必ず1件以上返す（textが空文字の1行）ことで、呼び出し側は常に
       「行のリスト」として扱える（分岐を減らすため）。
     """
+    default_color = validate_hex_color(fz.get("title_color"), DEFAULT_STYLE["title_color"], "title_color")
+    empty_line = {"text": "", "size": 1.0, "underline": False, "color": default_color,
+                  "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}
     name = fz.get("name")
     if isinstance(name, dict):
         lines_in = name.get("lines") or []
         lines = []
-        for line in lines_in:
+        for i, line in enumerate(lines_in):
             if isinstance(line, dict):
                 text = str(line.get("text", ""))
                 size = float(line.get("size", 1.0))
                 underline = bool(line.get("underline", False))
+                context_label = f"lines[{i}]"
+                color = validate_hex_color(line.get("color"), default_color, f"{context_label}.color")
+                anim = resolve_title_line_anim(line.get("anim"), context_label)
+                anim_sec_raw = line.get("anim_sec")
+                anim_sec = max(0.0, float(anim_sec_raw)) if anim_sec_raw is not None else None
+                delay_sec = max(0.0, float(line.get("delay_sec", 0.0))) if i > 0 else 0.0
+                sfx = (resolve_sfx_spec(line.get("sfx"), json_dir, SFX_ALIGNS_FREEZE,
+                                         f"{context_label}, t={fz.get('time', 0.0):.2f}s")
+                       if json_dir is not None else None)
             else:
                 text = str(line)
-                size = 1.0
-                underline = False
-            lines.append({"text": text, "size": max(0.05, size), "underline": underline})
-        return lines or [{"text": "", "size": 1.0, "underline": False}]
-    return [{"text": str(name or ""), "size": 1.0, "underline": False}]
+                size, underline, color = 1.0, False, default_color
+                anim, anim_sec, delay_sec, sfx = None, None, 0.0, None
+            lines.append({"text": text, "size": max(0.05, size), "underline": underline,
+                          "color": color, "anim": anim, "anim_sec": anim_sec,
+                          "delay_sec": delay_sec, "sfx": sfx})
+        return lines or [dict(empty_line)]
+    return [{"text": str(name or ""), "size": 1.0, "underline": False, "color": default_color,
+             "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}]
 
 
 def resolve_title_font_path(fz):
@@ -1397,12 +1471,15 @@ def telop_bounce_scale(t):
     return TELOP_BOUNCE_FROM + (1.0 - TELOP_BOUNCE_FROM) * eased
 
 
-def scale_telop_layer(bgr, alpha, scale, cx, cy):
-    """テロップ層（BGR・アルファ）を(cx, cy)中心にscale倍する（バウンス演出用）"""
-    if abs(scale - 1.0) < 0.001:
+def transform_telop_layer(bgr, alpha, scale, tx, ty, cx, cy):
+    """テロップ層（BGR・アルファ）を(cx, cy)中心にscale倍し、さらに(tx, ty)だけ平行移動する
+    （バウンス＝scaleのみ、スライド演出＝tx/tyのみ、を同じ関数で扱う）"""
+    if abs(scale - 1.0) < 0.001 and abs(tx) < 0.5 and abs(ty) < 0.5:
         return bgr, alpha
     H, W = bgr.shape[:2]
     M = cv2.getRotationMatrix2D((float(cx), float(cy)), 0.0, scale)
+    M[0, 2] += tx
+    M[1, 2] += ty
     bgr_s = cv2.warpAffine(bgr, M, (W, H), flags=cv2.INTER_LINEAR,
                             borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
     alpha2d = alpha[:, :, 0] if alpha.ndim == 3 else alpha
@@ -1436,28 +1513,34 @@ def clamp_box_to_canvas(bbox, W, H):
     return dx, dy
 
 
-def render_telop_layer(lines, W, H, font_cache, font_path, base_size_px, pos_ratio=(0.5, 0.78), align="center"):
+def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
+                              pos_ratio=(0.5, 0.78), align="center", outline_color=None):
     """
-    テロップ（複数行対応）を1回だけ描いて (BGR画像, アルファ0〜1, 中心x, 中心y) として返す。
-    フェードインは毎フレームこのアルファに係数を掛けるだけで済ませる。
+    テロップ（複数行対応）を行ごとに別々のレイヤーとして描き、
+    [{"text","bgr","alpha","cx","cy"}, ...]（可視行の順）を返す。可視行が無ければ空リスト。
 
-    lines は resolve_title_lines() が返す形式（[{"text","size","underline"}, ...]）。
-    行ごとに文字サイズ（base_size_pxに対する倍率）・アンダーラインの有無を変えられる。
-    複数行はブロック全体を1つのまとまりとして扱い、pos_ratio=[x, y]（0〜1、出力サイズに
-    対する比率）をブロック中心のアンカー位置とする。alignに応じてブロック全体を
-    左寄せ/中央/右寄せする（各行はブロックの基準位置に揃えて配置される）。
-    画面端にはみ出す場合はブロックごと自動で内側に寄せる。
-    戻り値の中心x,yは実際に描画されたブロックの外接矩形の中心（バウンス演出の基準点）。
+    lines は resolve_title_lines() が返す形式。行ごとに文字サイズ（base_size_pxに対する
+    倍率）・アンダーラインの有無・文字色（"#RRGGBB"）を変えられる。複数行はブロック全体を
+    1つのまとまりとして扱い、pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をブロック
+    中心のアンカー位置とする。alignに応じてブロック全体を左寄せ/中央/右寄せする
+    （各行はブロックの基準位置に揃えて配置される）。画面端にはみ出す場合はブロックごと
+    自動で内側に寄せる。
 
-    フォントが読み込めていない（file_pathが存在しない／破損しているなど）場合は、
-    OpenCVの既定フォント（日本語グリフを持たず、実質「何も描かれない」に等しい）へ
-    黙ってフォールバックせず、ここで即座にエラー終了させる。過去に「テロップの
-    フォントが見つからないまま全フレームで無言のうちに文字が描かれない」という
-    不具合があったため、失敗は必ず気づける形にする。
+    行ごとに独立したWxHキャンバスへ描くのは、出現アニメ（拡大縮小・平行移動・フェード）を
+    行単位で適用するため（transform_telop_layer/blend_telopで1行ずつ合成する）。
+    レイアウト計算（ブロックの積み上げ・寄せ・画面内クランプ）自体は全行共通で、
+    従来の単一キャンバス版と同じ結果になる。
+
+    戻り値の各行のcx,cyはその行自身の外接矩形の中心（バウンス演出のスケール基準点）。
+    outline_colorを指定すると縁取り/ドロップシャドウ色を固定する（Noneなら行ごとに
+    文字色の明るさから自動選択する）。
+
+    フォントが読み込めていない場合は、従来どおりここで即座にエラー終了させる
+    （OpenCVの既定フォントへ黙ってフォールバックしない）。
     """
     visible_lines = [line for line in (lines or []) if line.get("text")]
     if not visible_lines:
-        return None, None, 0, 0
+        return []
 
     line_infos = []
     for line in visible_lines:
@@ -1474,23 +1557,28 @@ def render_telop_layer(lines, W, H, font_cache, font_path, base_size_px, pos_rat
                 "（例: python make_dummy.py でダウンロードに失敗していないか）。"
             )
         ascent, descent = font.getmetrics()
+        text_rgb = hex_to_rgb(line.get("color") or "#FFFFFF")
         line_infos.append({
             "text": line["text"], "font": font, "size_px": size_px,
             "underline": bool(line.get("underline")), "ascent": ascent, "descent": descent,
+            "text_rgb": text_rgb,
+            "outline_rgb": outline_color if outline_color is not None else auto_outline_rgb(text_rgb),
         })
 
     align = resolve_title_align(align)
     anchor_h = {"left": "l", "center": "m", "right": "r"}[align]
 
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    # レイアウト計算（textlength/textbbox）専用の1x1ダミーキャンバス。
+    # PILのテキスト計測は実際の描画先サイズに依存しないため、これで先に全行の寸法を
+    # 求めてから、行ごとの本番キャンバスを作る。
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
     # 行間の詰め方はシンプルに隙間なし（各行のascent+descentをそのまま積み上げる）とする。
     # ブロック幅は最も広い行の幅（alignの基準になる）。
     block_h = 0.0
     max_w = 0.0
     for li in line_infos:
-        li["width"] = draw.textlength(li["text"], font=li["font"])
+        li["width"] = probe.textlength(li["text"], font=li["font"])
         max_w = max(max_w, li["width"])
         block_h += li["ascent"] + li["descent"]
 
@@ -1509,32 +1597,40 @@ def render_telop_layer(lines, W, H, font_cache, font_path, base_size_px, pos_rat
     dx, dy = clamp_box_to_canvas((block_left, block_top, block_right, block_bottom), W, H)
     ref_x += dx
     block_top += dy
-    cx = (block_left + dx + block_right + dx) / 2.0
-    cy = (block_top + block_top + block_h) / 2.0
 
-    shadow_alpha = 130   # 薄い黒ドロップシャドウ（0〜255）
+    shadow_alpha = 130   # 縁取り/ドロップシャドウの不透明度（0〜255。色は黒/白どちらでも同じ値を使う）
     anchor = anchor_h + "a"  # 例："la"（左・アセンダー基準）。行を上から積み上げるための基準。
     cursor_y = block_top
+    results = []
     for li in line_infos:
         size_px = li["size_px"]
         shadow_offset = max(1, size_px // 20)
-        # 白太字＋薄い黒ドロップシャドウ（先に影を描き、後から白文字を重ねる）
+        outline_fill = li["outline_rgb"] + (shadow_alpha,)
+        text_fill = li["text_rgb"] + (255,)
+
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        # 文字色＋縁取り/ドロップシャドウ（先に影を描き、後から本体の文字を重ねる）
         draw.text((ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
-                  anchor=anchor, fill=(0, 0, 0, shadow_alpha))
-        draw.text((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=(255, 255, 255, 255))
+                  anchor=anchor, fill=outline_fill)
+        draw.text((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        bbox = draw.textbbox((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
         if li["underline"]:
-            bbox = draw.textbbox((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
             underline_h = max(1, round(size_px * 0.06))
             underline_gap = max(1, round(size_px * 0.04))
             uy0 = bbox[3] + underline_gap
-            draw.rectangle((bbox[0], uy0, bbox[2], uy0 + underline_h), fill=(255, 255, 255, 255))
+            draw.rectangle((bbox[0], uy0, bbox[2], uy0 + underline_h), fill=text_fill)
+
+        rgba = np.array(layer)
+        rgb = rgba[:, :, :3].astype(np.float32)
+        bgr = rgb[:, :, ::-1].copy()  # PILはRGB、cv2はBGR
+        alpha = (rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        results.append({"text": li["text"], "bgr": bgr, "alpha": alpha, "cx": cx, "cy": cy})
         cursor_y += li["ascent"] + li["descent"]
 
-    rgba = np.array(layer)
-    rgb = rgba[:, :, :3].astype(np.float32)
-    bgr = rgb[:, :, ::-1].copy()  # PILはRGB、cv2はBGR
-    alpha = (rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
-    return bgr, alpha, cx, cy
+    return results
 
 
 def blend_telop(frame, telop_bgr, telop_alpha, fade):
@@ -1544,6 +1640,66 @@ def blend_telop(frame, telop_bgr, telop_alpha, fade):
     a = telop_alpha * float(np.clip(fade, 0.0, 1.0))
     out = frame.astype(np.float32) * (1.0 - a) + telop_bgr * a
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def resolve_line_anim_params(line, bounce_flag):
+    """
+    行ごとのanim/anim_secを解決する。戻り値は (anim, anim_sec)。
+
+    line["anim"]が明示されていればそれを使い、anim_secが未指定ならanim="bounce"は
+    従来のTELOP_FADE_SEC(0.15秒)、それ以外はTITLE_LINE_ANIM_SEC_DEFAULT(0.25秒)を既定にする。
+
+    line["anim"]が未指定(None)の場合は、フリーズのtitle_bounceに従って
+    bounce/fadeのどちらかへ、時間は必ずTELOP_FADE_SEC（0.15秒）にフォールバックする。
+    これにより、lines[]にanimを一切指定しない旧形式のJSONは、全行が同時に
+    title_bounce通りのバウンス/フェードで表示される従来の挙動と完全に一致する。
+    """
+    anim = line.get("anim")
+    anim_sec = line.get("anim_sec")
+    if anim is None:
+        return ("bounce" if bounce_flag else "fade"), TELOP_FADE_SEC
+    if anim_sec is None:
+        anim_sec = TELOP_FADE_SEC if anim == "bounce" else TITLE_LINE_ANIM_SEC_DEFAULT
+    return anim, float(anim_sec)
+
+
+def compute_line_frame_state(anim, anim_sec, delay_sec, elapsed_hold_sec, W, H):
+    """
+    hold区間開始からの経過秒数(elapsed_hold_sec)と行のanim/anim_sec/delay_secから、
+    その行を合成する際の (fade係数0〜1, scale, tx, ty) を返す。
+
+    delay_secが経過するまでは完全に非表示（fade=0）。経過後はanimに応じて
+    fade/scale/tx/tyを進める：
+      - "none"  : 遅延後は即座に完全表示、変形なし
+      - "fade"  : 不透明度が0→1へ進む、変形なし
+      - "bounce": 不透明度が0→1へ進みつつ、130%→100%へ急停止イージングで縮む
+      - "slide_*": 不透明度は開始と同時に1（アルファでのフェードは行わない）。
+        画面外（対応する辺）から最終位置までEase-Out Cubicで平行移動する
+    """
+    line_local = elapsed_hold_sec - delay_sec
+    if line_local <= 0:
+        return 0.0, 1.0, 0.0, 0.0
+    p = min(1.0, line_local / anim_sec) if anim_sec > 0 else 1.0
+
+    if anim == "none":
+        return 1.0, 1.0, 0.0, 0.0
+    if anim == "bounce":
+        scale = telop_bounce_scale(p) if p < 1.0 else 1.0
+        return p, scale, 0.0, 0.0
+    if anim in ("slide_right", "slide_left", "slide_up", "slide_down"):
+        remaining = 1.0 - ease_out_cubic(p)
+        tx, ty = 0.0, 0.0
+        if anim == "slide_right":
+            tx = W * remaining
+        elif anim == "slide_left":
+            tx = -W * remaining
+        elif anim == "slide_up":
+            ty = H * remaining
+        elif anim == "slide_down":
+            ty = -H * remaining
+        return 1.0, 1.0, tx, ty
+    # "fade" および未知値のフォールバック
+    return p, 1.0, 0.0, 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -2082,13 +2238,22 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
         hold_sec = resolve_hold_sec(fz)
 
         n_pre = int(round(HOLD_BEFORE_BRUSH_SEC * fps))
-        n_reveal = max(1, int(round(reveal_anim_sec * fps)))
+        # reveal_sec=0 は「即時カラー化」（塗りアニメ無し）を意味するため、
+        # 他フェーズと違って下限を1フレームに切り上げない（0を許可する）。
+        n_reveal = max(0, int(round(reveal_anim_sec * fps)))
         n_slide_in = int(round(shadow_cfg["slide_sec"] * fps)) if shadow_cfg else 0
         n_hold = max(0, int(round(hold_sec * fps)))
         n_slide_back = int(round(SHADOW_SLIDE_BACK_SEC * fps)) if shadow_cfg else 0
 
         sfx_spec = resolve_sfx_spec(fz.get("sfx"), json_dir, SFX_ALIGNS_FREEZE,
                                      f"t={fz['time']:.2f}s")
+
+        # 行ごとの効果音(lines[].sfx)はここで一度だけ解決しておく（iter_freeze_frames/
+        # render_previewは描画のたびにこのplanを参照するだけで済む）。
+        # 各エントリは (行のdelay_sec, sfx_spec)。build_audioはこれを
+        # 「行の出現開始（=delay_sec経過後）の瞬間」を基準に鳴らす。
+        title_lines = resolve_title_lines(fz, json_dir)
+        line_sfx = [(line["delay_sec"], line["sfx"]) for line in title_lines if line.get("sfx")]
 
         plans.append({
             "fz": fz,
@@ -2106,6 +2271,8 @@ def plan_freezes(freezes, fps, src_frames, json_dir, logo=None, logo_at=None,
             "mask_mode": mask_mode,
             "reveal": reveal,
             "shadow_cfg": shadow_cfg,
+            "title_lines": title_lines,
+            "line_sfx": line_sfx,
         })
     plans.sort(key=lambda p: p["frame_index"])
 
@@ -2140,11 +2307,13 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
          人物の真下に完全に隠れて見えない）
       3. ②ズレ(slide)：影演出のスライドイン（shadowがあれば）：人物レイヤーだけを
          0→distanceまでEase-Out Cubicでずらし、元の位置に静止したままの影
-         （shadow.sourceに応じたマスク）を覗かせる。着地の瞬間にテロップ（バウンス可）と
-         効果音が発火する
+         （shadow.sourceに応じたマスク）を覗かせる。着地の瞬間にフリーズ側の効果音（sfx）
+         が発火する
       4. ③静止(hold)（plan["show_logo"]がTrueなら、終盤で「静止フレーム→背景色の
          クロスフェード（logo.backgroundが背景色を敷くモードの場合のみ）→ロゴの着地〜表示」
-         を行う）。テロップは着地の瞬間に出現し、この③静止の終わりまで表示し続ける
+         を行う）。テロップは行ごとに独立したアニメ（lines[].anim/anim_sec/delay_sec、
+         省略時はtitle_bounceに従ったbounce/fade一斉表示）で出現し、この③静止の終わりまで
+         表示し続ける。行ごとのsfxもその行の出現開始時（delay_sec経過後）に発火する
       5. 影演出のスライドバック（shadowがあり、かつこのフリーズでロゴを表示しない場合）：
          通常再生に戻る直前に人物を元の位置へ戻し、影を隠す（戻さないと再生再開時に
          人物が飛んで見えるため）
@@ -2162,9 +2331,13 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     font_path = resolve_title_font_path(fz)
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
-    telop_bgr, telop_alpha, tcx, tcy = render_telop_layer(
-        resolve_title_lines(fz), W, H, font_cache, font_path, size_px, title_pos, title_align)
+    title_lines = plan.get("title_lines") or resolve_title_lines(fz)
+    visible_title_lines = [line for line in title_lines if line.get("text")]
+    outline_color = resolve_title_outline_color(fz)
+    line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
+                                            title_pos, title_align, outline_color=outline_color)
     bounce = bool(fz.get("title_bounce"))
+    line_anims = [resolve_line_anim_params(line, bounce) for line in visible_title_lines]
 
     # 1) 出現アニメ開始まで静止
     for _ in range(plan["n_pre"]):
@@ -2184,7 +2357,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
 
     # Actionsのログで各フリーズの影の状態を確認できるようにする（実機で影が出ない場合の
     # 切り分け用：有効/無効・実際に使われる方向・影マスクのX重心を毎回出力する）
-    freeze_label_text = " / ".join(line["text"] for line in resolve_title_lines(fz) if line["text"])
+    freeze_label_text = " / ".join(line["text"] for line in title_lines if line["text"])
     freeze_label = f"t={float(fz.get('time', 0.0)):.2f}s 「{freeze_label_text}」"
     if shadow_cfg:
         mask_x_ratio = mask_x_center_ratio(shadow_done_mask, W)
@@ -2211,7 +2384,6 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     # 「着地」した状態（スライド済み。影が無ければ元の位置のまま）を1回だけ作って使い回す
     landed = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_done_mask)
-    fade_frames = max(1, int(round(TELOP_FADE_SEC * fps)))
 
     # ブラシ（またはauto+brushのreveal="brush"）で描いた場合のみ、完了時点で先端に残っている
     # 「乾いていない白い絵の具」を brush_fade_sec 秒かけてフェードアウトさせる。
@@ -2223,7 +2395,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     brush_fade_sec = float(fz.get("brush_fade_sec", DEFAULT_STYLE["brush_fade_sec"]))
     n_brush_fade = max(0, int(round(brush_fade_sec * fps))) if brush_fade_sec > 0 else 0
     tail_paint_alpha = None
-    if brush_driven and n_brush_fade > 0 and all_geo and all_total > 0:
+    if brush_driven and plan["n_reveal"] > 0 and n_brush_fade > 0 and all_geo and all_total > 0:
         max_thick = max(g["thick"] for g in all_geo)
         tail_len = max(2.0 * max_thick, all_total * 0.12)
         tail_mask = draw_stroke_mask(all_geo, W, H, max(all_total - tail_len, 0.0), all_total, shape)
@@ -2246,15 +2418,16 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
         else:
             base = landed
 
-        t = (i + 1) / float(fade_frames)
-        fade = min(1.0, t)
-        if bounce and t < 1.0:
-            scale = telop_bounce_scale(t)
-            f_bgr, f_alpha = scale_telop_layer(telop_bgr, telop_alpha, scale, tcx, tcy) \
-                if telop_bgr is not None else (None, None)
-        else:
-            f_bgr, f_alpha = telop_bgr, telop_alpha
-        out = blend_telop(base, f_bgr, f_alpha, fade)
+        elapsed_hold_sec = (i + 1) / float(fps)
+        out = base
+        for line, layer, (anim, anim_sec) in zip(visible_title_lines, line_layers, line_anims):
+            fade, scale, tx, ty = compute_line_frame_state(
+                anim, anim_sec, line["delay_sec"], elapsed_hold_sec, W, H)
+            if fade <= 0:
+                continue
+            f_bgr, f_alpha = transform_telop_layer(
+                layer["bgr"], layer["alpha"], scale, tx, ty, layer["cx"], layer["cy"])
+            out = blend_telop(out, f_bgr, f_alpha, fade)
 
         if plan["show_logo"]:
             rel = i - logo_start_in_hold
@@ -2280,16 +2453,36 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
             out = composite_layers(bg, frame, done_mask, W, H, shadow_cfg=shadow_cfg,
                                     slide_dx=slide_dx * remaining, slide_dy=slide_dy * remaining,
                                     shadow_mask_u8=shadow_done_mask)
-            out = blend_telop(out, telop_bgr, telop_alpha, 1.0)
+            for layer in line_layers:
+                out = blend_telop(out, layer["bgr"], layer["alpha"], 1.0)
             yield out
+
+
+def compute_preview_sample_time(line0_anim_sec, line1_delay_sec, line1_anim_sec):
+    """
+    3枚目の確認用PNG（1行目が到達済み・2行目が移動中）を書き出す瞬間（hold開始からの
+    経過秒数）を決める。1行目の出現アニメ完了時刻(line0_anim_sec、delay=0前提)と
+    2行目の出現開始時刻(line1_delay_sec)の遅い方を起点に、2行目の出現アニメの
+    中間地点（50%地点）を狙う。2行目の出現アニメ中に収まるよう安全側にクランプする。
+    """
+    line0_complete = max(0.0, line0_anim_sec)
+    target = line1_delay_sec + line1_anim_sec * 0.5
+    sample_t = max(line0_complete, target)
+    if line1_anim_sec > 0:
+        sample_t = min(sample_t, line1_delay_sec + line1_anim_sec * 0.95)
+    return max(sample_t, 0.0)
 
 
 def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, video_path=None):
     """
-    --preview 用：影演出の「スライド前（影が隠れている）」「スライド後（影が見えている）」の
-    2枚をPNGで出す（out_pngのパスから _before / _after のファイル名を導く）。
-    shadowが無効な場合は、2枚とも同じ内容になる。
-    戻り値: (スライド前のパス, スライド後のパス)
+    --preview 用に3枚のPNGを出す（out_pngのパスから _before / _after / _lines のファイル名を導く）。
+      - _before: 影演出の「スライド前（影が隠れている）」（テロップは全行着地済みの状態で表示）
+      - _after : 影演出の「スライド後（影が見えている）」（同上）
+      - _lines : 行ごとのテロップ出現アクションの確認用。1行目が出現アニメを完了し、
+                 2行目がまだ出現アニメの途中（画面外から移動中など）の瞬間を1枚だけ書き出す。
+                 可視行が2行未満の場合は作らない（Noneを返す）。
+    shadowが無効な場合、before/afterは同じ内容になる。
+    戻り値: (スライド前のパス, スライド後のパス, 行アニメ確認PNGのパスまたはNone)
     """
     fz = plan["fz"]
     bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
@@ -2315,10 +2508,15 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     font_path = resolve_title_font_path(fz)
     title_pos = fz.get("title_pos") or DEFAULT_STYLE["title_pos"]
     title_align = fz.get("title_align", DEFAULT_STYLE["title_align"])
-    telop_bgr, telop_alpha, _tcx, _tcy = render_telop_layer(
-        resolve_title_lines(fz), W, H, font_cache, font_path, size_px, title_pos, title_align)
-    before_img = blend_telop(before_img, telop_bgr, telop_alpha, 1.0)
-    after_img = blend_telop(after_img, telop_bgr, telop_alpha, 1.0)
+    title_lines = plan.get("title_lines") or resolve_title_lines(fz)
+    visible_title_lines = [line for line in title_lines if line.get("text")]
+    outline_color = resolve_title_outline_color(fz)
+    line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
+                                            title_pos, title_align, outline_color=outline_color)
+    bounce = bool(fz.get("title_bounce"))
+    for layer in line_layers:
+        before_img = blend_telop(before_img, layer["bgr"], layer["alpha"], 1.0)
+        after_img = blend_telop(after_img, layer["bgr"], layer["alpha"], 1.0)
 
     base, ext = os.path.splitext(out_png)
     ext = ext or ".png"
@@ -2327,7 +2525,28 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     os.makedirs(os.path.dirname(os.path.abspath(out_png)) or ".", exist_ok=True)
     cv2.imwrite(before_path, before_img)
     cv2.imwrite(after_path, after_img)
-    return before_path, after_path
+
+    lines_path = None
+    if len(visible_title_lines) >= 2 and len(line_layers) >= 2:
+        anim_params = [resolve_line_anim_params(line, bounce) for line in visible_title_lines]
+        sample_t = compute_preview_sample_time(
+            anim_params[0][1], visible_title_lines[1]["delay_sec"], anim_params[1][1])
+        # after_imgは既に全行を着地状態で焼き込んでいるため、行アニメの確認画像は
+        # テロップを含まない着地後の背景（before/afterと同じcomposite_layers）から作り直す
+        lines_img = composite_layers(bg, frame, mask, W, H, shadow_cfg=shadow_cfg,
+                                      slide_dx=slide_dx, slide_dy=slide_dy, shadow_mask_u8=shadow_mask)
+        for line, layer, (anim, anim_sec) in zip(visible_title_lines, line_layers, anim_params):
+            fade, scale, tx, ty = compute_line_frame_state(
+                anim, anim_sec, line["delay_sec"], sample_t, W, H)
+            if fade <= 0:
+                continue
+            f_bgr, f_alpha = transform_telop_layer(
+                layer["bgr"], layer["alpha"], scale, tx, ty, layer["cx"], layer["cy"])
+            lines_img = blend_telop(lines_img, f_bgr, f_alpha, fade)
+        lines_path = f"{base}_lines{ext}"
+        cv2.imwrite(lines_path, lines_img)
+
+    return before_path, after_path, lines_path
 
 
 # ---------------------------------------------------------------------------
@@ -2575,6 +2794,13 @@ def build_audio(src_path, plans, fps, src_frames, has_audio, sr=AUDIO_SR, ch=AUD
         if plan["sfx"]:
             offset = frames_to_samples(landed_frame_offset, fps, sr)
             sfx_jobs.append((written + offset, plan["sfx"], False))
+        # 行ごとの効果音（lines[].sfx）：その行の出現開始（=delay_sec経過後）の瞬間に鳴らす。
+        # align指定（start_at_landing/end_at_landing）はフリーズ側sfxと同じ扱いで、
+        # 「着地」の基準時刻をそのままその行の出現開始時刻に置き換える。
+        for line_delay_sec, line_sfx_spec in plan.get("line_sfx", []):
+            line_offset = frames_to_samples(
+                landed_frame_offset + int(round(line_delay_sec * fps)), fps, sr)
+            sfx_jobs.append((written + line_offset, line_sfx_spec, False))
         # ロゴがこのフリーズ中に表示される場合、着地の瞬間（暗転カットの後、ロゴが最小サイズに
         # 到達する瞬間）を基準にSEを鳴らす
         if plan.get("show_logo") and logo_at == "last_freeze" and logo_sfx_spec and logo_params:
@@ -2752,15 +2978,17 @@ def render(project, json_path, video_path, out_path, preview_path=None,
             log(f"model={extract_frames_for} が必要なフリーズのフレームを{len(written)}枚書き出しました: {extract_frames_out}")
             return manifest_path
 
-        # --- 確認用PNG（スライド前・スライド後の2枚）だけ出して終了 ---
+        # --- 確認用PNG（スライド前・スライド後・行アニメ確認）だけ出して終了 ---
         if preview_path:
             if not plans:
                 raise RuntimeError("freezes が空なので preview を作れません。")
             plan = plans[0]
             frame = grab_frame_at(video_path, plan["frame_index"] / fps, W, H, fps)
-            before_path, after_path = render_preview(frame, plan, W, H, fps, {}, preview_path,
-                                                       cache_dir=cache_dir, video_path=video_path)
+            before_path, after_path, lines_path = render_preview(
+                frame, plan, W, H, fps, {}, preview_path, cache_dir=cache_dir, video_path=video_path)
             preview_msg = f"プレビューを書き出しました: {before_path}（スライド前） / {after_path}（スライド後）"
+            if lines_path:
+                preview_msg += f" / {lines_path}（行ごとのテロップアニメ確認）"
             if logo_cfg and logo_bgr is not None:
                 # 自動クロップが実際に効いているかを目視確認できるよう、
                 # クロップ後のロゴ単体もアルファ付きPNGで書き出す
@@ -2769,7 +2997,7 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 save_logo_crop_preview_png(logo_bgr, logo_alpha, logo_preview_path)
                 preview_msg += f" / {logo_preview_path}（クロップ後ロゴ単体）"
             log(preview_msg)
-            return before_path, after_path
+            return before_path, after_path, lines_path
 
         # --- 音声を先に作る（ffmpegのmux入力として渡すため） ---
         audio = build_audio(video_path, plans, fps, src_frames, info["has_audio"],

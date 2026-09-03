@@ -58,6 +58,19 @@ async function main() {
   await page.setInputFiles("#videoFileInput", videoPath);
   await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
 
+  console.log("=== ①塗り reveal_sec スライダー：0にすると「即時」表示になる（フリーズ編集を開く前の全体設定） ===");
+  await page.fill("#revealSecSlider", "0");
+  await page.dispatchEvent("#revealSecSlider", "input");
+  await page.waitForTimeout(50);
+  const revealLabelAtZero = await page.evaluate(() => document.getElementById("revealSecValue").textContent);
+  check(revealLabelAtZero === "即時", "reveal_sec=0のとき表示ラベルが「即時」になる: " + revealLabelAtZero);
+  await page.fill("#revealSecSlider", "0.5");
+  await page.dispatchEvent("#revealSecSlider", "input");
+  await page.waitForTimeout(50);
+  const revealLabelAtHalf = await page.evaluate(() => document.getElementById("revealSecValue").textContent);
+  check(revealLabelAtHalf === "0.5秒", "0以外は従来どおり秒数表示になる: " + revealLabelAtHalf);
+
+  console.log("");
   console.log("=== 新規フリーズは1行だけの入力行から始まり、削除ボタンは隠れている ===");
   await page.click("#addFreezeBtn");
   await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
@@ -93,6 +106,53 @@ async function main() {
   const box = await page.evaluate(() => computeEditorTelopBox());
   check(!!box, "複数行でもcomputeEditorTelopBoxが矩形を返す（テロップが表示されている）");
   check(box.textH > 0, "ブロックの高さが1行分より大きい（複数行が縦に積まれている）: " + box.textH);
+
+  console.log("");
+  console.log("=== 行ごとの文字色プリセット：クリックするとdraft.titleLines[].colorに反映される ===");
+  await page.click(".title-line-row:nth-child(1) .title-line-color-btn[title=\"金\"]");
+  await page.waitForTimeout(50);
+  const line1Color = await page.evaluate(() => draft.titleLines[0].color);
+  check(line1Color === "#E6C15C", "1行目に「金」プリセットを選ぶとcolor=#E6C15Cになる: " + line1Color);
+  const colorBtnSelected = await page.locator(".title-line-row:nth-child(1) .title-line-color-btn[title=\"金\"]").evaluate((el) => el.classList.contains("selected"));
+  check(colorBtnSelected, "選択したプリセットボタンにselectedクラスが付く");
+
+  await page.fill(".title-line-row:nth-child(2) .title-line-color-input", "#ff3b30");
+  await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-color-input", "input");
+  await page.waitForTimeout(50);
+  const line2Color = await page.evaluate(() => draft.titleLines[1].color);
+  check(line2Color === "#FF3B30", "2行目の自由入力欄に#RRGGBBを入れるとcolorに反映される（大文字化）: " + line2Color);
+
+  console.log("");
+  console.log("=== 行ごとの出現アクション：1行目はdelay_sec入力が無効化され、2行目はanim/anim_sec/delay_sec/sfxを設定できる ===");
+  const line1DelayDisabled = await page.locator(".title-line-row:nth-child(1) .title-line-delay-sec").isDisabled();
+  check(line1DelayDisabled, "1行目のdelay_sec入力は無効化されている（2行目以降のみ有効という仕様）");
+
+  await page.selectOption(".title-line-row:nth-child(2) .title-line-anim-select", "slide_left");
+  await page.fill(".title-line-row:nth-child(2) .title-line-anim-sec", "0.4");
+  await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-anim-sec", "input");
+  await page.fill(".title-line-row:nth-child(2) .title-line-delay-sec", "0.3");
+  await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-delay-sec", "input");
+  await page.selectOption(".title-line-row:nth-child(2) .title-line-sfx-select", "shakin");
+  await page.waitForTimeout(50);
+  const line2Anim = await page.evaluate(() => ({
+    anim: draft.titleLines[1].anim, animSec: draft.titleLines[1].animSec,
+    delaySec: draft.titleLines[1].delaySec, sfx: draft.titleLines[1].sfx,
+  }));
+  check(line2Anim.anim === "slide_left" && line2Anim.animSec === 0.4 && line2Anim.delaySec === 0.3
+    && line2Anim.sfx === "shakin",
+    "2行目のanim/anim_sec/delay_sec/sfxがdraft.titleLinesに反映される: " + JSON.stringify(line2Anim));
+
+  // このフリーズはまだdraft（編集中）でappState.freezesにコミットされていないため、
+  // freezeToJSON(draft, ...)を直接呼んでJSON契約を確認する（buildProjectJSONはコミット後専用）。
+  const fzLineActions = await page.evaluate(() => freezeToJSON(draft, appState.sfxLibrary));
+  check(typeof fzLineActions.name === "object", "行ごとの新フィールドを使うとnameは{lines:[...]}形式になる");
+  const jsonLine1 = fzLineActions.name.lines[0];
+  const jsonLine2 = fzLineActions.name.lines[1];
+  check(jsonLine1.color === "#E6C15C", "JSON出力：1行目のcolorが反映される: " + jsonLine1.color);
+  check(jsonLine2.anim === "slide_left" && jsonLine2.anim_sec === 0.4 && jsonLine2.delay_sec === 0.3
+    && jsonLine2.sfx === "shakin",
+    "JSON出力：2行目のanim/anim_sec/delay_sec/sfxが反映される: " + JSON.stringify(jsonLine2));
+  check(jsonLine1.delay_sec === undefined, "JSON出力：1行目はdelay_secを出力しない（常に0扱いのため）");
 
   console.log("");
   console.log("=== 行の削除：2行のうち1行を消すと1行に戻り、残った行の削除ボタンは再び隠れる ===");

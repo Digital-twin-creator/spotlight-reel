@@ -41,7 +41,11 @@ spotlight-reel/
 │   ├── editor_logic.test.js                    # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 │   ├── render_quality.test.py                  # render.pyの品質回帰テスト（音声連続性・VFR正規化・テロップ描画・
 │   │                                            #   ブラシの白フェード・フォント読み込み失敗時のエラー終了・shadow/
-│   │                                            #   mask=auto/auto+brush。要ffmpeg/numpy。rembg未インストール時は
+│   │                                            #   mask=auto/auto+brush・reveal_sec=0（塗りアニメ即時化）・
+│   │                                            #   テロップ文字色/自動縁取り色・行ごとの出現アクション
+│   │                                            #   （anim/anim_sec/delay_sec）と行ごとのsfxタイミング・
+│   │                                            #   旧形式（anim省略）のbounce/fadeとのビット単位の後方互換。
+│   │                                            #   要ffmpeg/numpy。rembg未インストール時は
 │   │                                            #   mask=auto系の検証のみ自動でスキップされる）
 │   ├── player_ui.playwright.test.mjs           # 再生/停止・シークのUI回帰テスト（任意、要playwright-core）
 │   ├── freeze_black_screen.playwright.test.mjs # フリーズ追加時の黒画面回帰テスト（任意、要playwright-core）
@@ -50,7 +54,9 @@ spotlight-reel/
 │   ├── film_logo_bounce.playwright.test.mjs    # freeze_sec・テロップバウンス・ラストロゴ設定の回帰テスト（任意、要playwright-core）
 │   ├── portrait_landscape_freezes.playwright.test.mjs # 縦横動画それぞれでフリーズ複数追加→JSON書き出しの回帰テスト（任意、要playwright-core）
 │   ├── title_pos_drag.playwright.test.mjs      # テロップのドラッグ移動・サイズ/寄せ変更の回帰テスト（任意、要playwright-core）
-│   ├── title_lines_editor.playwright.test.mjs  # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・フォント選択）の回帰テスト（任意、要playwright-core）
+│   ├── title_lines_editor.playwright.test.mjs  # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・文字色プリセット/
+│   │                                            #   自由入力・行ごとの出現アクション anim/anim_sec/delay_sec/sfx・
+│   │                                            #   フォント選択・reveal_secスライダーの「即時」表示）の回帰テスト（任意、要playwright-core）
 │   ├── mask_shadow_ui.playwright.test.mjs      # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのUI回帰テスト（任意、要playwright-core）
 │   ├── make_video_job.playwright.test.mjs      # 「動画を作る」ボタンのE2Eテスト（GitHub APIはモック、任意、要playwright-core）
 │   ├── startup_robustness.playwright.test.mjs  # 巨大/壊れた自動保存データ・起動失敗時の復旧UIの回帰テスト（任意、要playwright-core）
@@ -389,6 +395,8 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
     "title_pos": [0.5, 0.78],
     "title_size": 0.06,
     "title_align": "center",
+    "title_color": "#FFFFFF",
+    "title_outline_color": null,
     "brush_fade_sec": 0.3,
     "audio_during_freeze": "mute",
     "reveal": "wipe",
@@ -445,10 +453,14 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
     },
     {
       "time": 13.0,
+      "reveal_sec": 0,
       "name": {
         "lines": [
-          { "text": "複数行くん", "size": 1.0, "underline": true },
-          { "text": "サブタイトル", "size": 0.55 }
+          { "text": "複数行くん", "size": 1.0, "underline": true, "color": "#E6C15C",
+            "anim": "slide_right", "anim_sec": 0.5 },
+          { "text": "サブタイトル", "size": 0.55, "color": "#FF3B30",
+            "anim": "slide_left", "anim_sec": 0.6, "delay_sec": 0.3,
+            "sfx": "shakin" }
         ]
       },
       "title_font": "assets/fonts/ZenKakuGothicNew-Bold.ttf",
@@ -476,11 +488,16 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
 - `style` は全体の既定値です。各 `freezes[]` 要素に同名キーがあれば、そちらが優先されます
   （`reveal_sec` / `slide_sec` / `hold_sec` / `brush_width` / `brush_shape` / `mono_contrast` /
   `background` / `font` / `audio_during_freeze` /
-  `title_pos` / `title_size` / `title_align` / `title_font` / `title_font_jp` / `brush_fade_sec` /
+  `title_pos` / `title_size` / `title_align` / `title_font` / `title_font_jp` / `title_color` /
+  `title_outline_color` / `brush_fade_sec` /
   `color_source` / `mask_options` / `reveal` / `shadow` を個別上書き可能。
   `title_bounce` のみ `style` でしか指定できません）。
   1フリーズの流れは「①塗り（`reveal_sec`）→②ズレ（`slide_sec`）→③静止（`hold_sec`）」の
   3段構成です。詳細は[「演出仕様（1フリーズあたり）」](#演出仕様1フリーズあたり)を参照。
+  `reveal_sec` に `0` を指定すると①塗りのアニメーション自体を省略でき、フリーズ直後に
+  ストロークで塗った範囲が一瞬でカラー化されます（ブラシの伸びる演出も、白い絵の具の
+  描画も行われません）。エディタの「塗り」スライダーも最小値が `0` で、その時だけ
+  「即時」と表示されます。
 - `title_pos`：テロップ（複数行の場合はブロック全体）中心の位置
   （出力サイズに対する **0〜1の比率** `[x, y]`）。
   既定は `[0.5, 0.78]`（従来どおり横中央・高さ78%）。`title_align` が `left`/`right` の場合、
@@ -497,22 +514,46 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
   M PLUS Rounded 1c（丸ゴシック）を同梱しており（`make_dummy.py` で取得）、
   エディタからはこれらを全体既定・フリーズ単位のどちらでも選べます。
 - `name`：テロップの文字列。**プレーンな文字列**（従来どおり・1行）に加えて、
-  複数行・行ごとの文字サイズ／アンダーラインを指定できる**オブジェクト形式**にも対応しています。
+  複数行・行ごとの文字サイズ／アンダーライン／文字色／出現アクション／効果音を指定できる
+  **オブジェクト形式**にも対応しています。
   ```json
   "name": {
     "lines": [
-      { "text": "山田 太郎", "size": 1.0, "underline": true },
-      { "text": "エースストライカー", "size": 0.55 }
+      { "text": "1行目", "size": 1.0, "underline": true, "color": "#E6C15C",
+        "anim": "slide_right", "anim_sec": 0.5 },
+      { "text": "2行目", "size": 0.55, "color": "#FF3B30",
+        "anim": "slide_left", "anim_sec": 0.6, "delay_sec": 0.3,
+        "sfx": "shakin" }
     ]
   }
   ```
-  各行は `text`（本文）・`size`（`title_size` に対する倍率。既定 `1.0`）・
-  `underline`（アンダーラインの有無。既定 `false`）を持ちます。行間の詰め方はシンプルに
-  隙間なし（各行の高さをそのまま積み上げる）。複数行はブロック全体を1つのまとまりとして
-  `title_pos`/`title_align` で位置・寄せを決め、エディタの位置ドラッグもブロック単位で
-  移動します。アンダーラインは各行の文字幅に合わせ、太さは文字サイズの約6%、
-  色は文字色（白）と同じです。1行・既定サイズ・アンダーラインなしの場合は
-  従来どおりプレーンな文字列のまま出力され、JSONの見た目は変わりません（完全後方互換）。
+  各行は以下のフィールドを持ちます（`text` 以外はすべて省略可）。
+  - `size`：`title_size` に対する倍率（既定 `1.0`）。
+  - `underline`：アンダーラインの有無（既定 `false`）。文字幅に合わせ、太さは文字サイズの
+    約6%、色は文字色と同じです。
+  - `color`：この行の文字色（`#RRGGBB`、既定 `#FFFFFF`）。省略時は `title_color`
+    （全体既定、これも未指定なら白）を使います。縁取り／ドロップシャドウの色は、
+    文字色の明るさから黒／白を自動選択します（`title_outline_color` で明示上書き可）。
+  - `anim`：この行の出現アクション。`bounce`（バウンス） / `slide_right` / `slide_left` /
+    `slide_up` / `slide_down`（画面外の対応する辺から定位置へEase-Outで滑り込む） /
+    `fade`（フェードイン） / `none`（アニメ無しで即表示）。省略時は、全行が
+    `title_bounce` に従って同時にバウンス／フェード表示される従来どおりの挙動になります。
+  - `anim_sec`：出現アニメーションの時間（秒）。省略時の既定は `0.25`（`anim: "bounce"` のみ
+    従来と同じ `0.15`）。
+  - `delay_sec`：1行目の出現開始からの遅れ（秒）。**2行目以降にのみ有効**（1行目は常に0）。
+    1行目は従来どおり「スライド着地の瞬間」に出現し、2行目以降は `delay_sec` ぶん遅れて
+    それぞれ独立に出現アニメーションを始めます。テロップ全体は③静止（`hold_sec`）の
+    終わりまで表示され続けます。
+  - `sfx`：この行専用の効果音（プリセット名の文字列、または `{"file","align"}`
+    オブジェクト。指定方法はフリーズの `sfx` と同じ）。その行の出現開始（`delay_sec`
+    経過後）の瞬間に鳴ります。フリーズ側の既存 `sfx`（着地時に鳴るもの）とは独立に
+    重ねて鳴らせます。
+
+  行間の詰め方はシンプルに隙間なし（各行の高さをそのまま積み上げる）。複数行はブロック
+  全体を1つのまとまりとして `title_pos`/`title_align` で位置・寄せを決め、エディタの
+  位置ドラッグもブロック単位で移動します。1行・既定サイズ・アンダーラインなし・
+  色/アニメ/効果音とも未指定の場合は従来どおりプレーンな文字列のまま出力され、
+  JSONの見た目は変わりません（完全後方互換）。
 - `brush_fade_sec`：ブラシ完了時点でまだ先端に残っている「乾いていない白い絵の具」を、
   何秒かけてフェードアウトさせるか（既定 `0.3`）。`0` を指定すると従来どおり
   フェードなし（ブラシ完了と同時に即座に消える）になる。この既定値0.3は、
@@ -595,7 +636,8 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
 0. **フリーズ開始〜①塗り開始（0.3秒固定）**：静止フレームを `background` で処理して表示
    - `mono`：グレースケール化（`mono_contrast` でコントラストを強調。1.0が無効化＝既定値）
    - `dark`：元のカラーを30%の明るさに減光
-1. **①塗り（`reveal_sec` 秒。既定0.5秒）**：人物は「元の位置」に出現する。この間、
+1. **①塗り（`reveal_sec` 秒。既定0.5秒。`0` を指定すると塗りアニメ自体を省略し、
+   フリーズ直後にいきなり完全カラー化する）**：人物は「元の位置」に出現する。この間、
    `shadow` があってもまだ人物の真下に完全に隠れているため見えない
    - `color_source: "brush"`（既定）：`brush_shape` の筆先画像
      （`assets/brushes/<shape>.png`、白＋アルファ）を軌跡に沿って一定間隔でスタンプする
@@ -616,25 +658,37 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
    [「影（`shadow`）演出」](#影shadow演出)を参照
 3. **着地の瞬間（②の終わり＝③の始まり）**：ブラシ先端にまだ残っている白い絵の具を
    `brush_fade_sec`（既定0.3秒）かけてフェードアウトさせ、人物カラーだけが残るようにする
-   （`brush_fade_sec: 0` で無効化＝旧バージョンと同じ即時消灯）。同時に名前テロップ
+   （`brush_fade_sec: 0` で無効化＝旧バージョンと同じ即時消灯。`reveal_sec: 0` で
+   塗りアニメ自体を省略した場合はこの絵の具フェードも発生しない）。同時に名前テロップ
    （位置は `title_pos`・既定 `[0.5, 0.78]`＝横中央/高さ78%、寄せは `title_align`・
    既定 `center`、文字サイズは `title_size`・既定は高さの6%。日本語を含む名前は
    `title_font_jp`、それ以外は `title_font` を使用。どちらも未指定なら `font` に
-   フォールバックする。白文字＋薄い黒ドロップシャドウ。`name` を `{"lines":[...]}`
-   形式にすると複数行になり、行ごとに文字サイズ倍率・アンダーラインの有無を指定できる
-   （行間は詰めずそのまま積み上げる。複数行でも `title_pos`/`title_align` はブロック
-   全体を1つの単位として位置・寄せを決める）。`title_pos` が画面端に
-   はみ出す位置を指しても、自動で内側に寄せられ画面外に出ない。指定したフォント
-   ファイルが見つからない・読み込めない場合は、文字が描かれないまま気づかずに
-   完成する事態を避けるため、その場でエラー終了する）を0.15秒でフェード
-   インさせ、効果音 `sfx`（`assets/sfx/{sfx}.wav`。`assets/sfx/` 内のファイルを
-   差し替えれば、差し替えた音がそのまま使われる。詳細は
-   [「効果音を差し替える」](#効果音を差し替える)）を鳴らす。`title_bounce: true` なら
-   フェードインと同じ0.15秒の間に130%→100%へ急停止イージングで縮む「はずむ」演出になる
-   （このときテロップの外接矩形の中心を基準に拡大縮小する）。`shadow` が無い場合、
+   フォールバックする。文字色は `title_color`（既定 `#FFFFFF`）／行ごとに `lines[].color`
+   で上書き可能、縁取りは自動選択（黒/白）または `title_outline_color` で明示指定。
+   `name` を `{"lines":[...]}` 形式にすると複数行になり、行ごとに文字サイズ倍率・
+   アンダーラインの有無・文字色・出現アクションを指定できる（行間は詰めずそのまま
+   積み上げる。複数行でも `title_pos`/`title_align` はブロック全体を1つの単位として
+   位置・寄せを決める）。`title_pos` が画面端にはみ出す位置を指しても、自動で内側に
+   寄せられ画面外に出ない。指定したフォントファイルが見つからない・読み込めない場合は、
+   文字が描かれないまま気づかずに完成する事態を避けるため、その場でエラー終了する）が
+   出現し始め、フリーズ側の効果音 `sfx`（`assets/sfx/{sfx}.wav`。`assets/sfx/` 内の
+   ファイルを差し替えれば、差し替えた音がそのまま使われる。詳細は
+   [「効果音を差し替える」](#効果音を差し替える)）が鳴る。`shadow` が無い場合、
    この「着地の瞬間」は①塗り完了と同時（従来どおり）
+
+   テロップの出現は**行ごとに独立**しており、`lines[].anim`（省略時は `bounce` または
+   `fade`、`title_bounce` の値に従う）・`anim_sec`（出現アニメの時間。省略時の既定は
+   `0.25`秒、`anim: "bounce"` のみ従来と同じ `0.15`秒）・`delay_sec`（1行目の出現開始
+   からの遅れ。2行目以降のみ有効、1行目は常に0）で行ごとに制御できます。1行目は
+   従来どおり「着地の瞬間」に出現し始め、2行目以降は `delay_sec` ぶん遅れてそれぞれ
+   独立に出現アニメーションを始めます。`slide_right`/`slide_left`/`slide_up`/`slide_down`
+   は画面外の対応する辺（`slide_right` なら右）から定位置までEase-Out Cubicで滑り込みます。
+   行ごとの `sfx` は、その行の出現開始（`delay_sec` 経過後）の瞬間に鳴ります
+   （フリーズ側の `sfx` とは独立に重ねて鳴らせます）。`lines[]` に `anim` を一切指定
+   しない場合は、全行が `title_bounce` に従って同時にバウンス／フェード（0.15秒）する
+   従来どおりの見た目になります（完全後方互換）
 4. **③静止（`hold_sec` 秒。既定2.0秒）**：カラー化＋テロップを保持する。テロップは
-   この着地の瞬間に出現し、③静止の終わりまで表示され続ける
+   行ごとの出現アニメーションが進行しつつ③静止の終わりまで表示され続ける
    （`logo.at: "last_freeze"` を指定した場合、時刻が一番遅いフリーズだけこの③静止が
    ラストロゴの表示に必要な長さを満たすよう自動的に延長される。詳細は次項）
 5. **影演出のスライドバック（`shadow` があり、かつこのフリーズでラストロゴを表示しない場合、
@@ -1021,7 +1075,10 @@ python render.py examples/sample.json --preview examples/preview.png   # brush_s
 # --preview <path> は <path> から拡張子を除いた名前を基準に、
 # <name>_before.png（影のスライド前＝影が隠れている）と
 # <name>_after.png（スライド後＝影が見えている）の2枚を出力する
-# （shadowが無効なプロジェクトでは2枚とも同じ内容になる）
+# （shadowが無効なプロジェクトでは2枚とも同じ内容になる）。
+# さらに、テロップが可視2行以上でそれぞれ出現アクションが設定されている場合は
+# <name>_lines.png（1行目が出現アニメを完了し、2行目以降がまだアニメ中の瞬間）も
+# 出力する（可視行が2行未満なら作られない）
 
 node tests/editor_logic.test.js   # index.html のJSON生成・ジョブ連携ロジックのユニットテスト（依存なし）
 
@@ -1030,7 +1087,10 @@ python tests/render_quality.test.py   # render.pyの品質回帰テスト（音�
                                        # 失敗時のエラー終了・shadow・mask=auto/auto+brush・
                                        # ①②③の3段時間・color_source/shadow.sourceの混在・
                                        # ロゴの自動クロップ/着地カーブ/sfx_tail・旧キーのみの
-                                       # JSONの後方互換。要ffmpeg/numpy、初回はダミーVFR動画を
+                                       # JSONの後方互換・reveal_sec=0・テロップ文字色/自動縁取り色・
+                                       # 行ごとの出現アクション(anim/anim_sec/delay_sec)と行ごとのsfx・
+                                       # 旧形式(anim省略)とのビット単位の後方互換。
+                                       # 要ffmpeg/numpy、初回はダミーVFR動画を
                                        # 生成。mask=auto系・混在検証はrembgが無ければ自動でスキップされる）
 
 # 任意：extract.py単体の検証（要 pip install -r requirements-extract.txt）
@@ -1049,7 +1109,9 @@ node tests/portrait_landscape_freezes.playwright.test.mjs # 縦動画・横動�
 node tests/brush_shape.playwright.test.mjs      # ブラシ形状選択・筆先スタンプ描画のE2E
 node tests/film_logo_bounce.playwright.test.mjs # freeze_sec・テロップバウンス・ラストロゴ設定のE2E
 node tests/title_pos_drag.playwright.test.mjs   # テロップのドラッグ移動・サイズ/寄せ変更のE2E
-node tests/title_lines_editor.playwright.test.mjs # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・フォント選択）のE2E
+node tests/title_lines_editor.playwright.test.mjs # テロップ複数行入力（行の追加/削除・サイズ/アンダーライン・
+                                                    #   文字色・行ごとの出現アクション・フォント選択・
+                                                    #   reveal_secの「即時」表示）のE2E
 node tests/mask_shadow_ui.playwright.test.mjs   # 切り抜き方法セレクタ・足す/消すトグル・影（スライド演出含む）/revealのE2E、
                                                  # サーバー確認プレビュー（extract.ymlのdispatch・進捗表示・
                                                  # 「確認せずに進む」・confirmedAlphaの記録、GitHub APIはモック）
