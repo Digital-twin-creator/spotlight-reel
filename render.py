@@ -2608,12 +2608,17 @@ def logo_spin_transform(logo_bgr, logo_alpha, angle_deg, perspective,
       - perspective: 0で平面的な幅の縮小のみ（台形変形なし）、1で強い遠近
         （視点距離 = ロゴ幅 × view_distance_ratio）
     戻り値: (patch_bgr, patch_alpha, offset_x, offset_y)。patch は角度に応じた
-    バウンディングボックスサイズのRGBA画像。offset_x/yは元画像の中心を基準にした
-    patch左上のオフセット（元画像ピクセル単位。呼び出し側で中心合わせに使える）。
+    バウンディングボックスサイズのRGBA画像。offset_x/yは、回転軸（元画像の中心。
+    常にローカル座標(0, 0)）を基準にしたpatch左上の位置（元画像ピクセル単位）。
+    呼び出し側は「軸を置きたい位置 + offset_x/y×表示スケール」をpatchの描画開始位置
+    にすることで、perspective>0で生じる台形の非対称なズレによらず回転軸を固定できる
+    （patch自身のバウンディングボックス中心で単純に中央合わせすると、非対称な場合に
+    軸がフレーム中心からズレて見える＝実機で報告された「90度付近で細い線が中央では
+    なく片側に寄る」不具合の原因だったため、必ずこのoffsetを使うこと）。
     """
     h, w = logo_bgr.shape[:2]
     if w <= 0 or h <= 0:
-        return logo_bgr, logo_alpha, 0.0, 0.0
+        return logo_bgr, logo_alpha, -w / 2.0, -h / 2.0
 
     theta = float(angle_deg) % 360.0
     if theta <= 90.0:
@@ -2630,12 +2635,14 @@ def logo_spin_transform(logo_bgr, logo_alpha, angle_deg, perspective,
     def flip_alpha(a):
         return cv2.flip(a[:, :, 0], 1)[:, :, None]
 
+    hw0, hh0 = w / 2.0, h / 2.0
     if phi_deg < 1e-6:
         # 無回転（0度、または180度＝裏面が正面を向く瞬間）：再サンプリングせずそのまま返す。
-        # face_flip=True（180度）の場合は左右反転だけ行う（裏面表示のため）
+        # face_flip=True（180度）の場合は左右反転だけ行う（裏面表示のため）。
+        # 左右反転してもバウンディングボックス自体は元画像と同じ大きさ・中心のまま
         if face_flip:
-            return cv2.flip(logo_bgr, 1), flip_alpha(logo_alpha), 0.0, 0.0
-        return logo_bgr, logo_alpha, 0.0, 0.0
+            return cv2.flip(logo_bgr, 1), flip_alpha(logo_alpha), -hw0, -hh0
+        return logo_bgr, logo_alpha, -hw0, -hh0
 
     phi = math.radians(phi_deg)
     hw, hh = w / 2.0, h / 2.0
@@ -2671,8 +2678,12 @@ def logo_spin_transform(logo_bgr, logo_alpha, angle_deg, perspective,
     patch_bgr = warped[:, :, :3]
     patch_alpha = (warped[:, :, 3:4].astype(np.float32)) / 255.0
 
-    offset_x = min_x + hw
-    offset_y = min_y + hh
+    # patchの左上(0, 0)は、回転軸（ローカル座標(0, 0)＝元画像の中心）から見ると
+    # (min_x, min_y)の位置にある。perspective>0だと台形の重心がバウンディングボックス
+    # 中心からズレる（min_x, max_xが非対称になる）ため、単純にpatch自身の大きさで
+    # 中央合わせするのではなく、この値をそのまま呼び出し側の配置計算に使う必要がある
+    offset_x = min_x
+    offset_y = min_y
     return patch_bgr, patch_alpha, offset_x, offset_y
 
 
@@ -2812,7 +2823,10 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_
     scale=1.0 が最終的な表示サイズ。opacity(0〜1)はロゴ全体の不透明度（着地時のフェードイン用）。
     width_ratio は logo.width_ratio（既定LOGO_WIDTH_RATIO_DEFAULT）で上書きできる。
     spin_angle_deg!=0 なら、logo_spin_transform()でY軸回転させた見た目に差し替えてから
-    合成する（中央合わせのため、回転で生じる台形の重心ズレは特に補正不要）。
+    合成する。回転軸（元ロゴの中心）は常にフレーム中央(W//2, H//2)に固定されるよう、
+    logo_spin_transform()が返すoffset_x/yを使って配置する（perspective>0では台形の
+    見た目の重心がバウンディングボックス中心からズレるため、patch自身の大きさだけで
+    単純に中央合わせすると軸がフレーム中心から片側にズレてしまう）。
     """
     if logo_bgr is None or opacity <= 0:
         return frame
@@ -2821,8 +2835,10 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_
         return frame
 
     base_scale = (W * width_ratio) / lw
+    offset_x, offset_y = -lw / 2.0, -lh / 2.0
     if abs(spin_angle_deg) > 1e-6:
-        src_bgr, src_alpha, _ox, _oy = logo_spin_transform(logo_bgr, logo_alpha, spin_angle_deg, spin_perspective)
+        src_bgr, src_alpha, offset_x, offset_y = logo_spin_transform(
+            logo_bgr, logo_alpha, spin_angle_deg, spin_perspective)
     else:
         src_bgr, src_alpha = logo_bgr, logo_alpha
     ph, pw = src_bgr.shape[:2]
@@ -2838,7 +2854,8 @@ def composite_logo(frame, logo_bgr, logo_alpha, W, H, scale, opacity=1.0, width_
     resized_alpha = resized_alpha * float(np.clip(opacity, 0.0, 1.0))
 
     cx, cy = W // 2, H // 2
-    x0, y0 = cx - new_w // 2, cy - new_h // 2
+    x0 = cx + int(round(offset_x * final_scale))
+    y0 = cy + int(round(offset_y * final_scale))
     x1, y1 = x0 + new_w, y0 + new_h
     sx0, sy0 = max(0, -x0), max(0, -y0)
     sx1, sy1 = new_w - max(0, x1 - W), new_h - max(0, y1 - H)
@@ -3064,10 +3081,12 @@ def resolve_watermark_config(wm_cfg):
 
 def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, spin_perspective=0.4):
     """
-    frameの指定コーナー（cfg["position"]）に透かしロゴを合成する。spin_angle_deg!=0なら
-    logo_spin_transform()でY軸回転させた見た目に差し替えてから合成する。
-    アンカーした角は、回転後のバウンディングボックスを基準に毎フレーム計算し直すため、
-    見た目としては引き続きその角から縮む・伸びるように見える。
+    frameの指定コーナー（cfg["position"]）付近に透かしロゴを合成する。回転の軸（透かし
+    ロゴ自身の中心）は、無回転時にcfg["position"]・cfg["margin"]から決まる基準位置に
+    フレーム内でずっと固定される。spin_angle_deg!=0なら logo_spin_transform()でY軸回転
+    させた見た目に差し替えてから、その軸位置を基準にoffset_x/yで配置する（perspective>0
+    では台形の見た目の重心がバウンディングボックス中心からズレるため、回転後のバウンディング
+    ボックスをそのまま角に合わせて置くと軸がフレーム内で片側にズレて見えてしまう）。
     """
     if wm_bgr is None or cfg["opacity"] <= 0:
         return frame
@@ -3076,8 +3095,27 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, 
         return frame
     base_scale = (W * cfg["width_ratio"]) / lw
 
+    # 無回転時の基準サイズ・位置から、回転軸として使う固定中心点を求める
+    # （spin中もこの中心点はフレーム内で動かない）
+    ref_w = max(1, int(round(lw * base_scale)))
+    ref_h = max(1, int(round(lh * base_scale)))
+    margin_px = int(round(cfg["margin"] * W))
+    position = cfg["position"]
+    if position == "top_left":
+        ref_x0, ref_y0 = margin_px, margin_px
+    elif position == "top_right":
+        ref_x0, ref_y0 = W - margin_px - ref_w, margin_px
+    elif position == "bottom_left":
+        ref_x0, ref_y0 = margin_px, H - margin_px - ref_h
+    else:  # bottom_right
+        ref_x0, ref_y0 = W - margin_px - ref_w, H - margin_px - ref_h
+    axis_x = ref_x0 + ref_w / 2.0
+    axis_y = ref_y0 + ref_h / 2.0
+
+    offset_x, offset_y = -lw / 2.0, -lh / 2.0
     if abs(spin_angle_deg) > 1e-6:
-        src_bgr, src_alpha, _ox, _oy = logo_spin_transform(wm_bgr, wm_alpha, spin_angle_deg, spin_perspective)
+        src_bgr, src_alpha, offset_x, offset_y = logo_spin_transform(
+            wm_bgr, wm_alpha, spin_angle_deg, spin_perspective)
     else:
         src_bgr, src_alpha = wm_bgr, wm_alpha
     ph, pw = src_bgr.shape[:2]
@@ -3091,16 +3129,8 @@ def composite_watermark(frame, wm_bgr, wm_alpha, W, H, cfg, spin_angle_deg=0.0, 
     resized_alpha = cv2.resize(src_alpha[:, :, 0], (new_w, new_h), interpolation=interp)[:, :, None]
     resized_alpha = resized_alpha * cfg["opacity"]
 
-    margin_px = int(round(cfg["margin"] * W))
-    position = cfg["position"]
-    if position == "top_left":
-        x0, y0 = margin_px, margin_px
-    elif position == "top_right":
-        x0, y0 = W - margin_px - new_w, margin_px
-    elif position == "bottom_left":
-        x0, y0 = margin_px, H - margin_px - new_h
-    else:  # bottom_right
-        x0, y0 = W - margin_px - new_w, H - margin_px - new_h
+    x0 = int(round(axis_x + offset_x * base_scale))
+    y0 = int(round(axis_y + offset_y * base_scale))
     x1, y1 = x0 + new_w, y0 + new_h
     sx0, sy0 = max(0, -x0), max(0, -y0)
     sx1, sy1 = new_w - max(0, x1 - W), new_h - max(0, y1 - H)
@@ -3724,12 +3754,17 @@ def save_logo_spin_preview_pngs(logo_bgr, logo_alpha, perspective, base_path):
     ext = ext or ".png"
     os.makedirs(os.path.dirname(os.path.abspath(base_path)) or ".", exist_ok=True)
     paths = []
+    axis_x, axis_y = canvas_w / 2.0, canvas_h / 2.0
     for angle in (45, 90, 135):
-        patch_bgr, patch_alpha, _ox, _oy = logo_spin_transform(logo_bgr, logo_alpha, angle, perspective)
+        patch_bgr, patch_alpha, offset_x, offset_y = logo_spin_transform(logo_bgr, logo_alpha, angle, perspective)
         canvas_bgr = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
         canvas_alpha = np.zeros((canvas_h, canvas_w, 1), dtype=np.float32)
         ph, pw = patch_bgr.shape[:2]
-        x0, y0 = max(0, (canvas_w - pw) // 2), max(0, (canvas_h - ph) // 2)
+        # 回転軸（offset_x/y）がキャンバス中央に来るよう配置する（patch自身の
+        # バウンディングボックスをそのまま中央合わせすると、perspective>0で
+        # 軸がズレて見えるため）
+        x0 = max(0, int(round(axis_x + offset_x)))
+        y0 = max(0, int(round(axis_y + offset_y)))
         x1, y1 = min(canvas_w, x0 + pw), min(canvas_h, y0 + ph)
         pw_c, ph_c = x1 - x0, y1 - y0
         if pw_c > 0 and ph_c > 0:

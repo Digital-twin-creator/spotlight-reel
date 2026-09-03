@@ -2458,8 +2458,8 @@ try:
     sp_h, sp_w = spin_test_bgr.shape[:2]
 
     p0_bgr, p0_alpha, p0_ox, p0_oy = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 0.0, 0.4)
-    check(p0_bgr.shape[:2] == (sp_h, sp_w) and p0_ox == 0.0 and p0_oy == 0.0,
-          "0度は無回転（元画像と同じサイズ・オフセット0）")
+    check(p0_bgr.shape[:2] == (sp_h, sp_w) and p0_ox == -sp_w / 2.0 and p0_oy == -sp_h / 2.0,
+          "0度は無回転（元画像と同じサイズ。オフセットは軸(中心)から見たpatch左上の位置＝(-幅/2, -高さ/2)）")
 
     p90_bgr, p90_alpha, _ox90, _oy90 = render.logo_spin_transform(spin_test_bgr, spin_test_alpha, 90.0, 0.4)
     check(p90_bgr.shape[1] < sp_w * 0.15,
@@ -2508,6 +2508,70 @@ try:
           "perspective=0でも高さ（バウンディングボックス）は元のまま＝台形変形しない（平面的な幅の縮小のみ）")
     check(tilt_persp > tilt_flat,
           f"perspective=1はperspective=0より強い台形変形（遠近）になる: flat_tilt={tilt_flat} persp_tilt={tilt_persp}")
+
+    print("")
+    print("=== spin：回転軸がロゴ／透かしロゴ自身の中心に固定される（実機バグの回帰） ===")
+    # 実機で「90度付近でロゴが左端に細い線として潰れる」と報告されたバグ：
+    # perspective>0では台形の非対称な面積分布（近い辺が大きく映る）により、警告と違って
+    # 「描画されたロゴ画素の重心」は正しい実装でも回転軸そのものとは数px〜十数pxずれる
+    # （台形の性質上そうなるのが正しい遠近表現であり、バグではない）。そのため「軸が動いて
+    # いないか」を検証するには、単純な画素重心ではなく、元画像のちょうど中心に置いた
+    # 目印（マーカー）が、回転してもフレーム内の同じ位置に留まるかを直接追跡する
+    axis_lh, axis_lw = 100, 300
+    axis_logo_bgr = np.full((axis_lh, axis_lw, 3), 255, dtype=np.uint8)
+    axis_logo_alpha = np.ones((axis_lh, axis_lw, 1), dtype=np.float32)
+    mk_half = 6
+    mcy, mcx = axis_lh // 2, axis_lw // 2
+    axis_logo_bgr[mcy - mk_half:mcy + mk_half, mcx - mk_half:mcx + mk_half] = (0, 0, 255)  # 赤マーカー(BGR)
+
+    def marker_centroid_x(frame_bgr, marker_bgr=(0, 0, 255), thresh=60):
+        diff = np.abs(frame_bgr.astype(np.int32) - np.array(marker_bgr, dtype=np.int32)).sum(axis=2)
+        mask = diff < thresh
+        if not mask.any():
+            return None
+        ys, xs = np.nonzero(mask)
+        return float(xs.mean())
+
+    axis_W, axis_H = 800, 1200
+    axis_frame = np.zeros((axis_H, axis_W, 3), dtype=np.uint8)
+
+    logo_axis_target = axis_W // 2
+    for angle in (45.0, 135.0):
+        out = render.composite_logo(axis_frame, axis_logo_bgr, axis_logo_alpha, axis_W, axis_H, 1.0,
+                                     opacity=1.0, width_ratio=0.3, spin_angle_deg=angle, spin_perspective=0.4)
+        mx = marker_centroid_x(out)
+        check(mx is not None and abs(mx - logo_axis_target) <= 2,
+              f"composite_logo: {angle}度でも回転軸（ロゴ中心のマーカー）はフレーム中心付近のまま "
+              f"（実機バグ「90度付近で細い線が中央でなく片側に寄る」の回帰確認）: "
+              f"marker_x={mx} target={logo_axis_target}")
+
+    # 90度ちょうどは cos(90°)≈0 によりcv2.warpPerspectiveの出力が幅ほぼ0まで縮退し、
+    # 補間によってマーカーの色そのものが失われてしまう（このファイルの他のspinテストが
+    # 90度でなく80度を使っているのと同じ、既知のサンプリング限界）。そのため90度は
+    # logo_spin_transform自身が返す幾何情報（軸オフセット）で対称性を直接検証する
+    p90_axis_bgr, p90_axis_alpha, p90_axis_ox, p90_axis_oy = render.logo_spin_transform(
+        axis_logo_bgr, axis_logo_alpha, 90.0, 0.4)
+    check(abs(p90_axis_ox) < 1e-6,
+          f"logo_spin_transform: 90度は幅がほぼ0の対称な細い線になり、軸のオフセットもほぼ0（中央のまま。"
+          f"片側に寄らない）: offset_x={p90_axis_ox}")
+
+    # watermark側も同じ軸固定ロジックを使う（無回転時の位置を基準にして、回転中もその
+    # 位置＝軸から動かないことを確認する。コーナーに寄せて配置されるwatermarkでも、
+    # 回転の軸自体はそのバッジ自身の中心に固定される）
+    wm_cfg_axis = render.resolve_watermark_config({
+        "image": "dummy.png", "position": "top_left", "width_ratio": 0.3, "margin": 0.05,
+    })
+    wm_baseline_frame = render.composite_watermark(axis_frame, axis_logo_bgr, axis_logo_alpha, axis_W, axis_H,
+                                                     wm_cfg_axis, spin_angle_deg=0.0, spin_perspective=0.4)
+    wm_baseline_x = marker_centroid_x(wm_baseline_frame)
+    check(wm_baseline_x is not None, "composite_watermark: 無回転時にマーカーの基準位置を取得できた")
+    for angle in (45.0, 135.0):
+        out = render.composite_watermark(axis_frame, axis_logo_bgr, axis_logo_alpha, axis_W, axis_H,
+                                          wm_cfg_axis, spin_angle_deg=angle, spin_perspective=0.4)
+        mx = marker_centroid_x(out)
+        check(mx is not None and wm_baseline_x is not None and abs(mx - wm_baseline_x) <= 2,
+              f"composite_watermark: {angle}度でも回転軸（無回転時のマーカー位置={wm_baseline_x}）から動かない: "
+              f"marker_x={mx}")
 
     print("")
     print("=== spin：logo.spin（ラストロゴ）の設定解決とタイミング ===")
