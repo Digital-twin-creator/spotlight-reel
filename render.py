@@ -29,7 +29,7 @@ import wave
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ---------------------------------------------------------------------------
 # 定数・既定値
@@ -70,6 +70,13 @@ DEFAULT_STYLE = {
     "title_color": "#FFFFFF",     # テロップ文字色の全体既定（#RRGGBB。行ごとにlines[].colorで上書き可）
     "title_outline_color": None,  # 縁取り/ドロップシャドウ色の明示上書き（#RRGGBB）。
                                    # 未指定(None)なら行の文字色の明るさから黒/白を自動選択する
+    "text_backing": "outline",    # none | outline | shadow | box | band（行ごとにlines[].text_backing
+                                   # で上書き可）。テロップの可読性を上げる背後の加工。詳細はresolve_text_backing参照
+    "auto_contrast": True,        # backing=outline適用時、文字色と背景の平均輝度のコントラスト比が
+                                   # 4.5未満ならその行だけ自動でboxに格上げする
+    # text_backing_optionsもここには持たせない（shadow/background_optionsと同じ理由。JSON側に
+    # 無ければresolve_text_backing_options()がTEXT_BACKING_OPTIONS_DEFAULTSを補う）。
+    # {"color": "#RRGGBB", "opacity": 0〜1, "radius": 文字高比, "padding": 文字高比}（box/bandで使用）
     "brush_fade_sec": 0.3,        # ブラシ完了後、先端に残る白い絵の具をフェードアウトさせる時間（秒）。0でフェードなし
     "audio_during_freeze": "mute",  # mute | keep
     # mask は廃止（color_source/shadow.sourceに分離）。旧JSONとの後方互換のためだけに
@@ -1093,11 +1100,20 @@ def resolve_mask_style_options(fz):
     return opts
 
 
+# セル平均アルファがこの範囲外（ほぼ完全に不透明／透明）なら、そのセルは境界をまたいで
+# いない＝人物の内部／外部の真っ只中とみなし、halftone/pixelの加工対象から外す
+# （縁だけをドット化・ブロック化し、人物の内側や背景そのものを意図せず加工しないため）。
+MASK_STYLE_EDGE_CELL_MIN = 0.02
+MASK_STYLE_EDGE_CELL_MAX = 0.98
+
+
 def render_mask_style_halftone(alpha_u8, options, W):
     """
-    アルファの中間値をドットスクリーン化する（新聞印刷の網点と同じ考え方をアルファに適用）。
-    完全に不透明なセルはほぼセル全体を覆う大きなドットになり、境界の半透明セルは小さな
-    ドットになるため、縁がドットに溶けたような見た目になる。scaleがドット間隔。
+    アルファの中間値（＝人物の縁：セルが人物の内部と外部にまたがっている部分）だけを
+    ドットスクリーン化する（新聞印刷の網点と同じ考え方をアルファに適用）。完全に不透明な
+    セル（人物の内側）はそのままベタ塗り、完全に透明なセル（背景側）は何も描かず、
+    境界のセルだけをドット径で表現するため、縁だけがドットに溶けたような見た目になり、
+    人物の内側は無加工のまま保たれる。scaleがドット間隔。
     """
     H, Wf = alpha_u8.shape
     cell = max(3, int(round(options["scale"] * W)))
@@ -1107,27 +1123,54 @@ def render_mask_style_halftone(alpha_u8, options, W):
     canvas = np.zeros((H, Wf), dtype=np.uint8)
     max_r = cell * 0.5 * 0.95
     for gy in range(gh):
-        cy = int(gy * cell + cell / 2)
-        if cy >= H:
+        cy0, cy1 = gy * cell, min(H, (gy + 1) * cell)
+        if cy0 >= H:
             continue
+        cy = int(gy * cell + cell / 2)
         for gx in range(gw):
-            cx = int(gx * cell + cell / 2)
-            if cx >= Wf:
+            cx0, cx1 = gx * cell, min(Wf, (gx + 1) * cell)
+            if cx0 >= Wf:
                 continue
-            r = int(round(max_r * float(small[gy, gx])))
+            a = float(small[gy, gx])
+            if a >= MASK_STYLE_EDGE_CELL_MAX:
+                canvas[cy0:cy1, cx0:cx1] = 255   # 人物の内側：無加工でベタ塗りのまま
+                continue
+            if a <= MASK_STYLE_EDGE_CELL_MIN:
+                continue                          # 背景側：何も描かない（canvasは初期値0のまま）
+            cx = int(gx * cell + cell / 2)
+            r = int(round(max_r * a))
             if r >= 1:
                 cv2.circle(canvas, (cx, cy), r, 255, -1, lineType=cv2.LINE_AA)
     return canvas
 
 
 def render_mask_style_pixel(alpha_u8, options, W):
-    """アルファをscaleの格子で量子化する（縮小平均→最近傍拡大でブロック状の縁になる）"""
+    """
+    アルファをscaleの格子で量子化する（縮小平均→最近傍拡大でブロック状にする）が、
+    人物の内部・背景の真っ只中（セル平均がほぼ完全に不透明／透明）は元のアルファのまま
+    素通しし、境界をまたぐセルだけをブロック化する（縁だけがブロック状になり、
+    人物の内側は無加工のまま保たれる）。
+    """
     H, Wf = alpha_u8.shape
     cell = max(2, int(round(options["scale"] * W)))
     gw = max(1, Wf // cell + 1)
     gh = max(1, H // cell + 1)
     small = cv2.resize(alpha_u8, (gw, gh), interpolation=cv2.INTER_AREA)
-    return cv2.resize(small, (Wf, H), interpolation=cv2.INTER_NEAREST)
+    small_f = small.astype(np.float32) / 255.0
+    canvas = alpha_u8.copy()
+    for gy in range(gh):
+        cy0, cy1 = gy * cell, min(H, (gy + 1) * cell)
+        if cy0 >= H:
+            continue
+        for gx in range(gw):
+            cx0, cx1 = gx * cell, min(Wf, (gx + 1) * cell)
+            if cx0 >= Wf:
+                continue
+            a = float(small_f[gy, gx])
+            if a <= MASK_STYLE_EDGE_CELL_MIN or a >= MASK_STYLE_EDGE_CELL_MAX:
+                continue   # 内部・背景の真っ只中のセルは無加工のまま
+            canvas[cy0:cy1, cx0:cx1] = small[gy, gx]
+    return canvas
 
 
 def render_mask_style_rough(alpha_u8, options, W):
@@ -1702,8 +1745,10 @@ def resolve_title_lines(fz, json_dir=None):
       「行のリスト」として扱える（分岐を減らすため）。
     """
     default_color = validate_hex_color(fz.get("title_color"), DEFAULT_STYLE["title_color"], "title_color")
+    default_backing = resolve_text_backing(fz.get("text_backing", DEFAULT_STYLE["text_backing"]))
     empty_line = {"text": "", "size": 1.0, "underline": False, "color": default_color,
-                  "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}
+                  "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None,
+                  "backing": default_backing}
     name = fz.get("name")
     if isinstance(name, dict):
         lines_in = name.get("lines") or []
@@ -1727,16 +1772,24 @@ def resolve_title_lines(fz, json_dir=None):
                 sfx = (resolve_sfx_spec(line.get("sfx"), json_dir, SFX_ALIGNS_FREEZE,
                                          f"{context_label}, t={fz.get('time', 0.0):.2f}s")
                        if json_dir is not None else None)
+                backing_raw = line.get("text_backing")
+                if backing_raw is not None and backing_raw not in TEXT_BACKINGS:
+                    warn(f"{context_label}.text_backing='{backing_raw}' は未知の値です。"
+                         "全体設定のtext_backingに従います。")
+                    backing_raw = None
+                backing = backing_raw if backing_raw is not None else default_backing
             else:
                 text = str(line)
                 size, underline, color, align_raw = 1.0, False, default_color, None
                 anim, anim_sec, delay_sec, sfx = None, None, 0.0, None
+                backing = default_backing
             lines.append({"text": text, "size": max(0.05, size), "underline": underline,
                           "color": color, "align": align_raw, "anim": anim, "anim_sec": anim_sec,
-                          "delay_sec": delay_sec, "sfx": sfx})
+                          "delay_sec": delay_sec, "sfx": sfx, "backing": backing})
         return lines or [dict(empty_line)]
     return [{"text": str(name or ""), "size": 1.0, "underline": False, "color": default_color,
-             "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}]
+             "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None,
+             "backing": default_backing}]
 
 
 def resolve_title_font_path(fz):
@@ -1790,6 +1843,99 @@ def resolve_title_align(align):
     return align
 
 
+# ---------------------------------------------------------------------------
+# テロップの可読性（text_backing）：文字の背後に敷く加工。none/outline/shadow/box/band。
+# ---------------------------------------------------------------------------
+
+TEXT_BACKINGS = ("none", "outline", "shadow", "box", "band")
+DEFAULT_TEXT_BACKING = "outline"
+# text_backing_optionsの既定値。radius/paddingは行の文字高（ascent+descent）に対する比率。
+TEXT_BACKING_OPTIONS_DEFAULTS = {"color": "#000000", "opacity": 0.55, "radius": 0.25, "padding": 0.35}
+# WCAG 2.0の推奨コントラスト比（AA基準・通常テキスト）。これを下回ったらbox座布団に格上げする。
+TEXT_BACKING_AUTO_CONTRAST_MIN = 4.5
+
+
+def resolve_text_backing(mode):
+    """未知の値・未指定は既定のoutlineにフォールバックする"""
+    if mode not in TEXT_BACKINGS:
+        if mode is not None:
+            warn(f"text_backing='{mode}' は未知の値です。{DEFAULT_TEXT_BACKING} として扱います。")
+        return DEFAULT_TEXT_BACKING
+    return mode
+
+
+def resolve_text_backing_options(fz):
+    """text_backing_options（{"color","opacity","radius","padding"}）を解決する。
+    JSON側に無ければTEXT_BACKING_OPTIONS_DEFAULTSをそのまま使う（none/outline/shadowでは
+    参照されないため実質無害）。"""
+    opts = dict(TEXT_BACKING_OPTIONS_DEFAULTS)
+    raw = fz.get("text_backing_options")
+    if isinstance(raw, dict):
+        opts.update(raw)
+    opts["color"] = validate_hex_color(opts.get("color"), TEXT_BACKING_OPTIONS_DEFAULTS["color"],
+                                        "text_backing_options.color")
+    opts["opacity"] = float(np.clip(opts.get("opacity") if opts.get("opacity") is not None
+                                     else TEXT_BACKING_OPTIONS_DEFAULTS["opacity"], 0.0, 1.0))
+    opts["radius"] = max(0.0, float(opts.get("radius") or TEXT_BACKING_OPTIONS_DEFAULTS["radius"]))
+    opts["padding"] = max(0.0, float(opts.get("padding") or TEXT_BACKING_OPTIONS_DEFAULTS["padding"]))
+    return opts
+
+
+def relative_luminance_srgb(rgb_0_255):
+    """WCAG 2.0の相対輝度（0〜1）。rgb_0_255は0〜255の(r,g,b)"""
+    def channel(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb_0_255
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast_ratio(rgb_a, rgb_b):
+    """WCAG 2.0のコントラスト比（1〜21、値が大きいほど見分けやすい）"""
+    la = relative_luminance_srgb(rgb_a)
+    lb = relative_luminance_srgb(rgb_b)
+    lighter, darker = max(la, lb), min(la, lb)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def sample_bg_mean_rgb(bg_bgr, bbox, W, H):
+    """bg_bgr（HxWx3のBGR画像）のbbox=(x0,y0,x1,y1)領域の平均色をRGBタプルで返す"""
+    x0 = max(0, min(W - 1, int(round(bbox[0]))))
+    x1 = max(x0 + 1, min(W, int(round(bbox[2]))))
+    y0 = max(0, min(H - 1, int(round(bbox[1]))))
+    y1 = max(y0 + 1, min(H, int(round(bbox[3]))))
+    region = bg_bgr[y0:y1, x0:x1]
+    if region.size == 0:
+        return (128, 128, 128)
+    mean_bgr = region.reshape(-1, 3).mean(axis=0)
+    return (float(mean_bgr[2]), float(mean_bgr[1]), float(mean_bgr[0]))
+
+
+def render_text_box_layer(draw, bbox, size_px, opts, W, H, full_width=False):
+    """box/bandの半透明「座布団」を描く（bboxは(x0,y0,x1,y1)、full_width=Trueなら画面幅いっぱいの帯にする）"""
+    padding = opts["padding"] * size_px
+    radius = opts["radius"] * size_px
+    x0, y0, x1, y1 = bbox
+    if full_width:
+        x0, x1 = 0, W
+    else:
+        x0 -= padding
+        x1 += padding
+    y0 -= padding
+    y1 += padding
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(W, x1), min(H, y1)
+    if x1 <= x0 or y1 <= y0:
+        return
+    color_rgb = hex_to_rgb(opts["color"])
+    alpha = int(round(255 * opts["opacity"]))
+    fill = color_rgb + (alpha,)
+    if full_width or radius <= 0:
+        draw.rectangle((x0, y0, x1, y1), fill=fill)
+    else:
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill)
+
+
 def clamp_box_to_canvas(bbox, W, H):
     """外接矩形bbox=(x0,y0,x1,y1)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す"""
     x0, y0, x1, y1 = bbox
@@ -1807,7 +1953,8 @@ def clamp_box_to_canvas(bbox, W, H):
 
 
 def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
-                              pos_ratio=(0.5, 0.78), align="center", outline_color=None):
+                              pos_ratio=(0.5, 0.78), align="center", outline_color=None,
+                              backing_options=None, auto_contrast=True, bg_bgr=None):
     """
     テロップ（複数行対応）を行ごとに別々のレイヤーとして描き、
     [{"text","bgr","alpha","cx","cy"}, ...]（可視行の順）を返す。可視行が無ければ空リスト。
@@ -1832,6 +1979,12 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
 
     フォントが読み込めていない場合は、従来どおりここで即座にエラー終了させる
     （OpenCVの既定フォントへ黙ってフォールバックしない）。
+
+    line.get("backing")（resolve_title_lines()が解決済み）に従い、文字の背後に
+    none/outline/shadow/box/bandのいずれかを敷く。backing="outline"かつauto_contrast=Trueの
+    ときは、bg_bgr（このフリーズの背景画像。行の背後領域の平均輝度サンプルに使う）と
+    文字色のコントラスト比がTEXT_BACKING_AUTO_CONTRAST_MIN未満ならその行だけboxに格上げする
+    （bg_bgrが無ければコントラスト判定自体をスキップし、指定どおりoutlineのまま描く）。
     """
     visible_lines = [line for line in (lines or []) if line.get("text")]
     if not visible_lines:
@@ -1860,6 +2013,7 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
             "text_rgb": text_rgb,
             "outline_rgb": outline_color if outline_color is not None else auto_outline_rgb(text_rgb),
             "line_align": resolve_title_align(line_align_raw) if line_align_raw else None,
+            "backing": resolve_text_backing(line.get("backing")),
         })
 
     align = resolve_title_align(align)
@@ -1896,13 +2050,12 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     block_top += dy
 
     shadow_alpha = 130   # 縁取り/ドロップシャドウの不透明度（0〜255。色は黒/白どちらでも同じ値を使う）
+    resolved_backing_opts = backing_options or TEXT_BACKING_OPTIONS_DEFAULTS
     anchor_h_by_align = {"left": "l", "center": "m", "right": "r"}
     cursor_y = block_top
     results = []
     for li in line_infos:
         size_px = li["size_px"]
-        shadow_offset = max(1, size_px // 20)
-        outline_fill = li["outline_rgb"] + (shadow_alpha,)
         text_fill = li["text_rgb"] + (255,)
 
         # 行ごとの寄せ（未指定ならブロック全体のalign）を、ブロック幅（block_left〜block_right）
@@ -1916,12 +2069,44 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
             line_ref_x = (block_left + block_right) / 2.0
         anchor = anchor_h_by_align[line_align] + "a"  # 例："la"（左・アセンダー基準）
 
+        # 実際の描画前に必要な仮のbbox（座布団の位置決め・コントラスト判定用。
+        # PILのtextbboxはキャンバスに依存せず求まるためprobeで先に計算できる）
+        probe_bbox = probe.textbbox((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
+
+        backing = li.get("backing") or DEFAULT_TEXT_BACKING
+        if backing == "outline" and auto_contrast and bg_bgr is not None:
+            bg_mean_rgb = sample_bg_mean_rgb(bg_bgr, probe_bbox, W, H)
+            if contrast_ratio(li["text_rgb"], bg_mean_rgb) < TEXT_BACKING_AUTO_CONTRAST_MIN:
+                backing = "box"   # コントラスト不足：文字だけでは読みにくいので座布団に格上げ
+
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
-        # 文字色＋縁取り/ドロップシャドウ（先に影を描き、後から本体の文字を重ねる）
-        draw.text((line_ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
-                  anchor=anchor, fill=outline_fill)
-        draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+
+        if backing in ("box", "band"):
+            # 座布団（box=行ごとの角丸矩形／band=画面幅いっぱいの帯）を先に敷き、文字は無加工で重ねる
+            render_text_box_layer(draw, probe_bbox, size_px, resolved_backing_opts, W, H,
+                                   full_width=(backing == "band"))
+            draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        elif backing == "shadow":
+            # 通常の縁取りより強いドロップシャドウ（オフセット＋ぼかし）を先に描いてから重ねる
+            shadow_offset = max(1, int(round(size_px * 0.06)))
+            shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            ImageDraw.Draw(shadow_layer).text(
+                (line_ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
+                anchor=anchor, fill=li["outline_rgb"] + (200,))
+            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(max(1.0, size_px * 0.05)))
+            layer = Image.alpha_composite(layer, shadow_layer)
+            draw = ImageDraw.Draw(layer)
+            draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        elif backing == "none":
+            draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        else:
+            # outline（既定）：PILのstroke_width/stroke_fillで文字の輪郭全周に線を描く
+            # （太さは文字高の8%。以前の斜めオフセットの疑似シャドウより縁取りとして自然）
+            stroke_width = max(1, int(round(size_px * 0.08)))
+            draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill,
+                      stroke_width=stroke_width, stroke_fill=li["outline_rgb"] + (shadow_alpha,))
+
         bbox = draw.textbbox((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
         if li["underline"]:
             underline_h = max(1, round(size_px * 0.06))
@@ -2645,8 +2830,12 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     title_lines = plan.get("title_lines") or resolve_title_lines(fz)
     visible_title_lines = [line for line in title_lines if line.get("text")]
     outline_color = resolve_title_outline_color(fz)
+    text_backing_opts = resolve_text_backing_options(fz)
+    auto_contrast = bool(fz.get("auto_contrast", DEFAULT_STYLE["auto_contrast"]))
     line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
-                                            title_pos, title_align, outline_color=outline_color)
+                                            title_pos, title_align, outline_color=outline_color,
+                                            backing_options=text_backing_opts,
+                                            auto_contrast=auto_contrast, bg_bgr=bg)
     bounce = bool(fz.get("title_bounce"))
     line_anims = [resolve_line_anim_params(line, bounce) for line in visible_title_lines]
 
@@ -2831,8 +3020,12 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     title_lines = plan.get("title_lines") or resolve_title_lines(fz)
     visible_title_lines = [line for line in title_lines if line.get("text")]
     outline_color = resolve_title_outline_color(fz)
+    text_backing_opts = resolve_text_backing_options(fz)
+    auto_contrast = bool(fz.get("auto_contrast", DEFAULT_STYLE["auto_contrast"]))
     line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
-                                            title_pos, title_align, outline_color=outline_color)
+                                            title_pos, title_align, outline_color=outline_color,
+                                            backing_options=text_backing_opts,
+                                            auto_contrast=auto_contrast, bg_bgr=bg)
     bounce = bool(fz.get("title_bounce"))
     for layer in line_layers:
         before_img = blend_telop(before_img, layer["bgr"], layer["alpha"], 1.0)

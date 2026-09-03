@@ -574,26 +574,26 @@
         </select>
       </div>
       <div id="backgroundOptionsBody" hidden>
-        <div class="field">
+        <div class="field" id="backgroundBaseField" data-bg-modes="flat,gradient,halftone,stripes,grid">
           <label>背景色 base</label>
           <div class="row wrap" id="backgroundBaseColorRow"></div>
           <input type="text" id="backgroundBaseColorInput" placeholder="#FFFFFF" inputmode="none" style="width:7em;margin-top:4px;">
         </div>
-        <div class="field">
-          <label>アクセント色 accent（halftone/stripes/grid/gradientで使用）</label>
+        <div class="field" id="backgroundAccentField" data-bg-modes="gradient,halftone,stripes,grid">
+          <label>アクセント色 accent</label>
           <div class="row wrap" id="backgroundAccentColorRow"></div>
           <input type="text" id="backgroundAccentColorInput" placeholder="#000000" inputmode="none" style="width:7em;margin-top:4px;">
         </div>
-        <div class="field">
-          <label>模様のスケール scale（halftone/stripes/gridの間隔） <span class="brush-slider-value" id="backgroundScaleValue">0.020</span></label>
+        <div class="field" id="backgroundScaleField" data-bg-modes="halftone,stripes,grid">
+          <label>模様のスケール scale（ドット間隔・縞の周期） <span class="brush-slider-value" id="backgroundScaleValue">0.020</span></label>
           <input type="range" id="backgroundScaleSlider" min="0.005" max="0.08" step="0.001" value="0.02">
         </div>
-        <div class="field">
-          <label>模様の角度 angle（stripes/gridのみ） <span class="brush-slider-value" id="backgroundAngleValue">45°</span></label>
+        <div class="field" id="backgroundAngleField" data-bg-modes="stripes,grid">
+          <label>模様の角度 angle <span class="brush-slider-value" id="backgroundAngleValue">45°</span></label>
           <input type="range" id="backgroundAngleSlider" min="0" max="180" step="1" value="45">
         </div>
-        <div class="field">
-          <label>グレインの強さ opacity（grainのみ） <span class="brush-slider-value" id="backgroundOpacityValue">1.00</span></label>
+        <div class="field" id="backgroundOpacityField" data-bg-modes="grain">
+          <label>グレインの強さ opacity <span class="brush-slider-value" id="backgroundOpacityValue">1.00</span></label>
           <input type="range" id="backgroundOpacitySlider" min="0" max="1" step="0.05" value="1">
         </div>
       </div>
@@ -3169,11 +3169,11 @@ function init() {
     "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "backgroundModeSelect", "backgroundOptionsBody",
-    "backgroundBaseColorRow", "backgroundBaseColorInput",
-    "backgroundAccentColorRow", "backgroundAccentColorInput",
-    "backgroundScaleSlider", "backgroundScaleValue",
-    "backgroundAngleSlider", "backgroundAngleValue",
-    "backgroundOpacitySlider", "backgroundOpacityValue",
+    "backgroundBaseField", "backgroundBaseColorRow", "backgroundBaseColorInput",
+    "backgroundAccentField", "backgroundAccentColorRow", "backgroundAccentColorInput",
+    "backgroundScaleField", "backgroundScaleSlider", "backgroundScaleValue",
+    "backgroundAngleField", "backgroundAngleSlider", "backgroundAngleValue",
+    "backgroundOpacityField", "backgroundOpacitySlider", "backgroundOpacityValue",
     "maskStyleDefaultSelect", "maskStyleOptionsBody",
     "maskStyleColorRow", "maskStyleColorInput",
     "maskStyleScaleSlider", "maskStyleScaleValue",
@@ -3337,6 +3337,7 @@ function init() {
   els.backgroundModeSelect.addEventListener("change", function () {
     appState.background = resolveBackgroundMode(els.backgroundModeSelect.value);
     els.backgroundOptionsBody.hidden = BACKGROUND_MODES_WITH_OPTIONS.indexOf(appState.background) < 0;
+    updateBackgroundOptionFieldVisibility();
     saveToLocalStorage();
   });
   els.backgroundBaseColorInput.addEventListener("input", function () {
@@ -5882,6 +5883,12 @@ function generateSmoothNoiseField(sw, sh, w, h) {
   return out;
 }
 
+// セル平均アルファがこの範囲外（ほぼ完全に不透明／透明）なら、そのセルは境界をまたいで
+// いない＝人物の内部／外部の真っ只中とみなし、halftone/pixelの加工対象から外す
+// （render.pyのMASK_STYLE_EDGE_CELL_MIN/MAXと同じ値・同じ方針）。
+var MASK_STYLE_EDGE_CELL_MIN = 0.02;
+var MASK_STYLE_EDGE_CELL_MAX = 0.98;
+
 /**
  * mask_styleに応じてマスクcanvasの「形」（アルファ）を加工したcanvasを返す
  * （render.pyのapply_mask_styleと同じ考え方の簡易プレビュー版。solid/outlineは形自体を変えない
@@ -5901,14 +5908,23 @@ function applyMaskStyleToCanvas(maskCanvas, mode, options, W) {
     var cell = Math.max(3, Math.round(options.scale * W));
     var maxR = cell * 0.5 * 0.95;
     octx.fillStyle = "#FFFFFF";
-    for (var cy = Math.floor(cell / 2); cy < h; cy += cell) {
-      for (var cx = Math.floor(cell / 2); cx < w; cx += cell) {
-        var idx = (Math.min(h - 1, cy) * w + Math.min(w - 1, cx)) * 4;
+    for (var cy0 = 0; cy0 < h; cy0 += cell) {
+      var cy1 = Math.min(h, cy0 + cell);
+      var cyc = Math.min(h - 1, cy0 + Math.floor(cell / 2));
+      for (var cx0 = 0; cx0 < w; cx0 += cell) {
+        var cx1 = Math.min(w, cx0 + cell);
+        var cxc = Math.min(w - 1, cx0 + Math.floor(cell / 2));
+        var idx = (cyc * w + cxc) * 4;
         var a = srcData[idx + 3] / 255;
+        if (a >= MASK_STYLE_EDGE_CELL_MAX) {
+          octx.fillRect(cx0, cy0, cx1 - cx0, cy1 - cy0); // 人物の内側：無加工でベタ塗りのまま
+          continue;
+        }
+        if (a <= MASK_STYLE_EDGE_CELL_MIN) continue;      // 背景側：何も描かない
         var r = maxR * a;
         if (r >= 1) {
           octx.beginPath();
-          octx.arc(cx, cy, r, 0, Math.PI * 2);
+          octx.arc(cxc, cyc, r, 0, Math.PI * 2);
           octx.fill();
         }
       }
@@ -5916,14 +5932,37 @@ function applyMaskStyleToCanvas(maskCanvas, mode, options, W) {
     return outCanvas;
   }
   if (mode === "pixel") {
+    // 縮小平均→各セルのアルファを求め、境界をまたぐセルだけをブロック値で上書きする
+    // （内部・背景の真っ只中のセルは元のアルファのまま素通しし、縁だけがブロック状になる）
     var cell2 = Math.max(2, Math.round(options.scale * W));
     var gw = Math.max(1, Math.floor(w / cell2) + 1);
     var gh = Math.max(1, Math.floor(h / cell2) + 1);
     var smallCanvas = document.createElement("canvas");
     smallCanvas.width = gw; smallCanvas.height = gh;
     smallCanvas.getContext("2d").drawImage(maskCanvas, 0, 0, gw, gh);
-    octx.imageSmoothingEnabled = false;
-    octx.drawImage(smallCanvas, 0, 0, w, h);
+    var smallData = smallCanvas.getContext("2d").getImageData(0, 0, gw, gh).data;
+    var outImg = octx.createImageData(w, h);
+    var od = outImg.data;
+    od.set(srcData);
+    for (var gy = 0; gy < gh; gy++) {
+      var py0 = gy * cell2, py1 = Math.min(h, py0 + cell2);
+      if (py0 >= h) continue;
+      for (var gx = 0; gx < gw; gx++) {
+        var px0 = gx * cell2, px1 = Math.min(w, px0 + cell2);
+        if (px0 >= w) continue;
+        var sIdx = (gy * gw + gx) * 4;
+        var aVal = smallData[sIdx + 3] / 255;
+        if (aVal <= MASK_STYLE_EDGE_CELL_MIN || aVal >= MASK_STYLE_EDGE_CELL_MAX) continue;
+        for (var yy = py0; yy < py1; yy++) {
+          for (var xx = px0; xx < px1; xx++) {
+            var di = (yy * w + xx) * 4;
+            od[di] = 255; od[di + 1] = 255; od[di + 2] = 255;
+            od[di + 3] = smallData[sIdx + 3];
+          }
+        }
+      }
+    }
+    octx.putImageData(outImg, 0, 0);
     return outCanvas;
   }
   // rough：低解像度の滑らかな乱数場を変位マップにして、アルファ境界をギザギザに歪ませる
@@ -6311,6 +6350,20 @@ function updateBackgroundColorPresetSelection() {
   });
 }
 
+/**
+ * backgroundOptionsBody内の各項目（base/accent/scale/angle/opacity）を、選択中のbackgroundの
+ * 種類に実際に意味のあるものだけ表示する（data-bg-modes属性で対応種類をカンマ区切りで持たせておく）。
+ * 例：flatはbaseのみ、gradientはbase+accent、grainはopacityのみ。
+ */
+function updateBackgroundOptionFieldVisibility() {
+  var mode = resolveBackgroundMode(appState.background);
+  [els.backgroundBaseField, els.backgroundAccentField, els.backgroundScaleField,
+   els.backgroundAngleField, els.backgroundOpacityField].forEach(function (field) {
+    var modes = (field.dataset.bgModes || "").split(",");
+    field.hidden = modes.indexOf(mode) < 0;
+  });
+}
+
 function buildMaskStyleColorRow(rowEl, onPick) {
   rowEl.innerHTML = "";
   TITLE_COLOR_PRESETS.forEach(function (preset) {
@@ -6502,6 +6555,7 @@ function applySettingsToInputs() {
   appState.backgroundOptions = resolveBackgroundOptions(appState.backgroundOptions);
   els.backgroundModeSelect.value = appState.background;
   els.backgroundOptionsBody.hidden = BACKGROUND_MODES_WITH_OPTIONS.indexOf(appState.background) < 0;
+  updateBackgroundOptionFieldVisibility();
   els.backgroundBaseColorInput.value = appState.backgroundOptions.base;
   els.backgroundAccentColorInput.value = appState.backgroundOptions.accent;
   els.backgroundScaleSlider.value = appState.backgroundOptions.scale;

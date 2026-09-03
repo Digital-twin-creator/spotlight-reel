@@ -234,10 +234,11 @@ try:
     # 2.5) テロップの複数行対応（title.lines契約：resolve_title_lines/render_telop_layer）
     # ------------------------------------------------------------------
     def title_line(text, size=1.0, underline=False, color="#FFFFFF", align=None, anim=None,
-                    anim_sec=None, delay_sec=0.0, sfx=None):
+                    anim_sec=None, delay_sec=0.0, sfx=None, backing="outline"):
         """resolve_title_lines()が返す1行分の辞書を、テストで期待値として組み立てるヘルパー"""
         return {"text": text, "size": size, "underline": underline, "color": color, "align": align,
-                "anim": anim, "anim_sec": anim_sec, "delay_sec": delay_sec, "sfx": sfx}
+                "anim": anim, "anim_sec": anim_sec, "delay_sec": delay_sec, "sfx": sfx,
+                "backing": backing}
 
     print("")
     print("=== テロップの複数行対応：resolve_title_lines（JSON契約の正規化） ===")
@@ -2052,6 +2053,96 @@ try:
           f"{shadow_edge_point} diff={diff_from_outline_color}")
     check(bool(np.any(shadow_outline != shadow_solid)),
           "shadow：mask_style='outline'はsolidと異なる見た目になる（影の縁にも線が乗る）")
+
+    # ------------------------------------------------------------------
+    # 17) テロップの可読性（text_backing）：none/outline/shadow/box/band と auto_contrast
+    # ------------------------------------------------------------------
+    print("")
+    print("=== text_backing：resolve_text_backing/resolve_text_backing_optionsのフォールバック ===")
+    check(render.resolve_text_backing("box") == "box", "既知の値はそのまま通す")
+    check(render.resolve_text_backing("unknown-backing") == "outline", "未知の値はoutlineにフォールバックする")
+    check(render.resolve_text_backing(None) == "outline", "Noneはoutlineにフォールバックする")
+
+    default_backing_opts = render.resolve_text_backing_options({})
+    check(default_backing_opts == dict(render.TEXT_BACKING_OPTIONS_DEFAULTS),
+          "text_backing_options省略時はTEXT_BACKING_OPTIONS_DEFAULTSがそのまま使われる")
+    bad_backing_opts = render.resolve_text_backing_options({"text_backing_options": {
+        "color": "not-a-color", "opacity": 5, "radius": -1, "padding": -1}})
+    check(bad_backing_opts["color"] == render.TEXT_BACKING_OPTIONS_DEFAULTS["color"],
+          "不正なcolorは既定色にフォールバックする")
+    check(bad_backing_opts["opacity"] == 1.0, "opacity=5は1.0にクランプされる")
+    check(bad_backing_opts["radius"] >= 0 and bad_backing_opts["padding"] >= 0,
+          "radius/paddingが負の値でも0以上にクランプされる")
+
+    print("")
+    print("=== text_backing：resolve_title_linesが行ごとのbackingを解決する（省略時はstyle既定を継承） ===")
+    backing_lines = render.resolve_title_lines({
+        "text_backing": "shadow",
+        "name": {"lines": [{"text": "行1"}, {"text": "行2", "text_backing": "box"},
+                            {"text": "行3", "text_backing": "invalid"}]},
+    })
+    check([l["backing"] for l in backing_lines] == ["shadow", "box", "shadow"],
+          f"style既定(shadow)を継承・行2は明示box・行3は不正値でstyle既定にフォールバック: "
+          f"{[l['backing'] for l in backing_lines]}")
+
+    print("")
+    print("=== text_backing：render_telop_line_layersでnone/outline/shadow/box/bandの見た目を検証 ===")
+    tb_w, tb_h = 400, 200
+    tb_lines_for = lambda backing: [{"text": "サンプル", "size": 1.0, "underline": False,
+                                      "color": "#FFFFFF", "align": None, "anim": None, "anim_sec": None,
+                                      "delay_sec": 0.0, "sfx": None, "backing": backing}]
+    tb_opts = render.resolve_text_backing_options({"text_backing_options": {
+        "color": "#000000", "opacity": 0.6, "radius": 0.2, "padding": 0.4}})
+
+    def render_single(backing, bg_bgr=None, auto_contrast=True):
+        layers = render.render_telop_line_layers(
+            tb_lines_for(backing), tb_w, tb_h, {}, font_path_default,
+            size_px_base, pos_ratio=(0.5, 0.5), backing_options=tb_opts,
+            auto_contrast=auto_contrast, bg_bgr=bg_bgr)
+        return layers[0]
+
+    none_layer = render_single("none")
+    outline_layer = render_single("outline")
+    shadow_layer = render_single("shadow")
+    box_layer = render_single("box")
+    band_layer = render_single("band")
+
+    def opaque_pixel_count(layer, thresh=0.5):
+        return int((layer["alpha"][:, :, 0] > thresh).sum())
+
+    check(opaque_pixel_count(outline_layer) > opaque_pixel_count(none_layer),
+          "outline：strokeぶんnoneより不透明画素が多い（縁取りが実際に描かれている）")
+    check(opaque_pixel_count(box_layer) > opaque_pixel_count(outline_layer),
+          "box：文字の周りに座布団が敷かれるため、outlineよりさらに不透明画素が多い")
+    band_alpha_col0 = band_layer["alpha"][:, 0, 0]
+    check(bool(np.any(band_alpha_col0 > 0.3)),
+          "band：画面左端（x=0、テキストから離れた位置）にも帯が不透明で描かれている")
+    box_alpha_col0 = box_layer["alpha"][:, 0, 0]
+    check(bool(np.all(box_alpha_col0 < 0.3)),
+          "box：画面左端にはbandと違って座布団が伸びていない（行ごとの矩形のみ）")
+    check(opaque_pixel_count(shadow_layer) != opaque_pixel_count(none_layer),
+          "shadow：noneと異なる見た目になる（ドロップシャドウが乗る）")
+
+    print("")
+    print("=== text_backing：auto_contrastが低コントラスト背景でoutlineをboxへ自動格上げする ===")
+    dark_bg = np.full((tb_h, tb_w, 3), (20, 20, 20), dtype=np.uint8)   # 黒背景＋白文字＝高コントラスト
+    light_bg = np.full((tb_h, tb_w, 3), (235, 235, 235), dtype=np.uint8)  # 白背景＋白文字＝低コントラスト
+    high_contrast_layer = render_single("outline", bg_bgr=dark_bg)
+    low_contrast_layer = render_single("outline", bg_bgr=light_bg)
+    check(opaque_pixel_count(high_contrast_layer) == opaque_pixel_count(outline_layer),
+          "高コントラスト背景ではoutlineのまま（bg_bgr省略時と同じ不透明画素数）")
+    check(opaque_pixel_count(low_contrast_layer) > opaque_pixel_count(high_contrast_layer),
+          "低コントラスト背景ではboxに格上げされ、不透明画素数が明らかに増える")
+    no_auto_layer = render_single("outline", bg_bgr=light_bg, auto_contrast=False)
+    check(opaque_pixel_count(no_auto_layer) == opaque_pixel_count(outline_layer),
+          "auto_contrast=Falseなら低コントラスト背景でも格上げされずoutlineのまま")
+
+    print("")
+    print("=== text_backing：contrast_ratio（WCAG 2.0）の基本値を確認 ===")
+    check(abs(render.contrast_ratio((255, 255, 255), (0, 0, 0)) - 21.0) < 0.1,
+          "白と黒のコントラスト比は21（最大）")
+    check(abs(render.contrast_ratio((128, 128, 128), (128, 128, 128)) - 1.0) < 0.01,
+          "同じ色同士のコントラスト比は1（最小）")
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
