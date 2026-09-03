@@ -261,6 +261,11 @@
   .title-line-color-btn .swatch{width:16px; height:16px; border-radius:50%; flex-shrink:0; border:1px solid rgba(255,255,255,.4);}
   .title-line-color-btn.selected{border-color:var(--accent);}
 
+  /* --- テロップ行の「時間（秒）」「遅れ（秒）」入力：ラベル付きの小さな数値欄 --- */
+  .title-line-num-field{display:flex; flex-direction:column; gap:2px;}
+  .title-line-num-field label{margin-bottom:0; white-space:nowrap;}
+  .title-line-num-field input{width:5.5em;}
+
   /* --- ブラシ操作（足す／消す）トグル --- */
   .mode-toggle-btn{border:2px solid transparent;}
   .mode-toggle-btn.selected{border-color:var(--accent); color:var(--accent);}
@@ -493,10 +498,16 @@
           </select>
         </div>
         <div class="field grow">
-          <label>背景処理</label>
+          <label>背景処理（このフリーズだけ全体設定を上書き）</label>
           <select id="backgroundSelect">
             <option value="mono">mono（モノクロ）</option>
             <option value="dark">dark（減光）</option>
+            <option value="flat">flat（単色塗り）</option>
+            <option value="halftone">halftone（ドットスクリーン）</option>
+            <option value="stripes">stripes（斜め縞）</option>
+            <option value="grid">grid（格子）</option>
+            <option value="grain">grain（モノクロ＋粒状ノイズ）</option>
+            <option value="gradient">gradient（縦グラデーション）</option>
           </select>
         </div>
         <div class="field grow">
@@ -538,6 +549,43 @@
       <div class="field">
         <label>mono_contrast（モノクロ背景のコントラスト強調） <span class="brush-slider-value" id="monoContrastValue">1.00</span></label>
         <input type="range" id="monoContrastSlider" min="1" max="2" step="0.05" value="1">
+      </div>
+      <div class="field">
+        <label>background（背景（人物以外）の塗り方・全体既定） <span class="muted">フリーズごとに上書き可</span></label>
+        <select id="backgroundModeSelect">
+          <option value="mono">mono（モノクロ）</option>
+          <option value="dark">dark（減光）</option>
+          <option value="flat">flat（単色塗り）</option>
+          <option value="halftone">halftone（ドットスクリーン）</option>
+          <option value="stripes">stripes（斜め縞）</option>
+          <option value="grid">grid（格子）</option>
+          <option value="grain">grain（モノクロ＋粒状ノイズ）</option>
+          <option value="gradient">gradient（縦グラデーション）</option>
+        </select>
+      </div>
+      <div id="backgroundOptionsBody" hidden>
+        <div class="field">
+          <label>背景色 base</label>
+          <div class="row wrap" id="backgroundBaseColorRow"></div>
+          <input type="text" id="backgroundBaseColorInput" placeholder="#FFFFFF" inputmode="none" style="width:7em;margin-top:4px;">
+        </div>
+        <div class="field">
+          <label>アクセント色 accent（halftone/stripes/grid/gradientで使用）</label>
+          <div class="row wrap" id="backgroundAccentColorRow"></div>
+          <input type="text" id="backgroundAccentColorInput" placeholder="#000000" inputmode="none" style="width:7em;margin-top:4px;">
+        </div>
+        <div class="field">
+          <label>模様のスケール scale（halftone/stripes/gridの間隔） <span class="brush-slider-value" id="backgroundScaleValue">0.020</span></label>
+          <input type="range" id="backgroundScaleSlider" min="0.005" max="0.08" step="0.001" value="0.02">
+        </div>
+        <div class="field">
+          <label>模様の角度 angle（stripes/gridのみ） <span class="brush-slider-value" id="backgroundAngleValue">45°</span></label>
+          <input type="range" id="backgroundAngleSlider" min="0" max="180" step="1" value="45">
+        </div>
+        <div class="field">
+          <label>グレインの強さ opacity（grainのみ） <span class="brush-slider-value" id="backgroundOpacityValue">1.00</span></label>
+          <input type="range" id="backgroundOpacitySlider" min="0" max="1" step="0.05" value="1">
+        </div>
       </div>
       <div class="field row" style="align-items:center;">
         <input type="checkbox" id="titleBounceCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
@@ -836,6 +884,42 @@ var DEFAULT_STYLE = {
   // reveal_sec/slide_sec/hold_secも同じ理由でここに含めない（REVEAL_SEC_DEFAULT等を使う）。
 };
 var TITLE_ALIGNS = ["left", "center", "right"];
+/** 背景（人物以外）の塗り方（render.pyのBACKGROUND_MODESと同じ値） */
+var BACKGROUND_MODES = ["mono", "dark", "flat", "halftone", "stripes", "grid", "grain", "gradient"];
+/** background_optionsの既定値（render.pyのBACKGROUND_OPTIONS_DEFAULTSと同じ値） */
+var DEFAULT_BACKGROUND_OPTIONS = { base: "#FFFFFF", accent: "#000000", scale: 0.02, angle: 45, opacity: 1.0 };
+/** 未知の値は mono にフォールバックする（render.pyのresolve_background_modeと同じ方針） */
+function resolveBackgroundMode(mode) {
+  return BACKGROUND_MODES.indexOf(mode) >= 0 ? mode : "mono";
+}
+/** background種類<select>の選択肢（value/label） */
+var BACKGROUND_MODE_LABELS = [
+  { value: "mono", label: "mono（モノクロ）" },
+  { value: "dark", label: "dark（減光）" },
+  { value: "flat", label: "flat（単色塗り）" },
+  { value: "halftone", label: "halftone（ドットスクリーン）" },
+  { value: "stripes", label: "stripes（斜め縞）" },
+  { value: "grid", label: "grid（格子）" },
+  { value: "grain", label: "grain（モノクロ＋粒状ノイズ）" },
+  { value: "gradient", label: "gradient（縦グラデーション）" }
+];
+/** background_optionsが実際に意味を持つ種類（mono/darkは無視するため対象外） */
+var BACKGROUND_MODES_WITH_OPTIONS = ["flat", "halftone", "stripes", "grid", "grain", "gradient"];
+/**
+ * background_options（base/accent/scale/angle/opacity）を解決する
+ * （render.pyのresolve_background_optionsと同じ方針：不正/未指定はDEFAULT_BACKGROUND_OPTIONSで補う）
+ */
+function resolveBackgroundOptions(opts) {
+  opts = opts || {};
+  var base = isValidHexColor(opts.base) ? opts.base.toUpperCase() : DEFAULT_BACKGROUND_OPTIONS.base;
+  var accent = isValidHexColor(opts.accent) ? opts.accent.toUpperCase() : DEFAULT_BACKGROUND_OPTIONS.accent;
+  var scale = Math.max(0.002, Number(opts.scale) || DEFAULT_BACKGROUND_OPTIONS.scale);
+  var angle = (opts.angle !== null && opts.angle !== undefined && !isNaN(Number(opts.angle)))
+    ? Number(opts.angle) : DEFAULT_BACKGROUND_OPTIONS.angle;
+  var opacityRaw = (opts.opacity !== null && opts.opacity !== undefined && !isNaN(Number(opts.opacity)))
+    ? Number(opts.opacity) : DEFAULT_BACKGROUND_OPTIONS.opacity;
+  return { base: base, accent: accent, scale: scale, angle: angle, opacity: clamp01(opacityRaw) };
+}
 /** 行ごとのテロップ出現アクション（render.pyのTITLE_LINE_ANIMSと同じ値）。"" は未指定（従来のbounce/fade一斉表示） */
 var TITLE_LINE_ANIMS = ["bounce", "slide_right", "slide_left", "slide_up", "slide_down", "fade", "none"];
 /** render.pyのTELOP_FADE_SEC/TITLE_LINE_ANIM_SEC_DEFAULTと同じ値 */
@@ -851,6 +935,13 @@ var TITLE_LINE_ANIM_LABELS = [
   { value: "slide_down", label: "上からスライドイン" },
   { value: "fade", label: "フェード" },
   { value: "none", label: "アニメ無し（即表示）" }
+];
+/** 行ごとの寄せ<select>の選択肢（value/label）。空文字＝ブロック全体のtitle_alignを継承 */
+var TITLE_LINE_ALIGN_LABELS = [
+  { value: "", label: "寄せ：既定（全体設定）" },
+  { value: "left", label: "寄せ：左" },
+  { value: "center", label: "寄せ：中央" },
+  { value: "right", label: "寄せ：右" }
 ];
 /** テロップ文字色プリセット（render.pyのDEFAULT_STYLE.title_colorと同じ既定#FFFFFF＋よく使う色） */
 var TITLE_COLOR_PRESETS = [
@@ -956,6 +1047,25 @@ function round(n, decimals) {
 
 function clamp01(v) {
   return Math.min(1, Math.max(0, v));
+}
+
+/**
+ * <input type="number">など、ユーザーが手で秒数を打ち込む欄の値を安全に解釈する。
+ * iPhoneの一部のIME/キーボードでは全角数字・全角句点が入力されることがあり、
+ * Number("０.３")はNaNになってしまう（＝入力してもdraftに反映されず、
+ * 「入力できているように見えるのに保存されない／descがエラーになる」不具合の原因になる）。
+ * 全角数字・全角ピリオド/句点・全角マイナスを半角に正規化してから解釈する。
+ * 空欄はnull（＝「既定値を使う」という指示）として返し、それ以外で数値として
+ * 解釈できない場合もnullを返す（0に化けさせて意図しない値を書き込まない）。
+ */
+function normalizeDecimalInput(raw) {
+  if (raw === null || raw === undefined) return null;
+  var s = String(raw).trim();
+  if (s === "") return null;
+  s = s.replace(/[０-９]/g, function (ch) { return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0); });
+  s = s.replace(/[．。]/g, ".").replace(/[－ー―]/g, "-");
+  var n = Number(s);
+  return Number.isFinite(n) ? n : null;
 }
 
 function numOr(v, fallback) {
@@ -1126,7 +1236,7 @@ function freezeToJSON(fz, sfxLibrary) {
   var out = {
     time: round(numOr(fz.time, 0), 2),
     name: titleLinesForJSON(titleLines, sfxLibrary),
-    background: fz.background === "dark" ? "dark" : "mono",
+    background: resolveBackgroundMode(fz.background),
     brush_shape: resolveBrushShape(fz.brushShape),
     strokes: (fz.strokes || []).map(strokeToJSON)
   };
@@ -1174,7 +1284,7 @@ function buildProjectJSON(state) {
       hold_sec: round(numOr(state.holdSec, HOLD_SEC_DEFAULT), 2),
       brush_width: DEFAULT_STYLE.brush_width,
       mono_contrast: round(numOr(state.monoContrast, DEFAULT_STYLE.mono_contrast), 2),
-      background: DEFAULT_STYLE.background,
+      background: resolveBackgroundMode(state.background),
       font: DEFAULT_FONT_PATH,
       title_bounce: !!state.titleBounce,
       title_pos: [
@@ -1202,6 +1312,22 @@ function buildProjectJSON(state) {
     if (maskModel === APPLE_VISION_MODEL_NAME) {
       project.style.mask_options.include_held_objects = false;
     }
+  }
+  // background_options（背景の色・スケール・角度・グレイン強度）は全既定値のときは
+  // キー自体を省略する（完全後方互換）。ひとつでも既定と異なれば明示的に書き出す。
+  var bgOpts = resolveBackgroundOptions(state.backgroundOptions);
+  if (bgOpts.base !== DEFAULT_BACKGROUND_OPTIONS.base ||
+      bgOpts.accent !== DEFAULT_BACKGROUND_OPTIONS.accent ||
+      bgOpts.scale !== DEFAULT_BACKGROUND_OPTIONS.scale ||
+      bgOpts.angle !== DEFAULT_BACKGROUND_OPTIONS.angle ||
+      bgOpts.opacity !== DEFAULT_BACKGROUND_OPTIONS.opacity) {
+    project.style.background_options = {
+      base: bgOpts.base,
+      accent: bgOpts.accent,
+      scale: round(bgOpts.scale, 4),
+      angle: round(bgOpts.angle, 1),
+      opacity: round(bgOpts.opacity, 2)
+    };
   }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
   // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
@@ -1321,6 +1447,7 @@ function resolveSfxFieldsFromJSON(sfxValue, sfxLibrary, validAligns) {
 function parseProjectJSON(json, sfxLibrary) {
   json = json || {};
   var style = Object.assign({}, DEFAULT_STYLE, json.style || {});
+  var styleBackgroundMode = resolveBackgroundMode(style.background);
   var freezes = (json.freezes || []).map(function (fz, i) {
     var sfxFields = resolveSfxFieldsFromJSON(fz.sfx, sfxLibrary, SFX_ALIGNS_FREEZE);
     var titleLines = normalizeTitleLines(fz.name).map(function (line) {
@@ -1341,7 +1468,7 @@ function parseProjectJSON(json, sfxLibrary) {
       sfxLibraryId: sfxFields.sfxLibraryId,
       sfxAlign: sfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
       sfxMissingFile: sfxFields.sfxMissingFile || "",
-      background: fz.background === "dark" ? "dark" : "mono",
+      background: fz.background !== undefined ? resolveBackgroundMode(fz.background) : styleBackgroundMode,
       brushShape: resolveBrushShape(fz.brush_shape),
       maskMode: resolveColorSourceForFreeze(fz),
       brushEditMode: "add",
@@ -1466,6 +1593,8 @@ function parseProjectJSON(json, sfxLibrary) {
     slideSec: slideSec,
     holdSec: holdSec,
     monoContrast: numOr(style.mono_contrast, DEFAULT_STYLE.mono_contrast),
+    background: resolveBackgroundMode(style.background),
+    backgroundOptions: resolveBackgroundOptions(style.background_options),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -1693,9 +1822,9 @@ function computeLineFrameState(anim, animSec, delaySec, elapsedHoldSec, W, H) {
   return { fade: p, scale: 1, tx: 0, ty: 0 };
 }
 
-/** テロップ1行の既定値（サイズ倍率1.0・アンダーラインなし・色/アニメ/効果音は未指定） */
+/** テロップ1行の既定値（サイズ倍率1.0・アンダーラインなし・色/寄せ/アニメ/効果音は未指定） */
 var DEFAULT_TITLE_LINE = {
-  text: "", size: 1.0, underline: false, color: "", anim: "", animSec: null, delaySec: 0,
+  text: "", size: 1.0, underline: false, color: "", align: "", anim: "", animSec: null, delaySec: 0,
   sfx: "", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT
 };
 
@@ -1715,6 +1844,7 @@ function normalizeTitleLines(name) {
           size: Math.max(0.05, numOr(line.size, 1.0)),
           underline: !!line.underline,
           color: isValidHexColor(line.color) ? line.color.toUpperCase() : "",
+          align: TITLE_ALIGNS.indexOf(line.align) >= 0 ? line.align : "",
           anim: TITLE_LINE_ANIMS.indexOf(line.anim) >= 0 ? line.anim : "",
           animSec: (line.anim_sec !== undefined && line.anim_sec !== null) ? numOr(line.anim_sec, null) : null,
           delaySec: i === 0 ? 0 : Math.max(0, numOr(line.delay_sec, 0)),
@@ -1745,7 +1875,7 @@ function titleLinesAllDefault(lines) {
   if (!l) return false;
   return (lines || []).length === 1 &&
     Math.abs(numOr(l.size, 1.0) - 1.0) < 1e-6 &&
-    !l.underline && !l.color && !l.anim &&
+    !l.underline && !l.color && !l.align && !l.anim &&
     (l.animSec === null || l.animSec === undefined || l.animSec === "") &&
     !l.sfxLibraryId && !l.sfx;
 }
@@ -1754,6 +1884,7 @@ function titleLinesAllDefault(lines) {
 function titleLineToJSON(l, sfxLibrary, isFirst) {
   var out = { text: l.text, size: round(numOr(l.size, 1.0), 2), underline: !!l.underline };
   if (l.color) out.color = l.color;
+  if (l.align) out.align = l.align;
   if (l.anim) out.anim = l.anim;
   if (l.animSec !== null && l.animSec !== undefined && l.animSec !== "") out.anim_sec = round(numOr(l.animSec, 0), 2);
   if (!isFirst && numOr(l.delaySec, 0) > 0) out.delay_sec = round(numOr(l.delaySec, 0), 2);
@@ -2518,6 +2649,7 @@ if (typeof module !== "undefined" && module.exports) {
     round: round,
     clamp01: clamp01,
     numOr: numOr,
+    normalizeDecimalInput: normalizeDecimalInput,
     telopBounceScale: telopBounceScale,
     TITLE_ALIGNS: TITLE_ALIGNS,
     resolveTitleAlign: resolveTitleAlign,
@@ -2603,6 +2735,12 @@ if (typeof module !== "undefined" && module.exports) {
     pointAndAngleAtLength: pointAndAngleAtLength,
     computeStampPoints: computeStampPoints,
     computeBgPixel: computeBgPixel,
+    BACKGROUND_MODES: BACKGROUND_MODES,
+    DEFAULT_BACKGROUND_OPTIONS: DEFAULT_BACKGROUND_OPTIONS,
+    resolveBackgroundMode: resolveBackgroundMode,
+    BACKGROUND_MODE_LABELS: BACKGROUND_MODE_LABELS,
+    BACKGROUND_MODES_WITH_OPTIONS: BACKGROUND_MODES_WITH_OPTIONS,
+    resolveBackgroundOptions: resolveBackgroundOptions,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -2785,6 +2923,8 @@ var appState = {
   slideSec: SLIDE_SEC_DEFAULT,
   holdSec: HOLD_SEC_DEFAULT,
   monoContrast: DEFAULT_STYLE.mono_contrast,
+  background: DEFAULT_STYLE.background,
+  backgroundOptions: Object.assign({}, DEFAULT_BACKGROUND_OPTIONS),
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -2937,6 +3077,12 @@ function init() {
     "freezeList", "freezeListEmpty",
     "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
+    "backgroundModeSelect", "backgroundOptionsBody",
+    "backgroundBaseColorRow", "backgroundBaseColorInput",
+    "backgroundAccentColorRow", "backgroundAccentColorInput",
+    "backgroundScaleSlider", "backgroundScaleValue",
+    "backgroundAngleSlider", "backgroundAngleValue",
+    "backgroundOpacitySlider", "backgroundOpacityValue",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
@@ -2964,6 +3110,7 @@ function init() {
   preloadBrushTipImages();
   initGuideCard();
   buildFilmColorControls();
+  buildBackgroundColorControls();
   populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
   populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
 
@@ -3089,6 +3236,42 @@ function init() {
   els.monoContrastSlider.addEventListener("input", function () {
     appState.monoContrast = Number(els.monoContrastSlider.value);
     els.monoContrastValue.textContent = appState.monoContrast.toFixed(2);
+    saveToLocalStorage();
+  });
+  els.backgroundModeSelect.addEventListener("change", function () {
+    appState.background = resolveBackgroundMode(els.backgroundModeSelect.value);
+    els.backgroundOptionsBody.hidden = BACKGROUND_MODES_WITH_OPTIONS.indexOf(appState.background) < 0;
+    saveToLocalStorage();
+  });
+  els.backgroundBaseColorInput.addEventListener("input", function () {
+    var v = els.backgroundBaseColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      appState.backgroundOptions.base = v.toUpperCase();
+      updateBackgroundColorPresetSelection();
+      saveToLocalStorage();
+    }
+  });
+  els.backgroundAccentColorInput.addEventListener("input", function () {
+    var v = els.backgroundAccentColorInput.value.trim();
+    if (isValidHexColor(v)) {
+      appState.backgroundOptions.accent = v.toUpperCase();
+      updateBackgroundColorPresetSelection();
+      saveToLocalStorage();
+    }
+  });
+  els.backgroundScaleSlider.addEventListener("input", function () {
+    appState.backgroundOptions.scale = Number(els.backgroundScaleSlider.value);
+    els.backgroundScaleValue.textContent = appState.backgroundOptions.scale.toFixed(3);
+    saveToLocalStorage();
+  });
+  els.backgroundAngleSlider.addEventListener("input", function () {
+    appState.backgroundOptions.angle = Number(els.backgroundAngleSlider.value);
+    els.backgroundAngleValue.textContent = appState.backgroundOptions.angle.toFixed(0) + "°";
+    saveToLocalStorage();
+  });
+  els.backgroundOpacitySlider.addEventListener("input", function () {
+    appState.backgroundOptions.opacity = Number(els.backgroundOpacitySlider.value);
+    els.backgroundOpacityValue.textContent = appState.backgroundOptions.opacity.toFixed(2);
     saveToLocalStorage();
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
@@ -3495,7 +3678,7 @@ function startNewFreeze() {
     sfx: "shakin",
     sfxLibraryId: null,
     sfxAlign: SFX_ALIGN_DEFAULT,
-    background: "mono",
+    background: appState.background || "mono",
     brushShape: "round",
     maskMode: "brush",
     brushEditMode: "add",
@@ -4248,6 +4431,20 @@ function renderTitleLinesEditor() {
       redrawTelopOverlay();
     });
 
+    var alignSelect = document.createElement("select");
+    alignSelect.className = "title-line-align-select";
+    TITLE_LINE_ALIGN_LABELS.forEach(function (opt) {
+      var o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label;
+      alignSelect.appendChild(o);
+    });
+    alignSelect.value = TITLE_ALIGNS.indexOf(line.align) >= 0 ? line.align : "";
+    alignSelect.addEventListener("change", function () {
+      draft.titleLines[i].align = alignSelect.value;
+      redrawTelopOverlay();
+    });
+
     var underlineBtn = document.createElement("button");
     underlineBtn.type = "button";
     underlineBtn.className = "small ghost mode-toggle-btn title-line-underline-btn";
@@ -4277,6 +4474,7 @@ function renderTitleLinesEditor() {
 
     row.appendChild(textInput);
     row.appendChild(sizeSelect);
+    row.appendChild(alignSelect);
     row.appendChild(underlineBtn);
     row.appendChild(removeBtn);
 
@@ -4340,32 +4538,58 @@ function renderTitleLinesEditor() {
       redrawTelopOverlay();
     });
 
+    // anim_secの既定値はanim選択に応じて変わる（bounceだけ従来どおり0.15秒、それ以外は0.25秒）。
+    // プレースホルダにその数値を出す（「既定」とだけ書くと何秒になるか分からないため）。
+    function animSecDefaultLabel() {
+      return "既定 " + (animSelect.value === "bounce" ? "0.15" : "0.25");
+    }
+
+    var animSecField = document.createElement("div");
+    animSecField.className = "title-line-num-field";
+    var animSecLabel = document.createElement("label");
+    animSecLabel.textContent = "時間（秒）";
     var animSecInput = document.createElement("input");
-    animSecInput.type = "number";
+    // type="text"（type="number"ではない）にしているのは意図的：type="number"は
+    // ブラウザがキー入力そのものを半角数字/ピリオド/マイナスだけに制限するため、
+    // iPhoneの一部IMEが変換する全角数字を打とうとしても入力自体を受け付けず、
+    // 「入力できているように見えるのに反映されない」不具合の元になる。
+    // inputmode="decimal"で小数キーボードは出しつつ、値の検証はnormalizeDecimalInputで行う。
+    animSecInput.type = "text";
     animSecInput.className = "title-line-anim-sec";
-    animSecInput.min = "0"; animSecInput.step = "0.05";
-    animSecInput.placeholder = "既定";
-    animSecInput.style.width = "4.5em";
-    animSecInput.title = "出現アニメの時間（秒）";
+    animSecInput.inputMode = "decimal";
+    animSecInput.placeholder = animSecDefaultLabel();
     animSecInput.value = (line.animSec === null || line.animSec === undefined) ? "" : line.animSec;
     animSecInput.addEventListener("input", function () {
-      var v = animSecInput.value;
-      draft.titleLines[i].animSec = v === "" ? null : Math.max(0, numOr(v, 0));
+      draft.titleLines[i].animSec = normalizeDecimalInput(animSecInput.value);
       redrawTelopOverlay();
+    });
+    animSecField.appendChild(animSecLabel);
+    animSecField.appendChild(animSecInput);
+
+    // animを変えたら既定値のプレースホルダも更新する
+    animSelect.addEventListener("change", function () {
+      animSecInput.placeholder = animSecDefaultLabel();
     });
 
+    var delaySecField = document.createElement("div");
+    delaySecField.className = "title-line-num-field";
+    delaySecField.hidden = i === 0;   // 1行目は「遅れ」が意味を持たないため表示自体しない
+    var delaySecLabel = document.createElement("label");
+    delaySecLabel.textContent = "遅れ（秒）";
     var delaySecInput = document.createElement("input");
-    delaySecInput.type = "number";
+    // animSecInputと同じ理由でtype="text"にしている（type="number"のキー入力制限を避ける）。
+    delaySecInput.type = "text";
     delaySecInput.className = "title-line-delay-sec";
-    delaySecInput.min = "0"; delaySecInput.step = "0.05";
-    delaySecInput.style.width = "4.5em";
-    delaySecInput.title = "1行目からの遅れ（秒。2行目以降のみ）";
-    delaySecInput.value = i === 0 ? 0 : numOr(line.delaySec, 0);
-    delaySecInput.disabled = i === 0;
+    delaySecInput.inputMode = "decimal";
+    delaySecInput.placeholder = "既定 0";
+    delaySecInput.value = i === 0 ? "" : (numOr(line.delaySec, 0) || "");
     delaySecInput.addEventListener("input", function () {
-      draft.titleLines[i].delaySec = Math.max(0, numOr(delaySecInput.value, 0));
+      var parsed = normalizeDecimalInput(delaySecInput.value);
+      draft.titleLines[i].delaySec = parsed === null ? 0 : Math.max(0, parsed);
       redrawTelopOverlay();
     });
+    delaySecField.appendChild(delaySecLabel);
+    delaySecField.appendChild(delaySecInput);
 
     var lineSfxSelect = document.createElement("select");
     lineSfxSelect.className = "title-line-sfx-select";
@@ -4397,8 +4621,8 @@ function renderTitleLinesEditor() {
     });
 
     animRow.appendChild(animSelect);
-    animRow.appendChild(animSecInput);
-    animRow.appendChild(delaySecInput);
+    animRow.appendChild(animSecField);
+    animRow.appendChild(delaySecField);
     animRow.appendChild(lineSfxSelect);
     animRow.appendChild(lineSfxAlignSelect);
     wrapper.appendChild(animRow);
@@ -5149,7 +5373,7 @@ function startPreviewPlayback() {
 
     bgCanvas = document.createElement("canvas");
     bgCanvas.width = W; bgCanvas.height = H;
-    buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background);
+    buildBackgroundCanvas(frameCanvas, bgCanvas, draft.background, appState.backgroundOptions);
     previewSessionCanvases.push(bgCanvas);
 
     geoInfo = buildStrokeGeometry(draft.strokes, W, H, Number(els.brushWidthSlider.value));
@@ -5370,17 +5594,147 @@ function isLikelyLastFreezeDraft() {
   return appState.freezes.every(function (f) { return f.id === draft.id || f.time <= t; });
 }
 
-function buildBackgroundCanvas(srcCanvas, dstCanvas, mode) {
-  var w = srcCanvas.width, h = srcCanvas.height;
+/** "#RRGGBB" を [r,g,b] へ変換する（不正な値はfallbackを返す） */
+function hexToRgbTriplet(hex, fallback) {
+  if (!isValidHexColor(hex)) return fallback;
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+
+/** 剰余（JSの%は負数で符号が変わるため、常に0以上を返すよう補正する） */
+function positiveMod(a, b) {
+  var r = a % b;
+  return r < 0 ? r + b : r;
+}
+
+/** Box-Muller法による標準正規分布乱数（render.pyのnp.random.normalと同じ用途：grainのノイズ） */
+function gaussianRandom() {
+  var u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+/**
+ * halftone背景：モノクロ化した元フレームの明るさに応じたドット径のドットスクリーン
+ * （render.pyのrender_halftone_backgroundと同じ考え方の簡易版。セル内平均ではなく
+ * セル中心1画素のサンプルで明るさを求める＝簡易プレビューゆえの近似）。
+ */
+function renderHalftoneBackground(srcCanvas, dctx, w, h, baseRgb, accentRgb, scale) {
   var sctx = srcCanvas.getContext("2d");
-  var dctx = dstCanvas.getContext("2d");
-  var img = sctx.getImageData(0, 0, w, h);
+  var data = sctx.getImageData(0, 0, w, h).data;
+  dctx.fillStyle = "rgb(" + baseRgb.join(",") + ")";
+  dctx.fillRect(0, 0, w, h);
+  dctx.fillStyle = "rgb(" + accentRgb.join(",") + ")";
+  var cell = Math.max(3, Math.round(scale * w));
+  var maxR = cell * 0.5 * 0.95;
+  for (var cy = Math.floor(cell / 2); cy < h; cy += cell) {
+    for (var cx = Math.floor(cell / 2); cx < w; cx += cell) {
+      var idx = (Math.min(h - 1, cy) * w + Math.min(w - 1, cx)) * 4;
+      var gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      var r = maxR * (1.0 - gray / 255);
+      if (r >= 1) {
+        dctx.beginPath();
+        dctx.arc(cx, cy, r, 0, Math.PI * 2);
+        dctx.fill();
+      }
+    }
+  }
+}
+
+/**
+ * stripes/grid背景：angle度に傾けたbase/accentの縞模様（render.pyのrender_stripe_backgroundと
+ * 同じ計算）。grid=trueの場合はこれと直交する縞も重ねて格子状にする。
+ */
+function renderStripeBackground(dctx, w, h, baseHex, accentHex, scale, angle, grid) {
+  dctx.fillStyle = baseHex;
+  dctx.fillRect(0, 0, w, h);
+  var img = dctx.getImageData(0, 0, w, h);
   var data = img.data;
-  for (var i = 0; i < data.length; i += 4) {
-    var px = computeBgPixel(data[i], data[i + 1], data[i + 2], mode);
-    data[i] = px[0]; data[i + 1] = px[1]; data[i + 2] = px[2];
+  var accentRgb = hexToRgbTriplet(accentHex, [0, 0, 0]);
+  var period = Math.max(2, Math.round(scale * w));
+  var theta = angle * Math.PI / 180;
+  var cosT = Math.cos(theta), sinT = Math.sin(theta);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var proj = x * cosT + y * sinT;
+      var on = positiveMod(proj, period) < period / 2.0;
+      if (!on && grid) {
+        var proj2 = -x * sinT + y * cosT;
+        on = positiveMod(proj2, period) < period / 2.0;
+      }
+      if (on) {
+        var idx = (y * w + x) * 4;
+        data[idx] = accentRgb[0]; data[idx + 1] = accentRgb[1]; data[idx + 2] = accentRgb[2];
+      }
+    }
   }
   dctx.putImageData(img, 0, 0);
+}
+
+/** grain背景：mono背景にフィルムグレイン（粒状ノイズ）を重ねる（render.pyのgrain分岐と同じ式） */
+function renderGrainBackground(srcCanvas, dctx, w, h, contrast, opacity) {
+  var sctx = srcCanvas.getContext("2d");
+  var img = sctx.getImageData(0, 0, w, h);
+  var data = img.data;
+  var strength = 35.0 * opacity;
+  for (var i = 0; i < data.length; i += 4) {
+    var px = computeBgPixel(data[i], data[i + 1], data[i + 2], "mono");
+    var v = clampByte(px[0] + gaussianRandom() * strength);
+    data[i] = v; data[i + 1] = v; data[i + 2] = v;
+  }
+  dctx.putImageData(img, 0, 0);
+}
+
+/**
+ * フリーズ中の「カラーが抜けた背景」を作る（render.pyのmake_backgroundと同じ8種の簡易プレビュー版）。
+ * mono/darkは従来どおり1画素ずつcomputeBgPixelで処理し、それ以外（flat/halftone/stripes/grid/
+ * grain/gradient）はbackground_options（base/accent/scale/angle/opacity）を使う。
+ */
+function buildBackgroundCanvas(srcCanvas, dstCanvas, mode, options) {
+  var w = srcCanvas.width, h = srcCanvas.height;
+  mode = resolveBackgroundMode(mode);
+  var dctx = dstCanvas.getContext("2d");
+
+  if (mode === "mono" || mode === "dark") {
+    var sctx = srcCanvas.getContext("2d");
+    var img = sctx.getImageData(0, 0, w, h);
+    var data = img.data;
+    for (var i = 0; i < data.length; i += 4) {
+      var px = computeBgPixel(data[i], data[i + 1], data[i + 2], mode);
+      data[i] = px[0]; data[i + 1] = px[1]; data[i + 2] = px[2];
+    }
+    dctx.putImageData(img, 0, 0);
+    return;
+  }
+
+  var opts = resolveBackgroundOptions(options);
+
+  if (mode === "flat") {
+    dctx.fillStyle = opts.base;
+    dctx.fillRect(0, 0, w, h);
+    return;
+  }
+  if (mode === "gradient") {
+    var grad = dctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, opts.base);
+    grad.addColorStop(1, opts.accent);
+    dctx.fillStyle = grad;
+    dctx.fillRect(0, 0, w, h);
+    return;
+  }
+  if (mode === "halftone") {
+    renderHalftoneBackground(srcCanvas, dctx, w, h,
+      hexToRgbTriplet(opts.base, [255, 255, 255]), hexToRgbTriplet(opts.accent, [0, 0, 0]), opts.scale);
+    return;
+  }
+  if (mode === "stripes" || mode === "grid") {
+    renderStripeBackground(dctx, w, h, opts.base, opts.accent, opts.scale, opts.angle, mode === "grid");
+    return;
+  }
+  if (mode === "grain") {
+    renderGrainBackground(srcCanvas, dctx, w, h, 1.0, opts.opacity);
+    return;
+  }
 }
 
 /**
@@ -5568,17 +5922,22 @@ function drawTelop(ctx, lines, W, H, fadeOrStates, scale, posRatio, sizeRatio, a
   else { blockLeft = refX - maxW / 2; blockRight = refX + maxW / 2; }
   var blockTop = py - blockH / 2;
   var d = clampBoxToCanvas({ left: blockLeft, top: blockTop, right: blockRight, bottom: blockTop + blockH }, W, H);
-  refX += d.dx;
+  // ブロックの位置・幅はここで確定（行ごとのalign指定の有無によらず不変）。dxのクランプは
+  // ブロック全体（blockLeft/blockRight）に適用する（各行はこのブロック幅の中で寄せられる）。
+  blockLeft += d.dx; blockRight += d.dx;
   blockTop += d.dy;
 
-  ctx.textAlign = align === "left" ? "left" : align === "right" ? "right" : "center";
   ctx.textBaseline = "alphabetic";
   var cursorY = blockTop;
   measured.lines.forEach(function (li, i) {
     var state = perLine ? (fadeOrStates[i] || { fade: 1, scale: 1, tx: 0, ty: 0 }) : { fade: fadeOrStates, scale: scale, tx: 0, ty: 0 };
     var baselineY = cursorY + li.ascent;
     if (state.fade > 0) {
-      var lineCenterX = align === "left" ? refX + li.width / 2 : align === "right" ? refX - li.width / 2 : refX;
+      // 行ごとの寄せ（未指定ならブロック全体のalign）を、ブロック幅の中で適用する。
+      var lineAlign = (lines[i] && lines[i].align) || align;
+      var lineRefX = lineAlign === "left" ? blockLeft : lineAlign === "right" ? blockRight : (blockLeft + blockRight) / 2;
+      ctx.textAlign = lineAlign === "left" ? "left" : lineAlign === "right" ? "right" : "center";
+      var lineCenterX = lineAlign === "left" ? lineRefX + li.width / 2 : lineAlign === "right" ? lineRefX - li.width / 2 : lineRefX;
       var lineCenterY = cursorY + li.height / 2;
       var textColor = (lines[i] && lines[i].color) || "#FFFFFF";
       var outlineColor = autoOutlineColor(textColor);
@@ -5591,14 +5950,14 @@ function drawTelop(ctx, lines, W, H, fadeOrStates, scale, posRatio, sizeRatio, a
       ctx.font = titleLineFontString(li.sizePx, fontKey);
       var shadowOffset = Math.max(1, Math.round(li.sizePx / 20));
       ctx.fillStyle = outlineColor === "#000000" ? "rgba(0,0,0,0.51)" : "rgba(255,255,255,0.51)";
-      ctx.fillText(li.text, refX + shadowOffset, baselineY + shadowOffset);
+      ctx.fillText(li.text, lineRefX + shadowOffset, baselineY + shadowOffset);
       ctx.fillStyle = textColor;
-      ctx.fillText(li.text, refX, baselineY);
+      ctx.fillText(li.text, lineRefX, baselineY);
       if (li.underline) {
         var lineLeft, lineRight;
-        if (align === "left") { lineLeft = refX; lineRight = refX + li.width; }
-        else if (align === "right") { lineLeft = refX - li.width; lineRight = refX; }
-        else { lineLeft = refX - li.width / 2; lineRight = refX + li.width / 2; }
+        if (lineAlign === "left") { lineLeft = lineRefX; lineRight = lineRefX + li.width; }
+        else if (lineAlign === "right") { lineLeft = lineRefX - li.width; lineRight = lineRefX; }
+        else { lineLeft = lineRefX - li.width / 2; lineRight = lineRefX + li.width / 2; }
         var underlineH = Math.max(1, Math.round(li.sizePx * 0.06));
         var underlineGap = Math.max(1, Math.round(li.sizePx * 0.04));
         var uy0 = baselineY + underlineGap;
@@ -5643,6 +6002,52 @@ function updateFilmColorPresetSelection() {
     var match = (buttons[i].dataset.filmColor || "").toLowerCase() === (appState.shadowColor || "").toLowerCase();
     buttons[i].classList.toggle("selected", match);
   }
+}
+
+/* ---------------- 背景（人物以外）の塗り色プリセット（全体設定のbase/accent） ---------------- */
+
+function buildBackgroundColorRow(rowEl, getCurrentHex, onPick) {
+  rowEl.innerHTML = "";
+  TITLE_COLOR_PRESETS.forEach(function (preset) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small ghost background-color-btn";
+    btn.title = preset.label;
+    btn.dataset.hex = preset.hex;
+    btn.innerHTML = '<span class="swatch" style="background:' + preset.hex + '"></span>';
+    btn.addEventListener("click", function () {
+      onPick(preset.hex);
+      updateBackgroundColorPresetSelection();
+    });
+    rowEl.appendChild(btn);
+  });
+}
+
+function buildBackgroundColorControls() {
+  buildBackgroundColorRow(els.backgroundBaseColorRow, function () { return appState.backgroundOptions.base; },
+    function (hex) {
+      appState.backgroundOptions.base = hex;
+      els.backgroundBaseColorInput.value = hex;
+      saveToLocalStorage();
+    });
+  buildBackgroundColorRow(els.backgroundAccentColorRow, function () { return appState.backgroundOptions.accent; },
+    function (hex) {
+      appState.backgroundOptions.accent = hex;
+      els.backgroundAccentColorInput.value = hex;
+      saveToLocalStorage();
+    });
+  updateBackgroundColorPresetSelection();
+}
+
+function updateBackgroundColorPresetSelection() {
+  [[els.backgroundBaseColorRow, appState.backgroundOptions.base],
+   [els.backgroundAccentColorRow, appState.backgroundOptions.accent]].forEach(function (pair) {
+    var buttons = pair[0].querySelectorAll(".background-color-btn");
+    for (var i = 0; i < buttons.length; i++) {
+      var match = (buttons[i].dataset.hex || "").toLowerCase() === (pair[1] || "").toLowerCase();
+      buttons[i].classList.toggle("selected", match);
+    }
+  });
 }
 
 /* ---------------- ラストロゴ ---------------- */
@@ -5798,6 +6203,19 @@ function applySettingsToInputs() {
   els.holdSecValue.textContent = Number(appState.holdSec).toFixed(1) + "秒";
   els.monoContrastSlider.value = appState.monoContrast;
   els.monoContrastValue.textContent = Number(appState.monoContrast).toFixed(2);
+  appState.background = resolveBackgroundMode(appState.background);
+  appState.backgroundOptions = resolveBackgroundOptions(appState.backgroundOptions);
+  els.backgroundModeSelect.value = appState.background;
+  els.backgroundOptionsBody.hidden = BACKGROUND_MODES_WITH_OPTIONS.indexOf(appState.background) < 0;
+  els.backgroundBaseColorInput.value = appState.backgroundOptions.base;
+  els.backgroundAccentColorInput.value = appState.backgroundOptions.accent;
+  els.backgroundScaleSlider.value = appState.backgroundOptions.scale;
+  els.backgroundScaleValue.textContent = Number(appState.backgroundOptions.scale).toFixed(3);
+  els.backgroundAngleSlider.value = appState.backgroundOptions.angle;
+  els.backgroundAngleValue.textContent = Number(appState.backgroundOptions.angle).toFixed(0) + "°";
+  els.backgroundOpacitySlider.value = appState.backgroundOptions.opacity;
+  els.backgroundOpacityValue.textContent = Number(appState.backgroundOptions.opacity).toFixed(2);
+  updateBackgroundColorPresetSelection();
   els.titleBounceCheckbox.checked = !!appState.titleBounce;
   els.titleSizeDefaultSlider.value = appState.titleSize;
   els.titleSizeDefaultValue.textContent = Number(appState.titleSize).toFixed(3);
@@ -5941,6 +6359,8 @@ function buildLocalStoragePayload(dropThumbs) {
     slideSec: appState.slideSec,
     holdSec: appState.holdSec,
     monoContrast: appState.monoContrast,
+    background: appState.background,
+    backgroundOptions: appState.backgroundOptions,
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
@@ -6006,6 +6426,8 @@ function loadFromLocalStorage(videoFileName) {
     appState.slideSec = numOr(data.slideSec, SLIDE_SEC_DEFAULT);
     appState.holdSec = numOr(data.holdSec, HOLD_SEC_DEFAULT);
     appState.monoContrast = numOr(data.monoContrast, DEFAULT_STYLE.mono_contrast);
+    appState.background = resolveBackgroundMode(data.background);
+    appState.backgroundOptions = resolveBackgroundOptions(data.backgroundOptions);
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
@@ -6722,6 +7144,8 @@ function handleJsonFileChange(e) {
       appState.slideSec = loaded.slideSec;
       appState.holdSec = loaded.holdSec;
       appState.monoContrast = loaded.monoContrast;
+      appState.background = loaded.background;
+      appState.backgroundOptions = loaded.backgroundOptions;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;

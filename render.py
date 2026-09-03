@@ -56,7 +56,10 @@ DEFAULT_STYLE = {
     "film_offset": [0.0, 0.0],
     "film_color": "#FF6432",
     "film_alpha": 0.8,
-    "background": "mono",         # mono | dark
+    "background": "mono",         # mono | dark | flat | halftone | stripes | grid | grain | gradient
+    # background_optionsもここには持たせない（shadow/mask_optionsと同じ理由。JSON側に無ければ
+    # resolve_background_options()がBACKGROUND_OPTIONS_DEFAULTSを補う）。
+    # {"base": "#RRGGBB", "accent": "#RRGGBB", "scale": 出力幅比, "angle": 度, "opacity": 0〜1}
     "font": "assets/fonts/NotoSansJP-Bold.ttf",
     # title_font / title_font_jp は省略時 font にフォールバックする（use_style_font()参照）。
     # ここではキー自体を持たせず、未指定であることを判別できるようにする。
@@ -485,21 +488,159 @@ def open_video_writer(out_path, W, H, fps, audio_wav):
 
 
 # ---------------------------------------------------------------------------
-# 背景処理（モノクロ / 減光）
+# 背景処理（人物以外の「カラーが抜けた背景」の塗り方）
 # ---------------------------------------------------------------------------
 
-def make_background(frame, mode, contrast=1.0):
-    """フリーズ中の「カラーが抜けた背景」を作る（mono時はcontrastでコントラストを強調できる）"""
-    if mode == "dark":
-        return np.clip(frame.astype(np.float32) * DARK_GAIN, 0, 255).astype(np.uint8)
-    if mode != "mono":
+BACKGROUND_MODES = ("mono", "dark", "flat", "halftone", "stripes", "grid", "grain", "gradient")
+# background_optionsの既定値。scale/angleは出力幅に対する比率・度数。
+# base/accentの既定は「白地に黒」（flat以外の全パターンで無難に見える組み合わせ）。
+BACKGROUND_OPTIONS_DEFAULTS = {"base": "#FFFFFF", "accent": "#000000",
+                                "scale": 0.02, "angle": 45.0, "opacity": 1.0}
+
+
+def resolve_background_mode(mode):
+    """未知の値は mono にフォールバックする（既存の背景処理と同じ方針）"""
+    mode = mode or "mono"
+    if mode not in BACKGROUND_MODES:
         warn(f"background='{mode}' は未知の値です。mono として扱います。")
+        return "mono"
+    return mode
+
+
+def resolve_background_options(fz):
+    """
+    background_options（{"base","accent","scale","angle","opacity"}）を解決する。
+    style/freezeのJSONに無ければBACKGROUND_OPTIONS_DEFAULTSをそのまま使う（mono/darkでは
+    参照されないため実質無害）。base/accentは#RRGGBB検証込み、scaleは0除算を避けるため
+    下限を設け、opacityは0〜1にクランプする。
+    """
+    opts = dict(BACKGROUND_OPTIONS_DEFAULTS)
+    raw = fz.get("background_options")
+    if isinstance(raw, dict):
+        opts.update(raw)
+    opts["base"] = validate_hex_color(opts.get("base"), BACKGROUND_OPTIONS_DEFAULTS["base"],
+                                       "background_options.base")
+    opts["accent"] = validate_hex_color(opts.get("accent"), BACKGROUND_OPTIONS_DEFAULTS["accent"],
+                                         "background_options.accent")
+    opts["scale"] = max(0.002, float(opts.get("scale") or BACKGROUND_OPTIONS_DEFAULTS["scale"]))
+    opts["angle"] = float(opts.get("angle") if opts.get("angle") is not None
+                           else BACKGROUND_OPTIONS_DEFAULTS["angle"])
+    opts["opacity"] = float(np.clip(opts.get("opacity") if opts.get("opacity") is not None
+                                     else BACKGROUND_OPTIONS_DEFAULTS["opacity"], 0.0, 1.0))
+    return opts
+
+
+def make_mono_bgr(frame, contrast=1.0):
+    """グレースケール化したBGR画像を返す（background="mono"/"grain"で共有する下地）"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
     contrast = float(contrast) if contrast else 1.0
     if contrast != 1.0:
         gray = np.clip((gray - 128.0) * contrast + 128.0, 0, 255)
-    gray = gray.astype(np.uint8)
-    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    return gray, cv2.cvtColor(gray.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+
+def render_halftone_background(frame, base_bgr, accent_bgr, scale):
+    """
+    モノクロ化した元フレームの明るさに応じたドット径のドットスクリーン（新聞印刷の
+    網点のような見た目）。暗い場所ほどaccent色のドットが大きくなり、base地に馴染む。
+    scaleはドット間隔（セルの一辺）を出力幅に対する比率で指定する。
+    """
+    H, W = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cell = max(3, int(round(scale * W)))
+    gw = max(1, W // cell + 1)
+    gh = max(1, H // cell + 1)
+    small = cv2.resize(gray, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    canvas = np.full((H, W, 3), base_bgr, dtype=np.uint8)
+    max_r = cell * 0.5 * 0.95
+    for gy in range(gh):
+        cy = int(gy * cell + cell / 2)
+        if cy >= H:
+            continue
+        for gx in range(gw):
+            cx = int(gx * cell + cell / 2)
+            if cx >= W:
+                continue
+            darkness = 1.0 - float(small[gy, gx])
+            r = int(round(max_r * darkness))
+            if r >= 1:
+                cv2.circle(canvas, (cx, cy), r, accent_bgr, -1, lineType=cv2.LINE_AA)
+    return canvas
+
+
+def render_stripe_background(W, H, base_bgr, accent_bgr, scale, angle, grid):
+    """
+    angle度に傾けた縞模様（base/accentの帯を交互に）。grid=Trueの場合はこれと直交する
+    縞も重ねて格子状にする。scaleは縞（1本のbase+accentぶん）の周期を出力幅に対する
+    比率で指定する。
+    """
+    canvas = np.full((H, W, 3), base_bgr, dtype=np.uint8)
+    period = max(2, int(round(scale * W)))
+    theta = math.radians(angle)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    yy, xx = np.mgrid[0:H, 0:W]
+    proj = xx * cos_t + yy * sin_t
+    mask = (np.mod(proj, period) < (period / 2.0))
+    if grid:
+        proj2 = -xx * sin_t + yy * cos_t
+        mask = mask | (np.mod(proj2, period) < (period / 2.0))
+    canvas[mask] = accent_bgr
+    return canvas
+
+
+def make_background(frame, mode, contrast=1.0, options=None):
+    """
+    フリーズ中の「カラーが抜けた背景」を作る。
+      mono     : グレースケール化（contrastでコントラストを強調できる。既定）
+      dark     : 元のカラーを30%の明るさ（DARK_GAIN）に減光
+      flat     : background_options.baseの単色で塗りつぶす
+      halftone : モノクロ化した元フレームの明るさに応じたドット径のドットスクリーン
+                 （base地にaccent色のドット。scaleがドット間隔）
+      stripes  : angle度に傾けたbase/accentの縞模様（scaleが周期）
+      grid     : stripesと直交する縞を重ねた格子模様
+      grain    : mono背景にフィルムグレイン（粒状ノイズ）を重ねる。強さはopacity
+      gradient : baseからaccentへの縦方向グラデーション
+    未知の値は mono にフォールバックする。
+    """
+    H, W = frame.shape[:2]
+    mode = resolve_background_mode(mode)
+    if mode == "dark":
+        return np.clip(frame.astype(np.float32) * DARK_GAIN, 0, 255).astype(np.uint8)
+    if mode == "mono":
+        _gray, bgr = make_mono_bgr(frame, contrast)
+        return bgr
+
+    opts = options or BACKGROUND_OPTIONS_DEFAULTS
+    base_bgr = hex_to_bgr(opts.get("base"), (255, 255, 255))
+    accent_bgr = hex_to_bgr(opts.get("accent"), (0, 0, 0))
+    scale = max(0.002, float(opts.get("scale", BACKGROUND_OPTIONS_DEFAULTS["scale"])))
+    angle = float(opts.get("angle", BACKGROUND_OPTIONS_DEFAULTS["angle"]))
+    opacity = float(np.clip(opts.get("opacity", BACKGROUND_OPTIONS_DEFAULTS["opacity"]), 0.0, 1.0))
+
+    if mode == "flat":
+        return np.full((H, W, 3), base_bgr, dtype=np.uint8)
+    if mode == "gradient":
+        t = np.linspace(0.0, 1.0, H, dtype=np.float32).reshape(H, 1, 1)
+        base_arr = np.array(base_bgr, dtype=np.float32).reshape(1, 1, 3)
+        accent_arr = np.array(accent_bgr, dtype=np.float32).reshape(1, 1, 3)
+        grad = base_arr * (1.0 - t) + accent_arr * t
+        return np.clip(np.broadcast_to(grad, (H, W, 3)), 0, 255).astype(np.uint8)
+    if mode == "halftone":
+        return render_halftone_background(frame, base_bgr, accent_bgr, scale)
+    if mode == "stripes":
+        return render_stripe_background(W, H, base_bgr, accent_bgr, scale, angle, grid=False)
+    if mode == "grid":
+        return render_stripe_background(W, H, base_bgr, accent_bgr, scale, angle, grid=True)
+    if mode == "grain":
+        gray, _bgr = make_mono_bgr(frame, contrast)
+        rng = np.random.default_rng()
+        noise = rng.normal(0.0, 1.0, (H, W)).astype(np.float32) * (35.0 * opacity)
+        grained = np.clip(gray + noise, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(grained, cv2.COLOR_GRAY2BGR)
+    # ここには到達しない（resolve_background_modeが未知の値をmonoへ落とすため）はずだが、
+    # 念のためmono相当にフォールバックする
+    _gray, bgr = make_mono_bgr(frame, contrast)
+    return bgr
 
 
 def hex_to_bgr(hex_color, default=(50, 100, 255)):
@@ -1399,13 +1540,17 @@ def resolve_title_line_anim(value, context_label):
 def resolve_title_lines(fz, json_dir=None):
     """
     fz["name"] を、テロップ描画用の行リスト
-    [{"text","size","underline","color","anim","anim_sec","delay_sec","sfx"}, ...] に正規化する。
+    [{"text","size","underline","color","align","anim","anim_sec","delay_sec","sfx"}, ...]
+    に正規化する。
 
     - 文字列（従来形式）は1行として扱う（size=1.0倍・underline=false・anim等は全て未指定扱い）。
-    - {"lines": [{"text","size","underline","color","anim","anim_sec","delay_sec","sfx"}, ...]}
-      形式にも対応する。各行のtextは文字列化し、sizeは指定が無ければ1.0倍、underlineは
-      指定が無ければfalse。
+    - {"lines": [{"text","size","underline","color","align","anim","anim_sec","delay_sec",
+      "sfx"}, ...]} 形式にも対応する。各行のtextは文字列化し、sizeは指定が無ければ1.0倍、
+      underlineは指定が無ければfalse。
         - color: "#RRGGBB"（既定はfz["title_color"]、さらに未指定ならDEFAULT_STYLE）
+        - align: この行だけの寄せ（left/center/right）。未指定(None)ならブロック全体の
+          title_align を使う（ブロックの位置・幅はtitle_pos/title_alignのまま変わらず、
+          行ごとの寄せはそのブロック幅の中で適用される）
         - anim/anim_sec: 未指定ならNone（呼び出し側で従来のbounce/fade一斉表示にフォールバック）
         - delay_sec: 1行目（index 0）は常に0.0に強制する（2行目以降のみ有効）
         - sfx: json_dirがNoneでない場合のみ resolve_sfx_spec() で解決する（フォント解決など
@@ -1415,7 +1560,7 @@ def resolve_title_lines(fz, json_dir=None):
     """
     default_color = validate_hex_color(fz.get("title_color"), DEFAULT_STYLE["title_color"], "title_color")
     empty_line = {"text": "", "size": 1.0, "underline": False, "color": default_color,
-                  "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}
+                  "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}
     name = fz.get("name")
     if isinstance(name, dict):
         lines_in = name.get("lines") or []
@@ -1427,6 +1572,11 @@ def resolve_title_lines(fz, json_dir=None):
                 underline = bool(line.get("underline", False))
                 context_label = f"lines[{i}]"
                 color = validate_hex_color(line.get("color"), default_color, f"{context_label}.color")
+                align_raw = line.get("align")
+                if align_raw is not None and align_raw not in TITLE_ALIGNS:
+                    warn(f"{context_label}.align='{align_raw}' は未知の値です。"
+                         "ブロック全体のtitle_alignに従います。")
+                    align_raw = None
                 anim = resolve_title_line_anim(line.get("anim"), context_label)
                 anim_sec_raw = line.get("anim_sec")
                 anim_sec = max(0.0, float(anim_sec_raw)) if anim_sec_raw is not None else None
@@ -1436,14 +1586,14 @@ def resolve_title_lines(fz, json_dir=None):
                        if json_dir is not None else None)
             else:
                 text = str(line)
-                size, underline, color = 1.0, False, default_color
+                size, underline, color, align_raw = 1.0, False, default_color, None
                 anim, anim_sec, delay_sec, sfx = None, None, 0.0, None
             lines.append({"text": text, "size": max(0.05, size), "underline": underline,
-                          "color": color, "anim": anim, "anim_sec": anim_sec,
+                          "color": color, "align": align_raw, "anim": anim, "anim_sec": anim_sec,
                           "delay_sec": delay_sec, "sfx": sfx})
         return lines or [dict(empty_line)]
     return [{"text": str(name or ""), "size": 1.0, "underline": False, "color": default_color,
-             "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}]
+             "align": None, "anim": None, "anim_sec": None, "delay_sec": 0.0, "sfx": None}]
 
 
 def resolve_title_font_path(fz):
@@ -1522,9 +1672,11 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     lines は resolve_title_lines() が返す形式。行ごとに文字サイズ（base_size_pxに対する
     倍率）・アンダーラインの有無・文字色（"#RRGGBB"）を変えられる。複数行はブロック全体を
     1つのまとまりとして扱い、pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をブロック
-    中心のアンカー位置とする。alignに応じてブロック全体を左寄せ/中央/右寄せする
-    （各行はブロックの基準位置に揃えて配置される）。画面端にはみ出す場合はブロックごと
-    自動で内側に寄せる。
+    中心のアンカー位置とする。alignに応じてブロック全体の位置・幅（＝最も広い行の幅）を
+    決め、画面端にはみ出す場合はブロックごと自動で内側に寄せる（ここまでは行ごとのalign指定
+    の有無によらず不変＝ドラッグ移動やクランプの基準は崩れない）。各行はその
+    line.get("align")（省略時はブロック全体のalign）に従い、このブロック幅の中で
+    個別に左寄せ/中央/右寄せされる。
 
     行ごとに独立したWxHキャンバスへ描くのは、出現アニメ（拡大縮小・平行移動・フェード）を
     行単位で適用するため（transform_telop_layer/blend_telopで1行ずつ合成する）。
@@ -1558,15 +1710,16 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
             )
         ascent, descent = font.getmetrics()
         text_rgb = hex_to_rgb(line.get("color") or "#FFFFFF")
+        line_align_raw = line.get("align")
         line_infos.append({
             "text": line["text"], "font": font, "size_px": size_px,
             "underline": bool(line.get("underline")), "ascent": ascent, "descent": descent,
             "text_rgb": text_rgb,
             "outline_rgb": outline_color if outline_color is not None else auto_outline_rgb(text_rgb),
+            "line_align": resolve_title_align(line_align_raw) if line_align_raw else None,
         })
 
     align = resolve_title_align(align)
-    anchor_h = {"left": "l", "center": "m", "right": "r"}[align]
 
     # レイアウト計算（textlength/textbbox）専用の1x1ダミーキャンバス。
     # PILのテキスト計測は実際の描画先サイズに依存しないため、これで先に全行の寸法を
@@ -1595,11 +1748,12 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     block_bottom = block_top + block_h
 
     dx, dy = clamp_box_to_canvas((block_left, block_top, block_right, block_bottom), W, H)
-    ref_x += dx
+    block_left += dx
+    block_right += dx
     block_top += dy
 
     shadow_alpha = 130   # 縁取り/ドロップシャドウの不透明度（0〜255。色は黒/白どちらでも同じ値を使う）
-    anchor = anchor_h + "a"  # 例："la"（左・アセンダー基準）。行を上から積み上げるための基準。
+    anchor_h_by_align = {"left": "l", "center": "m", "right": "r"}
     cursor_y = block_top
     results = []
     for li in line_infos:
@@ -1608,13 +1762,24 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
         outline_fill = li["outline_rgb"] + (shadow_alpha,)
         text_fill = li["text_rgb"] + (255,)
 
+        # 行ごとの寄せ（未指定ならブロック全体のalign）を、ブロック幅（block_left〜block_right）
+        # の中で適用する。ブロック自体の位置・幅はここでは変えない（ドラッグ移動の基準を保つため）。
+        line_align = li["line_align"] or align
+        if line_align == "left":
+            line_ref_x = block_left
+        elif line_align == "right":
+            line_ref_x = block_right
+        else:
+            line_ref_x = (block_left + block_right) / 2.0
+        anchor = anchor_h_by_align[line_align] + "a"  # 例："la"（左・アセンダー基準）
+
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
         # 文字色＋縁取り/ドロップシャドウ（先に影を描き、後から本体の文字を重ねる）
-        draw.text((ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
+        draw.text((line_ref_x + shadow_offset, cursor_y + shadow_offset), li["text"], font=li["font"],
                   anchor=anchor, fill=outline_fill)
-        draw.text((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
-        bbox = draw.textbbox((ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
+        draw.text((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor, fill=text_fill)
+        bbox = draw.textbbox((line_ref_x, cursor_y), li["text"], font=li["font"], anchor=anchor)
         if li["underline"]:
             underline_h = max(1, round(size_px * 0.06))
             underline_gap = max(1, round(size_px * 0.04))
@@ -2319,7 +2484,8 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
          人物が飛んで見えるため）
     """
     fz = plan["fz"]
-    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
+    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)),
+                         options=resolve_background_options(fz))
     shadow_cfg = plan.get("shadow_cfg")
 
     cache_dir = cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME)
@@ -2485,7 +2651,8 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     戻り値: (スライド前のパス, スライド後のパス, 行アニメ確認PNGのパスまたはNone)
     """
     fz = plan["fz"]
-    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)))
+    bg = make_background(frame, fz.get("background", "mono"), float(fz.get("mono_contrast", 1.0)),
+                         options=resolve_background_options(fz))
     shadow_cfg = resolve_shadow_config(fz)
 
     cache_dir = cache_dir or os.path.join(os.getcwd(), CACHE_DIR_NAME)

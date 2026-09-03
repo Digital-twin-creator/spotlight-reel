@@ -123,13 +123,37 @@ async function main() {
   check(line2Color === "#FF3B30", "2行目の自由入力欄に#RRGGBBを入れるとcolorに反映される（大文字化）: " + line2Color);
 
   console.log("");
-  console.log("=== 行ごとの出現アクション：1行目はdelay_sec入力が無効化され、2行目はanim/anim_sec/delay_sec/sfxを設定できる ===");
-  const line1DelayDisabled = await page.locator(".title-line-row:nth-child(1) .title-line-delay-sec").isDisabled();
-  check(line1DelayDisabled, "1行目のdelay_sec入力は無効化されている（2行目以降のみ有効という仕様）");
+  console.log("=== 行ごとの寄せ：セレクトで選ぶとdraft.titleLines[].alignに反映され、JSONにも出力される ===");
+  await page.selectOption(".title-line-row:nth-child(1) .title-line-align-select", "left");
+  await page.waitForTimeout(50);
+  const line1Align = await page.evaluate(() => draft.titleLines[0].align);
+  check(line1Align === "left", "1行目の寄せセレクトで'left'を選ぶとdraft.titleLines[0].align='left'になる: " + line1Align);
+  const line2AlignDefault = await page.evaluate(() => draft.titleLines[1].align);
+  check(line2AlignDefault === "", "操作していない2行目のalignは既定（空文字＝全体設定を継承）のまま: " + JSON.stringify(line2AlignDefault));
+  const fzAlign = await page.evaluate(() => freezeToJSON(draft, appState.sfxLibrary));
+  check(fzAlign.name.lines[0].align === "left", "JSON出力：1行目のalignが反映される: " + fzAlign.name.lines[0].align);
+  check(fzAlign.name.lines[1].align === undefined, "JSON出力：寄せを変えていない2行目はalignキー自体を出力しない: " + fzAlign.name.lines[1].align);
+
+  console.log("");
+  console.log("=== 行ごとの出現アクション：1行目は「遅れ」欄自体が表示されず、2行目はanim/anim_sec/delay_sec/sfxを設定できる ===");
+  const line1DelayHidden = await page.locator(".title-line-row:nth-child(1) .title-line-delay-sec").isHidden();
+  check(line1DelayHidden, "1行目の「遅れ」欄は表示されない（2行目以降のみ有効という仕様）");
+  const timeLabelText = await page.locator(".title-line-row:nth-child(2) .title-line-num-field:has(.title-line-anim-sec) label").textContent();
+  check(timeLabelText === "時間（秒）", "2行目の「時間」欄にラベルが表示されている: " + timeLabelText);
+  const delayLabelText = await page.locator(".title-line-row:nth-child(2) .title-line-num-field:has(.title-line-delay-sec) label").textContent();
+  check(delayLabelText === "遅れ（秒）", "2行目の「遅れ」欄にラベルが表示されている: " + delayLabelText);
+  const animSecPlaceholder = await page.locator(".title-line-row:nth-child(2) .title-line-anim-sec").getAttribute("placeholder");
+  check(animSecPlaceholder === "既定 0.25", "「時間」欄のプレースホルダに既定値が数字で示される（anim未選択時）: " + animSecPlaceholder);
+  const animSecInputMode = await page.locator(".title-line-row:nth-child(2) .title-line-anim-sec").getAttribute("inputmode");
+  const delaySecInputMode = await page.locator(".title-line-row:nth-child(2) .title-line-delay-sec").getAttribute("inputmode");
+  check(animSecInputMode === "decimal" && delaySecInputMode === "decimal",
+    "「時間」「遅れ」欄はinputmode=decimalで小数キーボードが出る: " + animSecInputMode + " / " + delaySecInputMode);
 
   await page.selectOption(".title-line-row:nth-child(2) .title-line-anim-select", "slide_left");
   await page.fill(".title-line-row:nth-child(2) .title-line-anim-sec", "0.4");
   await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-anim-sec", "input");
+  // 実機で報告された不具合の回帰確認：delay_secに0.3（step=0.05の倍数として浮動小数点誤差が
+  // 出やすい値）を入力してもエラーにならず正しく反映されること。
   await page.fill(".title-line-row:nth-child(2) .title-line-delay-sec", "0.3");
   await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-delay-sec", "input");
   await page.selectOption(".title-line-row:nth-child(2) .title-line-sfx-select", "shakin");
@@ -140,7 +164,19 @@ async function main() {
   }));
   check(line2Anim.anim === "slide_left" && line2Anim.animSec === 0.4 && line2Anim.delaySec === 0.3
     && line2Anim.sfx === "shakin",
-    "2行目のanim/anim_sec/delay_sec/sfxがdraft.titleLinesに反映される: " + JSON.stringify(line2Anim));
+    "2行目のanim/anim_sec/delay_sec/sfxがdraft.titleLinesに反映される（delay_sec=0.3もエラー無く反映）: "
+    + JSON.stringify(line2Anim));
+
+  console.log("");
+  console.log("=== 全角数字での入力も正しく解釈される（iPhoneのIMEで全角になっても壊れない回帰確認） ===");
+  await page.fill(".title-line-row:nth-child(2) .title-line-delay-sec", "０．４５");
+  await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-delay-sec", "input");
+  await page.waitForTimeout(50);
+  const fullWidthDelay = await page.evaluate(() => draft.titleLines[1].delaySec);
+  check(fullWidthDelay === 0.45, "全角「０．４５」もdelay_sec=0.45として解釈される: " + fullWidthDelay);
+  // 元の値に戻しておく（以降のテストへ影響しないように）
+  await page.fill(".title-line-row:nth-child(2) .title-line-delay-sec", "0.3");
+  await page.dispatchEvent(".title-line-row:nth-child(2) .title-line-delay-sec", "input");
 
   // このフリーズはまだdraft（編集中）でappState.freezesにコミットされていないため、
   // freezeToJSON(draft, ...)を直接呼んでJSON契約を確認する（buildProjectJSONはコミット後専用）。
@@ -217,6 +253,80 @@ async function main() {
   check(reopenedFontValue === "mplusrounded1c", "再編集時、フリーズ単位のフォント選択も復元される: " + reopenedFontValue);
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  console.log("");
+  console.log("=== 背景（人物以外）の塗りの種類：全体設定でmono以外を選ぶとオプション欄が表示され、色・スケール・角度・不透明度を設定できる ===");
+  const bgOptionsHiddenAtMono = await page.evaluate(() => document.getElementById("backgroundOptionsBody").hidden);
+  check(bgOptionsHiddenAtMono, "既定(mono)ではbackgroundOptionsBodyは隠れている");
+  await page.selectOption("#backgroundModeSelect", "halftone");
+  await page.waitForTimeout(50);
+  const bgModeAfterSelect = await page.evaluate(() => appState.background);
+  check(bgModeAfterSelect === "halftone", "セレクトで'halftone'を選ぶとappState.backgroundに反映される: " + bgModeAfterSelect);
+  const bgOptionsShown = await page.evaluate(() => !document.getElementById("backgroundOptionsBody").hidden);
+  check(bgOptionsShown, "halftoneを選ぶとbackgroundOptionsBodyが表示される");
+
+  await page.click("#backgroundBaseColorRow .background-color-btn[title=\"黒\"]");
+  await page.waitForTimeout(50);
+  const bgBaseAfterPreset = await page.evaluate(() => appState.backgroundOptions.base);
+  check(bgBaseAfterPreset === "#000000", "base色プリセット「黒」を選ぶとappState.backgroundOptions.base=#000000になる: " + bgBaseAfterPreset);
+
+  await page.fill("#backgroundAccentColorInput", "#00aaff");
+  await page.dispatchEvent("#backgroundAccentColorInput", "input");
+  await page.waitForTimeout(50);
+  const bgAccentAfterInput = await page.evaluate(() => appState.backgroundOptions.accent);
+  check(bgAccentAfterInput === "#00AAFF", "accent色の自由入力欄で#RRGGBBを入れるとaccentに反映される（大文字化）: " + bgAccentAfterInput);
+
+  await page.fill("#backgroundScaleSlider", "0.04");
+  await page.dispatchEvent("#backgroundScaleSlider", "input");
+  await page.fill("#backgroundAngleSlider", "60");
+  await page.dispatchEvent("#backgroundAngleSlider", "input");
+  await page.fill("#backgroundOpacitySlider", "0.4");
+  await page.dispatchEvent("#backgroundOpacitySlider", "input");
+  await page.waitForTimeout(50);
+  const bgOptsAfterSliders = await page.evaluate(() => appState.backgroundOptions);
+  check(bgOptsAfterSliders.scale === 0.04 && bgOptsAfterSliders.angle === 60 && bgOptsAfterSliders.opacity === 0.4,
+    "scale/angle/opacityスライダーがappState.backgroundOptionsに反映される: " + JSON.stringify(bgOptsAfterSliders));
+
+  const projectBg = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectBg.style.background === "halftone", "JSON出力：style.backgroundに'halftone'が反映される: " + projectBg.style.background);
+  check(!!projectBg.style.background_options
+    && projectBg.style.background_options.base === "#000000"
+    && projectBg.style.background_options.accent === "#00AAFF"
+    && projectBg.style.background_options.scale === 0.04
+    && projectBg.style.background_options.angle === 60
+    && projectBg.style.background_options.opacity === 0.4,
+    "JSON出力：style.background_optionsに設定した値がすべて反映される: " + JSON.stringify(projectBg.style.background_options));
+
+  console.log("");
+  console.log("=== 背景：既存フリーズの「背景処理」で全体設定を上書きでき、そのフリーズだけJSONに反映される ===");
+  const bgFreezeId = await page.evaluate(() => appState.freezes[0].id);
+  await page.evaluate((id) => { editFreeze(id); }, bgFreezeId);
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  await page.selectOption("#backgroundSelect", "grid");
+  await page.click("#commitFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  const projectBgFreeze = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectBgFreeze.freezes.some((f) => f.background === "grid"),
+    "フリーズ単位で上書きした背景('grid')がJSONのfreezes[].backgroundに反映される: "
+    + JSON.stringify(projectBgFreeze.freezes.map((f) => f.background)));
+  check(projectBgFreeze.style.background === "halftone",
+    "フリーズ単位の上書きをしても全体設定(style.background)は変わらない: " + projectBgFreeze.style.background);
+
+  console.log("");
+  console.log("=== 背景：全体設定をmonoに戻してもUIは追従する（background_optionsが既定値のままの場合の後方互換出力はNode単体テストで別途確認済み） ===");
+  await page.selectOption("#backgroundModeSelect", "mono");
+  await page.waitForTimeout(50);
+  const bgOptionsHiddenAgain = await page.evaluate(() => document.getElementById("backgroundOptionsBody").hidden);
+  check(bgOptionsHiddenAgain, "monoに戻すとbackgroundOptionsBodyは再び隠れる");
+  const projectBgReset = await page.evaluate(() => buildProjectJSON(appState));
+  check(projectBgReset.style.background === "mono", "style.backgroundが'mono'に戻る: " + projectBgReset.style.background);
+  // このテストでは直前にbase/accent/scale/angle/opacityを既定値から変更済みのため、
+  // ここではbackground_optionsが引き続き（変更後の値のまま）出力されることを確認する
+  // （モードをmonoに戻しても、ユーザーが設定した色・模様の値は破棄されない仕様）。
+  check(projectBgReset.style.background_options && projectBgReset.style.background_options.base === "#000000",
+    "modeをmonoに戻しても、変更済みのbackground_optionsの値は保持されたままJSONに出力される（破棄されない）: "
+    + JSON.stringify(projectBgReset.style.background_options));
 
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 

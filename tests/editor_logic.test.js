@@ -703,6 +703,112 @@ test("buildProjectJSON: フリーズごとの film_color 上書きは廃止さ�
   project.freezes.forEach(fz => assert.strictEqual("film_color" in fz, false));
 });
 
+/* ---- background（背景の塗り種類・8種） ---- */
+
+test("resolveBackgroundMode: 8種の既知の値はそのまま、未知の値はmonoにフォールバックする", () => {
+  ["mono", "dark", "flat", "halftone", "stripes", "grid", "grain", "gradient"].forEach(m => {
+    assert.strictEqual(core.resolveBackgroundMode(m), m);
+  });
+  assert.strictEqual(core.resolveBackgroundMode("rainbow"), "mono");
+  assert.strictEqual(core.resolveBackgroundMode(undefined), "mono");
+  assert.strictEqual(core.resolveBackgroundMode(null), "mono");
+});
+
+test("resolveBackgroundOptions: 未指定/不正値はDEFAULT_BACKGROUND_OPTIONSで補う", () => {
+  const opts = core.resolveBackgroundOptions({});
+  assert.deepStrictEqual(opts, core.DEFAULT_BACKGROUND_OPTIONS);
+  const invalid = core.resolveBackgroundOptions({ base: "red", accent: "#zzzzzz", scale: 0, angle: "abc", opacity: -1 });
+  assert.strictEqual(invalid.base, core.DEFAULT_BACKGROUND_OPTIONS.base);
+  assert.strictEqual(invalid.accent, core.DEFAULT_BACKGROUND_OPTIONS.accent);
+  assert.ok(invalid.scale > 0);
+  assert.strictEqual(invalid.angle, core.DEFAULT_BACKGROUND_OPTIONS.angle);
+  assert.strictEqual(invalid.opacity, 0);
+});
+
+test("resolveBackgroundOptions: 正しい値はそのまま(hexは大文字化)採用し、opacityは0〜1にクランプする", () => {
+  const opts = core.resolveBackgroundOptions({ base: "#ff0000", accent: "#00ff00", scale: 0.05, angle: 30, opacity: 1.5 });
+  assert.strictEqual(opts.base, "#FF0000");
+  assert.strictEqual(opts.accent, "#00FF00");
+  assert.strictEqual(opts.scale, 0.05);
+  assert.strictEqual(opts.angle, 30);
+  assert.strictEqual(opts.opacity, 1);
+});
+
+test("buildProjectJSON: state.backgroundが既定(mono)ならstyle.backgroundは'mono'、background_optionsキーは省略する", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual(project.style.background, "mono");
+  assert.strictEqual("background_options" in project.style, false);
+});
+
+test("buildProjectJSON: state.backgroundが指定されていればstyle.backgroundに反映される（未知値はmonoにフォールバック）", () => {
+  const state = Object.assign(sampleState(), { background: "halftone" });
+  assert.strictEqual(core.buildProjectJSON(state).style.background, "halftone");
+  const invalidState = Object.assign(sampleState(), { background: "invalid" });
+  assert.strictEqual(core.buildProjectJSON(invalidState).style.background, "mono");
+});
+
+test("buildProjectJSON: state.backgroundOptionsが既定と異なればstyle.background_optionsを明示的に出力する", () => {
+  const state = Object.assign(sampleState(), {
+    background: "stripes",
+    backgroundOptions: { base: "#111111", accent: "#EEEEEE", scale: 0.04, angle: 30, opacity: 0.8 }
+  });
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.style.background_options,
+    { base: "#111111", accent: "#EEEEEE", scale: 0.04, angle: 30, opacity: 0.8 });
+});
+
+test("buildProjectJSON: フリーズのbackgroundは8種いずれも正しく出力され、未知値はmonoにフォールバックする", () => {
+  const state = sampleState();
+  state.freezes[0].background = "grid";
+  state.freezes[1].background = "not-a-mode";
+  const project = core.buildProjectJSON(state);
+  const byTime = t => project.freezes.find(f => f.time === t);
+  assert.strictEqual(byTime(5.5).background, "grid");
+  assert.strictEqual(byTime(2.5).background, "mono");
+});
+
+test("parseProjectJSON: style.background/style.background_optionsを読み込める", () => {
+  const loaded = core.parseProjectJSON({
+    style: { background: "gradient", background_options: { base: "#010203", accent: "#040506", scale: 0.03, angle: 10, opacity: 0.5 } },
+    freezes: []
+  });
+  assert.strictEqual(loaded.background, "gradient");
+  assert.deepStrictEqual(loaded.backgroundOptions,
+    { base: "#010203", accent: "#040506", scale: 0.03, angle: 10, opacity: 0.5 });
+});
+
+test("parseProjectJSON: style.backgroundが省略されていれば既定値'mono'/DEFAULT_BACKGROUND_OPTIONSを補う", () => {
+  const loaded = core.parseProjectJSON({ freezes: [] });
+  assert.strictEqual(loaded.background, "mono");
+  assert.deepStrictEqual(loaded.backgroundOptions, core.DEFAULT_BACKGROUND_OPTIONS);
+});
+
+test("parseProjectJSON: フリーズにbackgroundが無ければstyle.backgroundを継承する", () => {
+  const loaded = core.parseProjectJSON({
+    style: { background: "grain" },
+    freezes: [{ time: 0, name: "" }, { time: 1, name: "", background: "flat" }]
+  });
+  assert.strictEqual(loaded.freezes[0].background, "grain");
+  assert.strictEqual(loaded.freezes[1].background, "flat");
+});
+
+test("buildProjectJSON/parseProjectJSON: 全体設定のbackground/backgroundOptionsを往復できる", () => {
+  const state = Object.assign(sampleState(), {
+    background: "halftone",
+    backgroundOptions: { base: "#123456", accent: "#654321", scale: 0.015, angle: 60, opacity: 0.3 }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.strictEqual(loaded.background, "halftone");
+  assert.deepStrictEqual(loaded.backgroundOptions, state.backgroundOptions);
+});
+
+test("buildProjectJSON: 旧JSON相当（backgroundOptions未設定）はbackground_optionsキーを出力せず、mono/darkのみの旧仕様と完全後方互換", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual("background_options" in project.style, false);
+  project.freezes.forEach(fz => assert.ok(["mono", "dark"].indexOf(fz.background) >= 0));
+});
+
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }
@@ -1033,7 +1139,7 @@ test("buildProjectJSON/parseProjectJSON: title_pos/title_size/title_alignを全�
 // テストではこのヘルパーで「他はすべて既定値」の行を簡潔に組み立てる。
 function defaultLine(overrides) {
   return Object.assign({
-    text: "", size: 1.0, underline: false, color: "", anim: "", animSec: null, delaySec: 0,
+    text: "", size: 1.0, underline: false, color: "", align: "", anim: "", animSec: null, delaySec: 0,
     sfx: "", sfxLibraryId: null, sfxAlign: "start_at_landing"
   }, overrides || {});
 }
@@ -1076,6 +1182,33 @@ test("normalizeTitleLines: 行ごとのcolor/anim/anim_sec/delay_sec/sfxを読�
     defaultLine({ text: "1行目", color: "#E6C15C", anim: "slide_right", animSec: 0.4, delaySec: 0 }),
     defaultLine({ text: "2行目", delaySec: 0.3, sfx: "shakin" })
   ]);
+});
+test("normalizeTitleLines: 行ごとのalign（left/center/right）を読み取り、不明な値は既定（空文字＝全体継承）にフォールバックする", () => {
+  const lines = core.normalizeTitleLines({
+    lines: [
+      { text: "左", align: "left" },
+      { text: "右", align: "right" },
+      { text: "不明", align: "top" }
+    ]
+  });
+  assert.deepStrictEqual(lines, [
+    defaultLine({ text: "左", align: "left" }),
+    defaultLine({ text: "右", align: "right" }),
+    defaultLine({ text: "不明" })
+  ]);
+});
+
+test("titleLineToJSON: 行ごとのalignは値がある時だけ出力される", () => {
+  const out = core.titleLinesForJSON([
+    defaultLine({ text: "左寄せ行", align: "left" }),
+    defaultLine({ text: "既定行" })
+  ]);
+  assert.deepStrictEqual(out, {
+    lines: [
+      { text: "左寄せ行", size: 1, underline: false, align: "left" },
+      { text: "既定行", size: 1, underline: false }
+    ]
+  });
 });
 
 test("titleLinesToPlainText: 空でない行のtextをスペース区切りで1行にまとめる", () => {
@@ -1151,6 +1284,29 @@ test("isValidHexColor: #RRGGBB形式のみtrue", () => {
   assert.strictEqual(core.isValidHexColor("E6C15C"), false);
   assert.strictEqual(core.isValidHexColor(""), false);
   assert.strictEqual(core.isValidHexColor(null), false);
+});
+
+test("normalizeDecimalInput: 半角の整数/小数はそのまま数値になる", () => {
+  assert.strictEqual(core.normalizeDecimalInput("0.3"), 0.3);
+  assert.strictEqual(core.normalizeDecimalInput("2"), 2);
+  assert.strictEqual(core.normalizeDecimalInput("0"), 0);
+});
+test("normalizeDecimalInput: 空欄・空白のみはnull（既定値を使う指示として扱う）", () => {
+  assert.strictEqual(core.normalizeDecimalInput(""), null);
+  assert.strictEqual(core.normalizeDecimalInput("   "), null);
+  assert.strictEqual(core.normalizeDecimalInput(null), null);
+  assert.strictEqual(core.normalizeDecimalInput(undefined), null);
+});
+test("normalizeDecimalInput: 全角数字・全角ピリオド/句点・全角マイナスを半角に正規化してから解釈する", () => {
+  assert.strictEqual(core.normalizeDecimalInput("０.３"), 0.3);
+  assert.strictEqual(core.normalizeDecimalInput("０．３"), 0.3);
+  assert.strictEqual(core.normalizeDecimalInput("０。３"), 0.3);
+  assert.strictEqual(core.normalizeDecimalInput("１２"), 12);
+  assert.strictEqual(core.normalizeDecimalInput("－０.５"), -0.5);
+});
+test("normalizeDecimalInput: 数値として解釈できない文字列はnull（0に化けて意図しない値を書き込まない）", () => {
+  assert.strictEqual(core.normalizeDecimalInput("abc"), null);
+  assert.strictEqual(core.normalizeDecimalInput("0.3.5"), null);
 });
 
 test("autoOutlineColor: 明るい色には黒、暗い色には白（render.pyのauto_outline_rgbと同じ閾値140）", () => {

@@ -233,10 +233,10 @@ try:
     # ------------------------------------------------------------------
     # 2.5) テロップの複数行対応（title.lines契約：resolve_title_lines/render_telop_layer）
     # ------------------------------------------------------------------
-    def title_line(text, size=1.0, underline=False, color="#FFFFFF", anim=None,
+    def title_line(text, size=1.0, underline=False, color="#FFFFFF", align=None, anim=None,
                     anim_sec=None, delay_sec=0.0, sfx=None):
         """resolve_title_lines()が返す1行分の辞書を、テストで期待値として組み立てるヘルパー"""
-        return {"text": text, "size": size, "underline": underline, "color": color,
+        return {"text": text, "size": size, "underline": underline, "color": color, "align": align,
                 "anim": anim, "anim_sec": anim_sec, "delay_sec": delay_sec, "sfx": sfx}
 
     print("")
@@ -1685,6 +1685,49 @@ try:
           f"2行目（color=#FF3B30）の文字本体の色がredに一致する（BGR平均={red_bgr}）")
 
     # ------------------------------------------------------------------
+    # 10.5) 行ごとの寄せ（lines[].align）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 行ごとの寄せ：lines[].alignがブロック幅の中で行ごとに適用される（省略時は全体title_alignを継承） ===")
+    align_lines = render.resolve_title_lines({"name": {"lines": [
+        {"text": "LEFT", "align": "left"},
+        {"text": "CENTERLINE"},
+        {"text": "RIGHT", "align": "right"},
+        {"text": "BAD", "align": "top"},
+    ]}})
+    check(align_lines[0]["align"] == "left" and align_lines[1]["align"] is None
+          and align_lines[2]["align"] == "right" and align_lines[3]["align"] is None,
+          f"resolve_title_lines：align指定はそのまま保持、未指定/不明値はNone: "
+          f"{[l['align'] for l in align_lines]}")
+
+    align_layers = render.render_telop_line_layers(
+        align_lines, W2, H2, {}, font_path_default, size_px_base, (0.5, 0.5), "center")
+    block_center_x = W2 * 0.5
+    left_cx, center_cx, right_cx, inherit_cx = (l["cx"] for l in align_layers)
+    check(left_cx < block_center_x, f"align='left'の行はブロック中心より左に配置される: cx={left_cx}")
+    check(right_cx > block_center_x, f"align='right'の行はブロック中心より右に配置される: cx={right_cx}")
+    check(abs(center_cx - block_center_x) < 1.0,
+          f"align未指定（このフリーズのtitle_align='center'を継承）の行はブロック中心に配置される: cx={center_cx}")
+    check(abs(inherit_cx - block_center_x) < 1.0,
+          f"align='top'（不明値）もtitle_align='center'継承と同じ扱いになる: cx={inherit_cx}")
+
+    # 後方互換の確認：全行がブロック全体と同じalignを明示した場合、align省略（継承）の場合と
+    # 完全に同じ見た目（bgr/alpha/cx/cy）になる＝行ごとのalign機構が既存の単一align指定の
+    # 挙動を壊していないことを保証する。
+    explicit_lines = [dict(l, align="center") for l in align_lines[:2]]  # LEFT/CENTERLINEをcenterに揃える
+    implicit_lines = [dict(l, align=None) for l in align_lines[:2]]
+    explicit_layers = render.render_telop_line_layers(
+        explicit_lines, W2, H2, {}, font_path_default, size_px_base, (0.5, 0.5), "center")
+    implicit_layers = render.render_telop_line_layers(
+        implicit_lines, W2, H2, {}, font_path_default, size_px_base, (0.5, 0.5), "center")
+    same = all(
+        e["cx"] == i["cx"] and e["cy"] == i["cy"] and np.array_equal(e["bgr"], i["bgr"])
+        and np.array_equal(e["alpha"], i["alpha"])
+        for e, i in zip(explicit_layers, implicit_layers))
+    check(same, "全行のalignをブロック全体のtitle_alignと明示的に同じ値にすると、"
+          "align省略（継承）時と完全に同じ結果になる（後方互換）")
+
+    # ------------------------------------------------------------------
     # 11) 行ごとのテロップ出現アクション：anim/anim_sec/delay_sec
     # ------------------------------------------------------------------
     print("")
@@ -1831,6 +1874,94 @@ try:
     check(lines_anim_path is not None and os.path.exists(lines_anim_path)
           and os.path.getsize(lines_anim_path) > 0,
           "行アニメ確認PNGが実際に書き出される")
+
+    # ------------------------------------------------------------------
+    # 15) 背景（人物以外）の塗りの種類：resolve_background_mode/resolve_background_options
+    #     のフォールバックと、8種のbackgroundモードの出力を検証する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 背景の塗りの種類：resolve_background_mode/resolve_background_optionsのフォールバック ===")
+    check(render.resolve_background_mode("halftone") == "halftone", "既知の値はそのまま通す")
+    check(render.resolve_background_mode("unknown-mode") == "mono", "未知の値はmonoにフォールバックする")
+    check(render.resolve_background_mode(None) == "mono", "Noneはmonoにフォールバックする")
+
+    default_opts = render.resolve_background_options({})
+    check(default_opts == dict(render.BACKGROUND_OPTIONS_DEFAULTS),
+          "background_options省略時はBACKGROUND_OPTIONS_DEFAULTSがそのまま使われる")
+    bad_opts = render.resolve_background_options({"background_options": {
+        "base": "not-a-color", "accent": "also-bad", "scale": 0, "angle": None, "opacity": 5}})
+    check(bad_opts["base"] == render.BACKGROUND_OPTIONS_DEFAULTS["base"], "不正なbaseは既定色にフォールバックする")
+    check(bad_opts["accent"] == render.BACKGROUND_OPTIONS_DEFAULTS["accent"], "不正なaccentは既定色にフォールバックする")
+    check(bad_opts["scale"] > 0, "scale=0は下限でクランプされ0除算にならない")
+    check(bad_opts["opacity"] == 1.0, "opacity=5は1.0にクランプされる")
+
+    print("")
+    print("=== 背景の塗りの種類：flat/gradient/halftone/stripes/grid/grainの出力を検証 ===")
+    bg_h, bg_w = 120, 160
+    synth_frame = np.full((bg_h, bg_w, 3), 230, dtype=np.uint8)   # 明るい下地
+    synth_frame[40:80, 20:60] = (10, 10, 10)                       # 暗い正方形（halftoneのドット径判定に使う）
+    opts_bw = render.resolve_background_options({"background_options": {
+        "base": "#FFFFFF", "accent": "#000000", "scale": 0.05, "angle": 30.0, "opacity": 1.0}})
+
+    flat_bg = render.make_background(synth_frame, "flat", options=opts_bw)
+    check(bool(np.all(flat_bg == (255, 255, 255))),
+          "flat：background_options.baseの単色でベタ塗りされる（BGR全画素が白）")
+
+    grad_bg = render.make_background(synth_frame, "gradient", options=opts_bw)
+    check(bool(np.all(grad_bg[0] == (255, 255, 255))), "gradient：最上段はbase色になる")
+    check(bool(np.all(grad_bg[-1] == (0, 0, 0))), "gradient：最下段はaccent色になる")
+    mid_val = int(grad_bg[bg_h // 2, 0, 0])
+    check(0 < mid_val < 255, f"gradient：中間の行はbase/accentの間の値になる: {mid_val}")
+
+    halftone_bg = render.make_background(synth_frame, "halftone", options=opts_bw)
+    dark_area = halftone_bg[40:80, 20:60]
+    light_area = halftone_bg[0:20, 0:20]
+    dark_accent_ratio = float(np.mean(np.all(dark_area == (0, 0, 0), axis=-1)))
+    light_accent_ratio = float(np.mean(np.all(light_area == (0, 0, 0), axis=-1)))
+    check(dark_accent_ratio > light_accent_ratio,
+          "halftone：元フレームが暗い領域ほどaccent色のドットが大きく（面積比が高く）なる: "
+          f"dark={dark_accent_ratio:.3f} light={light_accent_ratio:.3f}")
+    has_base = bool(np.any(np.all(halftone_bg == (255, 255, 255), axis=-1)))
+    has_accent = bool(np.any(np.all(halftone_bg == (0, 0, 0), axis=-1)))
+    check(has_base and has_accent, "halftone：base地とaccent色のドットの両方が出力に含まれる")
+
+    stripes_bg = render.make_background(synth_frame, "stripes", options=opts_bw)
+    grid_bg = render.make_background(synth_frame, "grid", options=opts_bw)
+    stripes_accent_ratio = float(np.mean(np.all(stripes_bg == (0, 0, 0), axis=-1)))
+    grid_accent_ratio = float(np.mean(np.all(grid_bg == (0, 0, 0), axis=-1)))
+    check(0.3 < stripes_accent_ratio < 0.7,
+          f"stripes：base/accentがおおよそ半々の面積比になる: {stripes_accent_ratio:.3f}")
+    check(grid_accent_ratio > stripes_accent_ratio,
+          "grid：直交する縞を重ねるため、stripesよりaccent面積比が大きくなる: "
+          f"grid={grid_accent_ratio:.3f} stripes={stripes_accent_ratio:.3f}")
+
+    mono_bg = render.make_background(synth_frame, "mono", 1.0)
+    grain_bg_low = render.make_background(synth_frame, "grain", options=render.resolve_background_options(
+        {"background_options": {"opacity": 0.0}}))
+    grain_bg_high = render.make_background(synth_frame, "grain", options=render.resolve_background_options(
+        {"background_options": {"opacity": 1.0}}))
+    diff_low = int(np.abs(grain_bg_low.astype(int) - mono_bg.astype(int)).sum())
+    diff_high = int(np.abs(grain_bg_high.astype(int) - mono_bg.astype(int)).sum())
+    check(diff_low == 0, f"grain：opacity=0はノイズ無しでmonoと一致する: diff={diff_low}")
+    check(diff_high > diff_low,
+          f"grain：opacityが大きいほどノイズ（monoとの差）が大きくなる: diff_high={diff_high}")
+
+    unknown_bg = render.make_background(synth_frame, "not-a-real-mode", 1.0)
+    check(bool(np.array_equal(unknown_bg, mono_bg)),
+          "make_background：未知のbackground値はmonoとして扱われる")
+
+    print("")
+    print("=== 背景の塗りの種類：旧JSON（background='mono'/'dark'のみ・background_options無し）は従来どおり ===")
+    legacy_mono = render.make_background(synth_frame, "mono", 1.0)
+    legacy_mono_default_opts = render.make_background(synth_frame, "mono", 1.0,
+                                                        options=render.resolve_background_options({}))
+    check(bool(np.array_equal(legacy_mono, legacy_mono_default_opts)),
+          "mono：background_options省略時と既定値明示時で出力が完全一致する（後方互換）")
+    legacy_dark = render.make_background(synth_frame, "dark", 1.0)
+    legacy_dark_default_opts = render.make_background(synth_frame, "dark", 1.0,
+                                                        options=render.resolve_background_options({}))
+    check(bool(np.array_equal(legacy_dark, legacy_dark_default_opts)),
+          "dark：background_options省略時と既定値明示時で出力が完全一致する（後方互換）")
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
