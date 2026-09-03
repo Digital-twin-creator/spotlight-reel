@@ -148,6 +148,12 @@ LOGO_CROP_CORNER_PATCH_PX = 6     # 四隅の背景色を推定する際、1点�
 LOGO_CROP_DENOISE_KERNEL_PX = 5   # 「内容」判定マスクにかけるモルフォロジー・オープニングのカーネルサイズ。
                                   # 背景側にノイズで紛れ込んだ孤立画素を、外接矩形を求める前に除去する。
 
+LOGO_AUTO_TRANSPARENT_BG_COLOR_THRESH = 45.0  # auto_transparent_bg：背景色とみなす色距離
+                                               # （BGR差分合計）のしきい値。LOGO_CROP_COLOR_THRESHより
+                                               # 少し緩め（=より広い色範囲を背景とみなす）にしてある
+LOGO_AUTO_TRANSPARENT_FEATHER_PX = 3           # auto_transparent_bg：背景/内容境界をぼかす半径（px）。
+                                                # 境界の数pxが半透明になり、輪郭が硬くならず馴染む
+
 # ロゴ演出「インパクト着地＋光彩スイープ」のパラメータ。
 # start_width_ratio/hold_big_sec/shrink_sec/settle_sec/sweep_start_sec/sweep_sec/
 # flash_strength/shake_sec/shake_amplitude/duration_sec/fade_sec/sfx_tail は
@@ -2394,6 +2400,47 @@ def logo_corner_avg_color(logo_bgr, patch_px=LOGO_CROP_CORNER_PATCH_PX):
     return tuple(int(round(c)) for c in avg)
 
 
+def auto_transparent_bg(bgr, alpha, threshold=LOGO_AUTO_TRANSPARENT_BG_COLOR_THRESH):
+    """
+    透過情報を持たない（＝ほぼ全画素が不透明な）ロゴ/透かし画像から、四隅の背景色に
+    近い画素を自動で透明化する。色距離（BGR差分合計）がthreshold以下、かつ画像の
+    外周から連結した領域だけを対象にすることで、ロゴ内部にたまたま背景と同系色の
+    部分（例："O"の文字の内側）があっても保持される。境界はLOGO_AUTO_TRANSPARENT_FEATHER_PX
+    分だけぼかして半透明にし、輪郭が硬くならないよう馴染ませる。
+
+    alphaに既に有意な透過（不透明でない画素）が含まれる場合は何もしない
+    （ユーザーが用意した透過PNGをそのまま尊重する）。
+    """
+    if bgr is None or alpha is None:
+        return bgr, alpha
+    a = alpha[:, :, 0] if alpha.ndim == 3 else alpha
+    if float(a.min()) < (1.0 - LOGO_CROP_ALPHA_THRESH):
+        return bgr, alpha  # 既に透過情報を持つ画像はそのまま
+
+    h, w = bgr.shape[:2]
+    if h < 3 or w < 3:
+        return bgr, alpha
+
+    bg_color = np.array(logo_corner_avg_color(bgr), dtype=np.float32)
+    diff = np.abs(bgr.astype(np.float32) - bg_color).sum(axis=2)
+    candidate = (diff <= threshold).astype(np.uint8)
+
+    # 外周から連結した領域だけを「背景」とみなす（ロゴ内部の同系色は保持する）
+    _, labels = cv2.connectedComponents(candidate, connectivity=4)
+    border_labels = set(labels[0, :].tolist()) | set(labels[-1, :].tolist()) \
+        | set(labels[:, 0].tolist()) | set(labels[:, -1].tolist())
+    border_labels.discard(0)
+    if not border_labels:
+        return bgr, alpha  # 外周が背景色と判定されなければ何もしない（安全側）
+    bg_mask = np.isin(labels, list(border_labels)).astype(np.float32)
+
+    keep = 1.0 - bg_mask
+    k = LOGO_AUTO_TRANSPARENT_FEATHER_PX * 2 + 1
+    keep_soft = np.clip(cv2.GaussianBlur(keep, (k, k), 0), 0.0, 1.0)[:, :, None]
+
+    return bgr, alpha * keep_soft
+
+
 def detect_logo_content_bbox(bgr, alpha, margin_ratio=LOGO_CROP_MARGIN_RATIO,
                               alpha_thresh=LOGO_CROP_ALPHA_THRESH, color_thresh=LOGO_CROP_COLOR_THRESH):
     """
@@ -2762,7 +2809,7 @@ def render_logo_frame(backdrop, logo_bgr, logo_alpha, logo_luma, W, H, elapsed_s
 WATERMARK_POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
 DEFAULT_WATERMARK_POSITION = "bottom_right"
 WATERMARK_DEFAULTS = {"position": DEFAULT_WATERMARK_POSITION, "width_ratio": 0.16,
-                       "opacity": 0.85, "margin": 0.03}
+                       "opacity": 0.85, "margin": 0.03, "auto_transparent_bg": True}
 WATERMARK_SHINE_DEFAULTS = {"enabled": True, "interval_sec": 4.0, "sec": 0.6}
 WATERMARK_SPIN_DEFAULTS = {"enabled": True, "interval_sec": 9.0, "sec": 0.8}
 
@@ -2785,6 +2832,7 @@ def resolve_watermark_config(wm_cfg):
     cfg["margin"] = max(0.0, float(wm_cfg.get("margin") if wm_cfg.get("margin") is not None
                                     else WATERMARK_DEFAULTS["margin"]))
     cfg["image"] = wm_cfg.get("image")
+    cfg["auto_transparent_bg"] = bool(wm_cfg.get("auto_transparent_bg", True))
 
     shine = dict(WATERMARK_SHINE_DEFAULTS)
     if isinstance(wm_cfg.get("shine"), dict):
@@ -3832,6 +3880,11 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 warn(f"ロゴ画像が見つかりません（{logo_cfg.get('image')}）。ロゴ演出は無効化します。")
                 logo_cfg, logo_at = None, None
             else:
+                # 透過情報の無い画像（黒背景など）は、まず背景色を自動で透明化する
+                # （logo.auto_transparent_bg=falseで無効化可能。既定true）。
+                # これにより、直後のクロップも実際の透明マージンとして正しく検出できる
+                if bool(logo_cfg.get("auto_transparent_bg", True)):
+                    logo_bgr, logo_alpha = auto_transparent_bg(logo_bgr, logo_alpha)
                 # ロゴ画像の余白（透明部分、または不透明PNGの背景色部分）を自動検出してクロップし、
                 # 内容部分だけをwidth_ratio基準で配置する（見た目の「迫力」を上げるため）
                 logo_bgr, logo_alpha = crop_logo_content(logo_bgr, logo_alpha)
@@ -3857,6 +3910,10 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 warn(f"透かしロゴ画像が見つかりません（{watermark_cfg.get('image')}）。watermarkは無効化します。")
                 watermark_cfg = None
             else:
+                # 透過情報の無い画像は、ロゴと同じ考え方で背景色を自動で透明化する
+                # （watermark.auto_transparent_bg=falseで無効化可能。既定true）
+                if bool(watermark_cfg.get("auto_transparent_bg", True)):
+                    watermark_bgr, watermark_alpha = auto_transparent_bg(watermark_bgr, watermark_alpha)
                 watermark_luma = build_logo_luminance_mask(watermark_bgr, watermark_alpha)
 
         # --- ハッシュタグ表示（hashtags）の解決（無指定ならhashtags_cfg=Noneで以後素通り） ---

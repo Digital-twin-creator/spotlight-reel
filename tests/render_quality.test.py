@@ -986,6 +986,50 @@ try:
           f"1画素推定の誤差={old_err} パッチ平均推定の誤差={new_err}")
 
     # ------------------------------------------------------------------
+    # 6.9b) auto_transparent_bg：透過の無いロゴ/透かし画像の背景色を自動で透明化
+    # ------------------------------------------------------------------
+    print("")
+    print("=== auto_transparent_bg：透過が無い画像の背景色を自動で透明化する ===")
+    atb_bgr, atb_alpha = render.load_logo_image(opaque_png_path)
+    check(atb_alpha.min() >= 1.0 - 1e-6, "元画像はアルファ無し相当（全面不透明）")
+
+    new_bgr, new_alpha = render.auto_transparent_bg(atb_bgr, atb_alpha)
+    ah, aw = new_bgr.shape[:2]
+    corner_alpha = float(new_alpha[0:5, 0:5, 0].mean())
+    center_alpha = float(new_alpha[ah // 2 - 5:ah // 2 + 5, aw // 2 - 5:aw // 2 + 5, 0].mean())
+    check(corner_alpha < 0.3, f"四隅（背景色）が自動で透明化される: corner_alpha={corner_alpha}")
+    check(center_alpha > 0.7, f"バッジ内部（内容）は不透明のまま保持される: center_alpha={center_alpha}")
+    check(np.array_equal(new_bgr, atb_bgr), "auto_transparent_bgはBGR画素そのものは変更しない（アルファのみ変更）")
+
+    already_transparent_bgr, already_transparent_alpha = render.load_logo_image(
+        os.path.join("examples", "store_logo.png"))
+    check(already_transparent_alpha.min() < 1.0 - 1e-6, "テスト用透かしロゴは元々透過を持つ")
+    unchanged_bgr, unchanged_alpha = render.auto_transparent_bg(already_transparent_bgr, already_transparent_alpha)
+    check(np.array_equal(unchanged_alpha, already_transparent_alpha),
+          "既に透過情報を持つ画像はauto_transparent_bgで変更されない（ユーザー用意の透過PNGを尊重）")
+
+    check(render.auto_transparent_bg(None, None) == (None, None), "bgr/alphaがNoneならNoneのまま返す")
+
+    tight_bgr, tight_alpha = render.auto_transparent_bg(atb_bgr, atb_alpha, threshold=0.0)
+    check(float(tight_alpha[0:5, 0:5, 0].mean()) < 0.3,
+          "しきい値を厳しくしても、四隅そのものの色（背景色の推定元）は透明化される")
+
+    # auto_transparent_bg後は実アルファができるため、crop_logo_contentのhas_real_alpha経路になり、
+    # 従来の色距離判定（旧経路）とほぼ同じ範囲にクロップされる（自動透明化がクロップと併用できる確認）
+    atb_cropped_bgr, atb_cropped_alpha = render.crop_logo_content(new_bgr, new_alpha)
+    check(atb_cropped_alpha.min() < 1.0 - 1e-6, "auto_transparent_bg後のクロップ結果は実アルファを持つ")
+    atb_ch, atb_cw = atb_cropped_bgr.shape[:2]
+    check(atb_cw < aw * 0.7 and atb_ch < ah * 0.7,
+          f"auto_transparent_bg適用後も自動クロップが効く: {aw}x{ah} → {atb_cw}x{atb_ch}")
+
+    print("")
+    print("=== auto_transparent_bg：watermark.auto_transparent_bgのJSON契約 ===")
+    wm_atb_default = render.resolve_watermark_config({"image": "x.png"})
+    check(wm_atb_default["auto_transparent_bg"] is True, "watermark.auto_transparent_bg省略時は既定でTrue")
+    wm_atb_false = render.resolve_watermark_config({"image": "x.png", "auto_transparent_bg": False})
+    check(wm_atb_false["auto_transparent_bg"] is False, "watermark.auto_transparent_bg: falseを明示的に指定できる")
+
+    # ------------------------------------------------------------------
     # 6.10) ラストロゴのアニメーション：「画面いっぱい→縮小して定位置」になっているか
     # ------------------------------------------------------------------
     print("")
