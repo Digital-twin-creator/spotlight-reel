@@ -12,7 +12,7 @@
 // 一意に決まる値であれば形式は問わない）。
 (function () {
   "use strict";
-  var BUILD_ID = "20260903-1";
+  var BUILD_ID = "20260903-2";
   try {
     var params = new URLSearchParams(location.search);
     if (params.get("v") !== BUILD_ID) {
@@ -198,19 +198,17 @@
   .draw-hint.fade-out{ opacity:0; }
   .video-wrap:not(.editing) .draw-hint{ display:none; }
 
-  /* --- フリーズ編集中、映像の上に常時浮かべる「ブラシ／テロップ移動」切替バー ---
-     editorSectionまでスクロールしなくても、映像を見ながら指ですぐ切り替えられるようにする
-     （実機で「タッチがブラシ描画に取られてテロップを動かせない」不具合の対策）。 */
-  .telop-mode-toggle{
-    position:absolute; left:0; right:0; bottom:8px; z-index:4;
-    display:flex; gap:8px; justify-content:center; pointer-events:none;
-  }
+  /* --- フリーズ編集画面の「ブラシ／テロップ移動」切替（映像直下・横並びのセグメントボタン） ---
+     映像の上には何も重ねない（実機で切替ボタンが映像に重なって邪魔という指摘への対応）。 */
+  .telop-mode-toggle{ display:flex; gap:8px; }
   .telop-mode-toggle button{
-    pointer-events:auto; min-height:38px; padding:6px 14px; font-size:13px;
-    background:rgba(11,13,18,.85); border:2px solid var(--line); color:#fff;
+    flex:1; min-height:44px; padding:6px 14px; font-size:14px;
+    background:var(--panel3); border:2px solid var(--line); color:var(--text);
   }
   .telop-mode-toggle button.selected{ border-color:var(--accent); color:var(--accent); }
-  .video-wrap:not(.editing) .telop-mode-toggle{ display:none; }
+  .telop-mode-toggle button:disabled{
+    opacity:.4; border-color:var(--line); color:var(--muted); pointer-events:none;
+  }
 
   /* --- 描画モード中は映像エリアを画面上部に固定し、
      ページ本体はスクロールさせない（bodyのスクロールがiOSのアドレスバー
@@ -417,10 +415,6 @@
         <canvas id="telopCanvas"></canvas>
         <canvas id="previewCanvas"></canvas>
         <div class="draw-hint" id="drawHint" hidden>ここを指でなぞってください ✍️</div>
-        <div class="telop-mode-toggle" id="telopModeToggle" hidden>
-          <button type="button" class="mode-toggle-btn" id="telopModeBrushBtn" data-mode="brush">✏ ブラシ</button>
-          <button type="button" class="mode-toggle-btn" id="telopModeMoveBtn" data-mode="move">✥ テロップ移動</button>
-        </div>
       </div>
       <!-- 「▶ プレビュー」再生中だけ表示する、全画面表示から抜けるための閉じるボタン。
            再生中はvideoWrap自体が画面全体を覆うため、下の操作バー（previewBtn等）には
@@ -461,6 +455,14 @@
     </div>
     <div class="card">
       <h2 id="editorTitle"><span class="step-badge">④</span>止まった映像を指でなぞってください</h2>
+
+      <div class="field">
+        <label>映像上のタッチ操作</label>
+        <div class="telop-mode-toggle" id="telopModeToggle">
+          <button type="button" class="mode-toggle-btn" id="telopModeBrushBtn" data-mode="brush">✏ ブラシ</button>
+          <button type="button" class="mode-toggle-btn" id="telopModeMoveBtn" data-mode="move">✥ テロップ移動</button>
+        </div>
+      </div>
 
       <div class="field">
         <label>切り抜き方法</label>
@@ -4106,10 +4108,11 @@ function init() {
     draft.maskMode = resolveMaskMode(els.maskModeSelect.value);
     updateMaskModeUI();
     redrawStrokesOverlay();
-    // まだ名前を入力していない（＝テロップ移動への自動切り替えがまだ起きていない）間は、
-    // 切り抜き方法の変更に合わせてタッチ操作モードの既定を追従させる。「自動」はブラシが
-    // 不要なのでテロップ移動を既定にする。名前入力後（ユーザーが既に位置調整を始めている
-    // 可能性がある）は、ここでは上書きしない
+    // 「自動」（ブラシ不要）に切り替えたら✏ブラシを常にグレーアウトする（触っていても強制的に
+    // テロップ移動へ切り替える）。まだ名前を入力していない（＝テロップ移動への自動切り替えが
+    // まだ起きていない）間は、それ以外の切り抜き方法でもブラシを既定に戻す（名前入力後は
+    // ユーザーが既に位置調整を始めている可能性があるためここでは上書きしない）
+    updateTelopModeAvailability();
     if (!draftVisibleTitleLines().length) {
       setTelopEditMode(draft.maskMode === "auto" ? "move" : "brush");
     }
@@ -5055,7 +5058,7 @@ function enterDrawMode() {
   // 「切り抜き：自動」（maskMode="auto"）はブラシで塗る必要が無いフリーズなので、
   // 最初からテロップ移動モードにしておく（実機で「タッチがブラシ描画に取られて
   // テロップを動かせない」不具合の対策）。それ以外は従来どおりブラシが既定。
-  els.telopModeToggle.hidden = false;
+  updateTelopModeAvailability();
   setTelopEditMode(resolveMaskMode(draft.maskMode) === "auto" ? "move" : "brush");
 
   layoutOverlayCanvases();
@@ -5096,7 +5099,6 @@ function exitDrawMode() {
     els.videoWrap.style.height = "";
     stopPreviewPlayback();
     hideDrawHint();
-    els.telopModeToggle.hidden = true;
     // 進行中のサーバー確認表示があれば、フリーズ編集を抜けるタイミングで必ずリセットする
     // （リセットせずに残ると、次に別のフリーズを編集した時に古い静止フレームの結果が
     // 表示され続けてしまう）
@@ -5439,6 +5441,19 @@ function setTelopEditMode(mode) {
   els.telopModeBrushBtn.classList.toggle("selected", draft.telopEditMode === "brush");
   els.telopModeMoveBtn.classList.toggle("selected", draft.telopEditMode === "move");
   if (draft.telopEditMode === "move") hideDrawHint();
+}
+
+/**
+ * 切り抜き方法(maskMode)に応じて「✏ ブラシ」ボタンの有効/無効を切り替える。
+ * maskMode="auto"（サーバーで自動切り抜き）はなぞる必要が無いフリーズなので、
+ * ブラシ側をグレーアウトして選べないようにする（auto+brushはブラシ修正が
+ * 意味を持つため引き続き選べる）。
+ */
+function updateTelopModeAvailability() {
+  if (!draft) return;
+  var brushNeeded = resolveMaskMode(draft.maskMode) !== "auto";
+  els.telopModeBrushBtn.disabled = !brushNeeded;
+  if (!brushNeeded && draft.telopEditMode === "brush") setTelopEditMode("move");
 }
 
 function wireDrawCanvasTouch() {

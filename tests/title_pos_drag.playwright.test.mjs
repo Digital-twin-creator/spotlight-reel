@@ -309,6 +309,43 @@ async function main() {
   const moveBtnSelectedForAutoMask = await page.evaluate(
     () => document.getElementById("telopModeMoveBtn").classList.contains("selected"));
   check(moveBtnSelectedForAutoMask, "「✥ テロップ移動」ボタンがselected状態になる（切り抜き：自動）");
+  const brushBtnDisabledForAutoMask = await page.evaluate(
+    () => document.getElementById("telopModeBrushBtn").disabled);
+  check(brushBtnDisabledForAutoMask, "切り抜き方法「自動」では「✏ ブラシ」ボタンがグレーアウト（disabled）される");
+
+  await page.selectOption("#maskModeSelect", "brush");
+  await page.waitForTimeout(50);
+  const brushBtnEnabledAfterBackToBrush = await page.evaluate(
+    () => !document.getElementById("telopModeBrushBtn").disabled);
+  check(brushBtnEnabledAfterBackToBrush, "切り抜き方法を「ブラシ」に戻すと「✏ ブラシ」ボタンのグレーアウトが解除される");
+
+  await page.click("#cancelFreezeBtn");
+  await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+
+  console.log("");
+  console.log("=== 「ブラシ／テロップ移動」切替は映像の上ではなく、映像直下の「切り抜き方法」の上に横並びで表示される ===");
+  await page.click("#addFreezeBtn");
+  await page.waitForFunction(() => !document.getElementById("editorSection").hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(200);
+  const toggleLayout = await page.evaluate(() => {
+    const toggle = document.getElementById("telopModeToggle");
+    const videoWrap = document.getElementById("videoWrap");
+    const maskModeField = document.getElementById("maskModeSelect").closest(".field");
+    return {
+      isInsideVideoWrap: videoWrap.contains(toggle),
+      toggleTop: toggle.getBoundingClientRect().top,
+      toggleBottom: toggle.getBoundingClientRect().bottom,
+      videoWrapBottom: videoWrap.getBoundingClientRect().bottom,
+      maskModeTop: maskModeField.getBoundingClientRect().top
+    };
+  });
+  check(!toggleLayout.isInsideVideoWrap, "切替ボタンは#videoWrap（映像）の中には存在しない＝映像の上に重ならない");
+  check(toggleLayout.toggleTop >= toggleLayout.videoWrapBottom,
+    "切替ボタンは映像エリアより下（映像の外）に配置され、映像と縦方向に重ならない: toggleTop=" + toggleLayout.toggleTop +
+    " videoWrapBottom=" + toggleLayout.videoWrapBottom);
+  check(toggleLayout.toggleBottom <= toggleLayout.maskModeTop,
+    "切替ボタンは「切り抜き方法」の上に配置されている: toggleBottom=" + toggleLayout.toggleBottom +
+    " maskModeTop=" + toggleLayout.maskModeTop);
   await page.click("#cancelFreezeBtn");
   await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 

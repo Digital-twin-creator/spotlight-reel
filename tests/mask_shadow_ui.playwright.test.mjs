@@ -506,10 +506,11 @@ async function main() {
 
   // 描画キャンバスへのタッチはブロックされずすぐ操作できる（全画面モーダルが無くなったため、
   // 元々このためのEscキー・背景タップ等の回避策も不要になった）。
-  // このフリーズは既に名前を入力済み＝自動でテロップ移動モードに切り替わっているため、
-  // ここでは明示的に「✏ ブラシ」へ戻してからなぞる（そうしないとタッチはテロップ移動に
-  // 使われ、ブラシ操作の検証にならない）
-  await page.click("#telopModeBrushBtn");
+  // このフリーズは切り抜き方法が「自動」のままなので「✏ ブラシ」はグレーアウトされている
+  // （ブラシ不要のため）。ここでの検証目的はブラシ操作そのものではなく「モーダルに
+  // タッチがブロックされないこと」なので、いったんブラシが使える切り抜き方法に
+  // 切り替えてから確認する
+  await page.selectOption("#maskModeSelect", "brush");
   await page.waitForTimeout(50);
   const strokesBeforeTouchBack = await page.evaluate(() => draft.strokes.length);
   await dragStroke(page, drawBox, 0.15, 0.6, 0.3, 0.7);
