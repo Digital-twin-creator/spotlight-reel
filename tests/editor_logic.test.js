@@ -1041,6 +1041,79 @@ test("buildProjectJSON/parseProjectJSON: 全体設定のsubjectOutlineを往復�
   assert.deepStrictEqual(loaded.subjectOutline, state.subjectOutline);
 });
 
+/* ---- safe_zone（セーフゾーン自動クランプ） ---- */
+
+test("resolveSafeZone: 未指定/不正値はDEFAULT_SAFE_ZONEで補う", () => {
+  const cfg = core.resolveSafeZone({});
+  assert.deepStrictEqual(cfg, core.DEFAULT_SAFE_ZONE);
+  const negLeft = core.resolveSafeZone({ left: -10, enabled: false });
+  assert.strictEqual(negLeft.left, 0, "負の値は0でクランプされる");
+  assert.strictEqual(negLeft.enabled, false);
+  const custom = core.resolveSafeZone({ left: 10, top: 20, right: 30, bottom: 40 });
+  assert.deepStrictEqual(custom, { enabled: true, left: 10, top: 20, right: 30, bottom: 40 });
+});
+
+test("safeZoneRectPx: 1080x1920（基準解像度）ではpx指定がそのまま矩形になる。無効/矩形が潰れる場合は画面全体", () => {
+  const rect = core.safeZoneRectPx(core.DEFAULT_SAFE_ZONE, 1080, 1920);
+  assert.deepStrictEqual(rect, { left: 40, top: 120, right: 1080 - 150, bottom: 1920 - 400 });
+
+  const halfRect = core.safeZoneRectPx(core.DEFAULT_SAFE_ZONE, 540, 960);
+  assert.ok(Math.abs(halfRect.left - 20) < 0.01 && Math.abs(halfRect.right - (540 - 75)) < 0.01,
+    "半分の解像度ではマージンも比率換算され半分になる");
+
+  const disabledRect = core.safeZoneRectPx(core.resolveSafeZone({ enabled: false }), 1080, 1920);
+  assert.deepStrictEqual(disabledRect, { left: 0, top: 0, right: 1080, bottom: 1920 });
+
+  const collapsedRect = core.safeZoneRectPx(
+    core.resolveSafeZone({ left: 2000, right: 2000 }), 1080, 1920);
+  assert.deepStrictEqual(collapsedRect, { left: 0, top: 0, right: 1080, bottom: 1920 },
+    "マージンが大きすぎて矩形が潰れる場合は画面全体にフォールバックする");
+});
+
+test("clampBoxToRect: 矩形の外にはみ出た分だけ内側へ押し戻す量を返す。内側なら移動量は0", () => {
+  const d = core.clampBoxToRect(
+    { left: 10, top: 10, right: 100, bottom: 100 },
+    { left: 40, top: 40, right: 500, bottom: 500 });
+  assert.strictEqual(d.dx, 30);
+  assert.strictEqual(d.dy, 30);
+  const d2 = core.clampBoxToRect(
+    { left: 50, top: 50, right: 100, bottom: 100 },
+    { left: 0, top: 0, right: 200, bottom: 200 });
+  assert.strictEqual(d2.dx, 0);
+  assert.strictEqual(d2.dy, 0);
+});
+
+test("buildProjectJSON: state.safeZoneが既定のときはstyle.safe_zoneキーを省略する（完全後方互換）", () => {
+  const project = core.buildProjectJSON(sampleState());
+  assert.strictEqual("safe_zone" in project.style, false);
+});
+
+test("buildProjectJSON: state.safeZoneが既定と異なればstyle.safe_zoneを明示的に出力する（無効化も含む）", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    safeZone: { enabled: false, left: 40, top: 120, right: 150, bottom: 400 }
+  }));
+  assert.deepStrictEqual(project.style.safe_zone, { enabled: false, left: 40, top: 120, right: 150, bottom: 400 });
+});
+
+test("parseProjectJSON: style.safe_zoneを読み込める。省略時はDEFAULT_SAFE_ZONEを補う", () => {
+  const loaded = core.parseProjectJSON({
+    style: { safe_zone: { enabled: true, left: 10, top: 20, right: 30, bottom: 40 } },
+    freezes: [],
+  });
+  assert.deepStrictEqual(loaded.safeZone, { enabled: true, left: 10, top: 20, right: 30, bottom: 40 });
+  const defaultLoaded = core.parseProjectJSON({ freezes: [] });
+  assert.deepStrictEqual(defaultLoaded.safeZone, core.DEFAULT_SAFE_ZONE);
+});
+
+test("buildProjectJSON/parseProjectJSON: 全体設定のsafeZoneを往復できる", () => {
+  const state = Object.assign(sampleState(), {
+    safeZone: { enabled: true, left: 60, top: 100, right: 80, bottom: 300 }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.deepStrictEqual(loaded.safeZone, state.safeZone);
+});
+
 test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し、無ければ省略する", () => {
   const withLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageName: "logo.png", at: "last_freeze", background: "auto", durationSec: 1.2, sfx: "don" }

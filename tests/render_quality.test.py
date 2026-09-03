@@ -1753,7 +1753,8 @@ try:
         render.resolve_title_lines(fz_lines), W, H, {}, render.resolve_title_font_path(fz_lines),
         max(8, int(round(H * fz_lines.get("title_size", render.DEFAULT_STYLE["title_size"])))),
         fz_lines.get("title_pos") or render.DEFAULT_STYLE["title_pos"],
-        fz_lines.get("title_align", render.DEFAULT_STYLE["title_align"]))
+        fz_lines.get("title_align", render.DEFAULT_STYLE["title_align"]),
+        safe_zone_rect=render.safe_zone_rect_px(render.resolve_safe_zone(fz_lines), W, H))
     check(len(layers_lines) == 2, "2行分のテロップレイヤーが得られる")
 
     def region_diff(frame_a, frame_b, layer, alpha_thresh=0.3):
@@ -1831,7 +1832,8 @@ try:
             render.resolve_title_lines(fz_legacy), W, H, {}, render.resolve_title_font_path(fz_legacy),
             max(8, int(round(H * fz_legacy.get("title_size", render.DEFAULT_STYLE["title_size"])))),
             fz_legacy.get("title_pos") or render.DEFAULT_STYLE["title_pos"],
-            fz_legacy.get("title_align", render.DEFAULT_STYLE["title_align"]))
+            fz_legacy.get("title_align", render.DEFAULT_STYLE["title_align"]),
+            safe_zone_rect=render.safe_zone_rect_px(render.resolve_safe_zone(fz_legacy), W, H))
         check(len(layers0) == 1, "旧形式（文字列name）は1行のレイヤーになる")
         scale0 = render.telop_bounce_scale(expected_fade) if bounce_flag and expected_fade < 1.0 else 1.0
         bgr0, alpha0 = render.transform_telop_layer(
@@ -2227,6 +2229,73 @@ try:
           "影（人物の元の位置）には輪郭線が乗らない（合成順：影 → 人物 → 輪郭線）")
     check(bool(np.any(so_shadow_on != so_shadow_off)),
           "それでも人物側には輪郭線が乗るため、全体としては見た目が変わる")
+
+    # ------------------------------------------------------------------
+    # 19) セーフゾーン（safe_zone）：resolve_safe_zone/safe_zone_rect_pxの解決と、
+    #     render_telop_line_layersでの自動クランプを検証する
+    # ------------------------------------------------------------------
+    print("")
+    print("=== セーフゾーン：resolve_safe_zone/safe_zone_rect_pxの解決 ===")
+    default_sz = render.resolve_safe_zone({})
+    check(default_sz == dict(render.SAFE_ZONE_DEFAULTS),
+          "safe_zone省略時はSAFE_ZONE_DEFAULTSがそのまま使われる（既定で有効）")
+    sz_neg = render.resolve_safe_zone({"safe_zone": {"left": -10}})
+    check(sz_neg["left"] >= 0, "負のマージンは0でクランプされる")
+
+    sz_w, sz_h = 1080, 1920
+    default_rect = render.safe_zone_rect_px(default_sz, sz_w, sz_h)
+    check(default_rect == (40.0, 120.0, sz_w - 150.0, sz_h - 400.0),
+          f"1080x1920（基準解像度そのもの）ではpx指定がそのまま矩形になる: {default_rect}")
+
+    half_w, half_h = 540, 960
+    half_rect = render.safe_zone_rect_px(default_sz, half_w, half_h)
+    check(abs(half_rect[0] - 20.0) < 0.01 and abs(half_rect[2] - (half_w - 75.0)) < 0.01,
+          f"半分の解像度では比率換算されマージンも半分になる（左右）: {half_rect}")
+    check(abs(half_rect[1] - 60.0) < 0.01 and abs(half_rect[3] - (half_h - 200.0)) < 0.01,
+          f"半分の解像度では比率換算されマージンも半分になる（上下）: {half_rect}")
+
+    disabled_rect = render.safe_zone_rect_px(render.resolve_safe_zone({"safe_zone": {"enabled": False}}),
+                                              sz_w, sz_h)
+    check(disabled_rect == (0.0, 0.0, float(sz_w), float(sz_h)),
+          "enabled=falseなら画面全体（クランプなし）になる")
+
+    collapsed_rect = render.safe_zone_rect_px(
+        render.resolve_safe_zone({"safe_zone": {"left": 2000, "right": 2000}}), sz_w, sz_h)
+    check(collapsed_rect == (0.0, 0.0, float(sz_w), float(sz_h)),
+          "マージンが大きすぎて矩形が潰れる場合は安全側で画面全体にフォールバックする")
+
+    print("")
+    print("=== セーフゾーン：clamp_box_to_rectの基本動作 ===")
+    dx, dy = render.clamp_box_to_rect((10, 10, 100, 100), (40, 40, 500, 500))
+    check(dx == 30 and dy == 30, "矩形の外側（左上）にはみ出た分だけ内側へ押し戻す量を返す")
+    dx2, dy2 = render.clamp_box_to_rect((50, 50, 100, 100), (0, 0, 200, 200))
+    check(dx2 == 0 and dy2 == 0, "矩形の内側に収まっていれば移動量は0")
+
+    print("")
+    print("=== セーフゾーン：render_telop_line_layersが安全域の外にはみ出さないようクランプする ===")
+    sz_font_path = render.resolve_title_font_path(dict(render.DEFAULT_STYLE, name="セーフゾーン確認"))
+    sz_lines = render.resolve_title_lines({"name": "セーフゾーン確認"})
+    sz_safe_rect = (100.0, 100.0, sz_w - 100.0, sz_h - 300.0)
+
+    def text_bbox_xy(layers):
+        alpha = layers[0]["alpha"][:, :, 0]
+        ys, xs = np.nonzero(alpha > 0.1)
+        return xs.min(), xs.max(), ys.min(), ys.max()
+
+    # 安全域の左上ギリギリ外側を狙っても、クランプされて安全域の内側に収まるはず
+    clamped_layers = render.render_telop_line_layers(
+        sz_lines, sz_w, sz_h, {}, sz_font_path, 80, pos_ratio=(0.01, 0.01), align="center",
+        safe_zone_rect=sz_safe_rect)
+    cx0, cx1, cy0, cy1 = text_bbox_xy(clamped_layers)
+    # 文字の縁のアンチエイリアス分で数px程度はみ出て見えることがあるため、許容誤差を設ける
+    check(cx0 >= sz_safe_rect[0] - 5, f"安全域より左にはみ出さない: x0={cx0} safe_left={sz_safe_rect[0]}")
+    check(cy0 >= sz_safe_rect[1] - 5, f"安全域より上にはみ出さない: y0={cy0} safe_top={sz_safe_rect[1]}")
+
+    # safe_zone_rect省略時（None）は画面全体が基準になる（従来どおり）
+    unclamped_layers = render.render_telop_line_layers(
+        sz_lines, sz_w, sz_h, {}, sz_font_path, 80, pos_ratio=(0.01, 0.01), align="center")
+    ux0, ux1, uy0, uy1 = text_bbox_xy(unclamped_layers)
+    check(ux0 < sz_safe_rect[0], "safe_zone_rect省略時は画面端（0,0)まで許容され、安全域より外側に出る")
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)

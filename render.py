@@ -1987,25 +1987,77 @@ def render_text_box_layer(draw, bbox, size_px, opts, W, H, full_width=False):
         draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill)
 
 
-def clamp_box_to_canvas(bbox, W, H):
-    """外接矩形bbox=(x0,y0,x1,y1)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す"""
+def clamp_box_to_rect(bbox, rect):
+    """外接矩形bbox=(x0,y0,x1,y1)がrect=(rx0,ry0,rx1,ry1)に収まるよう、必要な平行移動量(dx,dy)を返す"""
     x0, y0, x1, y1 = bbox
+    rx0, ry0, rx1, ry1 = rect
     dx = 0.0
-    if x0 < 0:
-        dx = -x0
-    elif x1 > W:
-        dx = W - x1
+    if x0 < rx0:
+        dx = rx0 - x0
+    elif x1 > rx1:
+        dx = rx1 - x1
     dy = 0.0
-    if y0 < 0:
-        dy = -y0
-    elif y1 > H:
-        dy = H - y1
+    if y0 < ry0:
+        dy = ry0 - y0
+    elif y1 > ry1:
+        dy = ry1 - y1
     return dx, dy
+
+
+def clamp_box_to_canvas(bbox, W, H):
+    """外接矩形bbox=(x0,y0,x1,y1)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す
+    （clamp_box_to_rectの薄いラッパー。他モジュールからの既存呼び出しとの後方互換用）"""
+    return clamp_box_to_rect(bbox, (0.0, 0.0, float(W), float(H)))
+
+
+# ---------------------------------------------------------------------------
+# セーフゾーン（safe_zone）：テロップ・ハッシュタグ・ロゴオーバーレイの自動配置を
+# 画面端の一定領域を避けて配置するための共通クランプ枠。1080x1920基準のpx指定を
+# 実際の出力解像度に比率換算する。
+# ---------------------------------------------------------------------------
+
+SAFE_ZONE_REF_W = 1080.0
+SAFE_ZONE_REF_H = 1920.0
+SAFE_ZONE_DEFAULTS = {"enabled": True, "left": 40, "top": 120, "right": 150, "bottom": 400}
+
+
+def resolve_safe_zone(style):
+    """
+    safe_zone（{enabled, left, top, right, bottom}、px・1080x1920基準）を解決する。
+    JSON側に無ければSAFE_ZONE_DEFAULTSをそのまま使う（既定で有効）。
+    """
+    raw = (style or {}).get("safe_zone")
+    cfg = dict(SAFE_ZONE_DEFAULTS)
+    if isinstance(raw, dict):
+        cfg.update(raw)
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    for key in ("left", "top", "right", "bottom"):
+        cfg[key] = max(0.0, float(cfg.get(key) or 0.0))
+    return cfg
+
+
+def safe_zone_rect_px(safe_zone, W, H):
+    """
+    safe_zone（1080x1920基準のpx）を実際の出力WxHのpx矩形(x0,y0,x1,y1)に変換する。
+    自動配置・ドラッグはこの矩形の内側に収める。無効時、または左右/上下のマージンが
+    大きすぎて矩形が潰れてしまう場合は、安全側として(0,0,W,H)（画面全体）を返す。
+    """
+    if not safe_zone or not safe_zone.get("enabled"):
+        return (0.0, 0.0, float(W), float(H))
+    left = safe_zone.get("left", 0.0) / SAFE_ZONE_REF_W * W
+    right = safe_zone.get("right", 0.0) / SAFE_ZONE_REF_W * W
+    top = safe_zone.get("top", 0.0) / SAFE_ZONE_REF_H * H
+    bottom = safe_zone.get("bottom", 0.0) / SAFE_ZONE_REF_H * H
+    x0, y0, x1, y1 = left, top, W - right, H - bottom
+    if x1 <= x0 or y1 <= y0:
+        return (0.0, 0.0, float(W), float(H))
+    return (x0, y0, x1, y1)
 
 
 def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
                               pos_ratio=(0.5, 0.78), align="center", outline_color=None,
-                              backing_options=None, auto_contrast=True, bg_bgr=None):
+                              backing_options=None, auto_contrast=True, bg_bgr=None,
+                              safe_zone_rect=None):
     """
     テロップ（複数行対応）を行ごとに別々のレイヤーとして描き、
     [{"text","bgr","alpha","cx","cy"}, ...]（可視行の順）を返す。可視行が無ければ空リスト。
@@ -2014,8 +2066,9 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     倍率）・アンダーラインの有無・文字色（"#RRGGBB"）を変えられる。複数行はブロック全体を
     1つのまとまりとして扱い、pos_ratio=[x, y]（0〜1、出力サイズに対する比率）をブロック
     中心のアンカー位置とする。alignに応じてブロック全体の位置・幅（＝最も広い行の幅）を
-    決め、画面端にはみ出す場合はブロックごと自動で内側に寄せる（ここまでは行ごとのalign指定
-    の有無によらず不変＝ドラッグ移動やクランプの基準は崩れない）。各行はその
+    決め、画面端（safe_zone_rectを指定した場合はその内側）にはみ出す場合はブロックごと
+    自動で内側に寄せる（ここまでは行ごとのalign指定の有無によらず不変＝ドラッグ移動や
+    クランプの基準は崩れない）。各行はその
     line.get("align")（省略時はブロック全体のalign）に従い、このブロック幅の中で
     個別に左寄せ/中央/右寄せされる。
 
@@ -2095,7 +2148,8 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     block_top = py - block_h / 2.0
     block_bottom = block_top + block_h
 
-    dx, dy = clamp_box_to_canvas((block_left, block_top, block_right, block_bottom), W, H)
+    rect = safe_zone_rect if safe_zone_rect is not None else (0.0, 0.0, float(W), float(H))
+    dx, dy = clamp_box_to_rect((block_left, block_top, block_right, block_bottom), rect)
     block_left += dx
     block_right += dx
     block_top += dy
@@ -2884,10 +2938,12 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     outline_color = resolve_title_outline_color(fz)
     text_backing_opts = resolve_text_backing_options(fz)
     auto_contrast = bool(fz.get("auto_contrast", DEFAULT_STYLE["auto_contrast"]))
+    safe_zone_rect = safe_zone_rect_px(resolve_safe_zone(fz), W, H)
     line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
                                             title_pos, title_align, outline_color=outline_color,
                                             backing_options=text_backing_opts,
-                                            auto_contrast=auto_contrast, bg_bgr=bg)
+                                            auto_contrast=auto_contrast, bg_bgr=bg,
+                                            safe_zone_rect=safe_zone_rect)
     bounce = bool(fz.get("title_bounce"))
     line_anims = [resolve_line_anim_params(line, bounce) for line in visible_title_lines]
 
@@ -3081,10 +3137,12 @@ def render_preview(frame, plan, W, H, fps, font_cache, out_png, cache_dir=None, 
     outline_color = resolve_title_outline_color(fz)
     text_backing_opts = resolve_text_backing_options(fz)
     auto_contrast = bool(fz.get("auto_contrast", DEFAULT_STYLE["auto_contrast"]))
+    safe_zone_rect = safe_zone_rect_px(resolve_safe_zone(fz), W, H)
     line_layers = render_telop_line_layers(title_lines, W, H, font_cache, font_path, size_px,
                                             title_pos, title_align, outline_color=outline_color,
                                             backing_options=text_backing_opts,
-                                            auto_contrast=auto_contrast, bg_bgr=bg)
+                                            auto_contrast=auto_contrast, bg_bgr=bg,
+                                            safe_zone_rect=safe_zone_rect)
     bounce = bool(fz.get("title_bounce"))
     for layer in line_layers:
         before_img = blend_telop(before_img, layer["bgr"], layer["alpha"], 1.0)

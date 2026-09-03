@@ -153,13 +153,39 @@ async function main() {
   await page.waitForTimeout(100);
   const clampedPos = await page.evaluate(() => draft.titlePos);
   const expectedClamped = await page.evaluate(({ textW, textH, align }) => {
-    return clampTitlePosRatio([0, 0], textW, textH, align, overlaySize.width, overlaySize.height);
+    const safeRect = safeZoneRectPx(resolveSafeZone(appState.safeZone), overlaySize.width, overlaySize.height);
+    return clampTitlePosRatio([0, 0], textW, textH, align, overlaySize.width, overlaySize.height, safeRect);
   }, infoBeforeClamp);
   check(clampedPos[0] >= 0 && clampedPos[0] <= 1 && clampedPos[1] >= 0 && clampedPos[1] <= 1,
     "画面外に出そうな位置へドラッグしても比率は0〜1の範囲に収まる: " + JSON.stringify(clampedPos));
   check(Math.abs(clampedPos[0] - expectedClamped[0]) < 0.02 && Math.abs(clampedPos[1] - expectedClamped[1]) < 0.02,
-    "クランプ結果がclampTitlePosRatio（render.pyと同じロジック）の計算どおりになる: " +
+    "クランプ結果がclampTitlePosRatio（render.pyと同じロジック）の計算どおりになる（既定で有効なセーフゾーンぶん画面端より内側になる）: " +
     JSON.stringify(clampedPos) + " ≈ " + JSON.stringify(expectedClamped));
+  check(clampedPos[1] > 0.02,
+    "既定のセーフゾーン（top=120px@1080x1920基準）により、画面端(y=0)そのものより下に留まる: " + clampedPos[1]);
+
+  console.log("");
+  console.log("=== セーフゾーンを無効化すると、ドラッグは画面端そのものまでクランプされる ===");
+  // フリーズ編集中は設定カードのチェックボックスをUI操作しにくいため、appStateを直接
+  // 書き換える（updateTelopDrag自身がappState.safeZoneを毎回参照する実装なので、
+  // これだけでドラッグの挙動が変わることを確認できる）
+  await page.evaluate(() => { appState.safeZone.enabled = false; });
+  const cornerFrom2 = await telopCenterInPage(page);
+  const cornerTo2 = await ratioToPage(page, 0.0, 0.0);
+  await dragMouse(page, cornerFrom2, cornerTo2, 10);
+  await page.waitForTimeout(100);
+  const clampedPosNoSafeZone = await page.evaluate(() => draft.titlePos);
+  const expectedNoSafeZone = await page.evaluate(({ textW, textH, align }) => {
+    return clampTitlePosRatio([0, 0], textW, textH, align, overlaySize.width, overlaySize.height);
+  }, infoBeforeClamp);
+  check(Math.abs(clampedPosNoSafeZone[0] - expectedNoSafeZone[0]) < 0.02 &&
+    Math.abs(clampedPosNoSafeZone[1] - expectedNoSafeZone[1]) < 0.02,
+    "セーフゾーンを無効化すれば従来どおり画面端まで（セーフゾーンぶんの余白なしで）クランプされる: " +
+    JSON.stringify(clampedPosNoSafeZone) + " ≈ " + JSON.stringify(expectedNoSafeZone));
+  await page.evaluate(() => { appState.safeZone.enabled = true; });
+  // このブロックの直前のドラッグでdraft.titlePosが動いているため、以降のJSON比較は
+  // ここで取り直した最新位置を基準にする
+  const clampedPosFinal = await page.evaluate(() => draft.titlePos);
 
   console.log("");
   console.log("=== サイズスライダー・寄せセレクトの変更がdraftに反映される ===");
@@ -180,8 +206,8 @@ async function main() {
   const project = await page.evaluate(() => buildProjectJSON(appState));
   check(project.freezes.length === 1, "フリーズが1件書き出される: " + project.freezes.length);
   const fz = project.freezes[0];
-  check(Array.isArray(fz.title_pos) && Math.abs(fz.title_pos[0] - clampedPos[0]) < 0.01 &&
-    Math.abs(fz.title_pos[1] - clampedPos[1]) < 0.01,
+  check(Array.isArray(fz.title_pos) && Math.abs(fz.title_pos[0] - clampedPosFinal[0]) < 0.01 &&
+    Math.abs(fz.title_pos[1] - clampedPosFinal[1]) < 0.01,
     "書き出したJSONのfreezes[0].title_posがドラッグ後の位置になっている: " + JSON.stringify(fz.title_pos));
   check(Math.abs(fz.title_size - 0.1) < 1e-6, "freezes[0].title_sizeがスライダーの値になっている: " + fz.title_size);
   check(fz.title_align === "left", "freezes[0].title_alignがセレクトの値になっている: " + fz.title_align);

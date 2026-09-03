@@ -487,6 +487,43 @@ async function main() {
   check(Math.abs(projectAfterEnable.style.subject_outline.width - 0.006) < 1e-6,
     "JSON出力：style.subject_outline.widthが反映される");
 
+  console.log("");
+  console.log("=== セーフゾーン：既定で有効・既定値のままならJSONキーは省略、変更すると出力・オーバーレイ表示も切り替わる ===");
+  const safeZoneEnabledByDefault = await page.evaluate(() => document.getElementById("safeZoneEnabledCheckbox").checked);
+  check(safeZoneEnabledByDefault, "既定でsafeZoneEnabledCheckboxはチェックされている（render.pyのSAFE_ZONE_DEFAULTS.enabled=trueと一致）");
+  const safeZoneOptionsShownByDefault = await page.evaluate(() => !document.getElementById("safeZoneOptionsBody").hidden);
+  check(safeZoneOptionsShownByDefault, "既定で有効なのでsafeZoneOptionsBodyは最初から表示されている");
+  const projectBeforeSafeZoneChange = await page.evaluate(() => buildProjectJSON(appState));
+  check(!("safe_zone" in projectBeforeSafeZoneChange.style),
+    "既定値のままではJSON出力にstyle.safe_zoneキー自体が出力されない（完全後方互換）");
+
+  await page.fill("#safeZoneLeftSlider", "80");
+  await page.waitForTimeout(50);
+  const safeZoneLeftAfterFill = await page.evaluate(() => appState.safeZone.left);
+  check(safeZoneLeftAfterFill === 80, "leftスライダーを変更するとappState.safeZone.leftに反映される: " + safeZoneLeftAfterFill);
+
+  const showSafeZoneBeforeCheck = await page.evaluate(() => appState.showSafeZone);
+  check(showSafeZoneBeforeCheck === false, "既定では映像上の枠表示（showSafeZone）はオフ");
+  await page.check("#showSafeZoneCheckbox");
+  await page.waitForTimeout(50);
+  const showSafeZoneAfterCheck = await page.evaluate(() => appState.showSafeZone);
+  check(showSafeZoneAfterCheck === true, "「セーフゾーンの枠を表示する」を有効にするとappState.showSafeZone=trueになる");
+
+  await page.uncheck("#safeZoneEnabledCheckbox");
+  await page.waitForTimeout(50);
+  const safeZoneOptionsHiddenAfterDisable = await page.evaluate(() => document.getElementById("safeZoneOptionsBody").hidden);
+  check(safeZoneOptionsHiddenAfterDisable, "セーフゾーンを無効化するとsafeZoneOptionsBodyが隠れる");
+  const projectDisabled = await page.evaluate(() => buildProjectJSON(appState));
+  check(!!projectDisabled.style.safe_zone && projectDisabled.style.safe_zone.enabled === false,
+    "無効化するとJSON出力にstyle.safe_zone.enabled=falseが明示的に出力される（既定と異なる状態として）: "
+    + JSON.stringify(projectDisabled.style.safe_zone));
+  await page.check("#safeZoneEnabledCheckbox");
+  await page.waitForTimeout(50);
+
+  const projectAfterSafeZoneChange = await page.evaluate(() => buildProjectJSON(appState));
+  check(!!projectAfterSafeZoneChange.style.safe_zone && projectAfterSafeZoneChange.style.safe_zone.left === 80,
+    "JSON出力：style.safe_zone.leftが変更した値になる: " + JSON.stringify(projectAfterSafeZoneChange.style.safe_zone));
+
   check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
   await context.close();

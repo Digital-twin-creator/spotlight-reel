@@ -756,6 +756,32 @@
           <input type="range" id="subjectOutlineWidthSlider" min="0.0005" max="0.01" step="0.0005" value="0.002">
         </div>
       </div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="safeZoneEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="safeZoneEnabledCheckbox">セーフゾーン自動クランプ <span class="muted">テロップ・ハッシュタグ・ロゴの自動配置とドラッグ範囲をこの内側に制限（1080x1920基準のpx）</span></label>
+      </div>
+      <div id="safeZoneOptionsBody" hidden>
+        <div class="field">
+          <label>左 left（px） <span class="brush-slider-value" id="safeZoneLeftValue">40</span></label>
+          <input type="range" id="safeZoneLeftSlider" min="0" max="300" step="5" value="40">
+        </div>
+        <div class="field">
+          <label>上 top（px） <span class="brush-slider-value" id="safeZoneTopValue">120</span></label>
+          <input type="range" id="safeZoneTopSlider" min="0" max="400" step="5" value="120">
+        </div>
+        <div class="field">
+          <label>右 right（px） <span class="brush-slider-value" id="safeZoneRightValue">150</span></label>
+          <input type="range" id="safeZoneRightSlider" min="0" max="300" step="5" value="150">
+        </div>
+        <div class="field">
+          <label>下 bottom（px） <span class="brush-slider-value" id="safeZoneBottomValue">400</span></label>
+          <input type="range" id="safeZoneBottomSlider" min="0" max="600" step="5" value="400">
+        </div>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="showSafeZoneCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="showSafeZoneCheckbox">映像上にセーフゾーンの枠を薄く表示する</label>
+        </div>
+      </div>
       <div class="field">
         <label>出力解像度</label>
         <select id="outputModeSelect">
@@ -1541,6 +1567,20 @@ function buildProjectJSON(state) {
       color: subjectOutlineCfg.color
     };
   }
+  // safe_zone（セーフゾーン）は全既定値のときはキー自体を省略する（完全後方互換）。
+  // ひとつでも既定と異なれば明示的に書き出す（無効化した場合も含む）。
+  var safeZoneCfg = resolveSafeZone(state.safeZone);
+  if (safeZoneCfg.enabled !== DEFAULT_SAFE_ZONE.enabled ||
+      safeZoneCfg.left !== DEFAULT_SAFE_ZONE.left || safeZoneCfg.top !== DEFAULT_SAFE_ZONE.top ||
+      safeZoneCfg.right !== DEFAULT_SAFE_ZONE.right || safeZoneCfg.bottom !== DEFAULT_SAFE_ZONE.bottom) {
+    project.style.safe_zone = {
+      enabled: safeZoneCfg.enabled,
+      left: round(safeZoneCfg.left, 1),
+      top: round(safeZoneCfg.top, 1),
+      right: round(safeZoneCfg.right, 1),
+      bottom: round(safeZoneCfg.bottom, 1)
+    };
+  }
   // title_font/title_font_jp（全体既定）は既定フォント（Anton／Noto Sans JP）のときは
   // キー自体を省略する（完全後方互換）。既定以外を選んだ場合のみ明示的に書き出す。
   var titleFontKey = state.titleFontKey || DEFAULT_TITLE_FONT_KEY;
@@ -1815,6 +1855,7 @@ function parseProjectJSON(json, sfxLibrary) {
     autoContrast: style.auto_contrast !== undefined ? !!style.auto_contrast : DEFAULT_STYLE.auto_contrast,
     textBackingOptions: resolveTextBackingOptions(style.text_backing_options),
     subjectOutline: resolveSubjectOutlineConfig(style.subject_outline),
+    safeZone: resolveSafeZone(style.safe_zone),
     titleBounce: !!style.title_bounce,
     titlePos: Array.isArray(style.title_pos)
       ? [numOr(style.title_pos[0], DEFAULT_STYLE.title_pos[0]), numOr(style.title_pos[1], DEFAULT_STYLE.title_pos[1])]
@@ -2301,28 +2342,73 @@ function telopBoxFromAnchor(anchorX, anchorY, textWidthPx, textHeightPx, align) 
 }
 
 /**
- * 外接矩形box=(left,top,right,bottom)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す。
- * render.py の clamp_box_to_canvas と同じロジック。
+ * 外接矩形box=(left,top,right,bottom)がrect=(left,top,right,bottom)に収まるよう、
+ * 必要な平行移動量(dx,dy)を返す。render.py の clamp_box_to_rect と同じロジック。
  */
-function clampBoxToCanvas(box, W, H) {
+function clampBoxToRect(box, rect) {
   var dx = 0, dy = 0;
-  if (box.left < 0) dx = -box.left;
-  else if (box.right > W) dx = W - box.right;
-  if (box.top < 0) dy = -box.top;
-  else if (box.bottom > H) dy = H - box.bottom;
+  if (box.left < rect.left) dx = rect.left - box.left;
+  else if (box.right > rect.right) dx = rect.right - box.right;
+  if (box.top < rect.top) dy = rect.top - box.top;
+  else if (box.bottom > rect.bottom) dy = rect.bottom - box.bottom;
   return { dx: dx, dy: dy };
 }
 
 /**
- * pos_ratio=[x,y]（0〜1）・テキスト実測サイズ(px)・alignから、画面外にはみ出さないよう
+ * 外接矩形box=(left,top,right,bottom)が(0,0)-(W,H)に収まるよう、必要な平行移動量(dx,dy)を返す。
+ * render.py の clamp_box_to_canvas と同じロジック（clampBoxToRectの薄いラッパー）。
+ */
+function clampBoxToCanvas(box, W, H) {
+  return clampBoxToRect(box, { left: 0, top: 0, right: W, bottom: H });
+}
+
+/**
+ * pos_ratio=[x,y]（0〜1）・テキスト実測サイズ(px)・alignから、画面外（rect省略時）または
+ * 指定したrect（セーフゾーン等、{left,top,right,bottom}のpx矩形）の外にはみ出さないよう
  * 内側に寄せた新しいpos_ratioを返す（エディタでのドラッグ・render.py双方で使う考え方を共通化）。
  */
-function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H) {
+function clampTitlePosRatio(posRatio, textWidthPx, textHeightPx, align, W, H, rect) {
   var ax = (posRatio && posRatio[0] != null ? Number(posRatio[0]) : 0.5) * W;
   var ay = (posRatio && posRatio[1] != null ? Number(posRatio[1]) : 0.78) * H;
   var box = telopBoxFromAnchor(ax, ay, textWidthPx, textHeightPx, align);
-  var d = clampBoxToCanvas(box, W, H);
+  var d = clampBoxToRect(box, rect || { left: 0, top: 0, right: W, bottom: H });
   return [W ? (ax + d.dx) / W : 0.5, H ? (ay + d.dy) / H : 0.78];
+}
+
+/**
+ * セーフゾーン safe_zone（render.pyのSAFE_ZONE_DEFAULTSと同じ値）。テロップ・ハッシュタグ・
+ * ロゴオーバーレイの自動配置とエディタのドラッグ範囲を、この内側の矩形に制限する。
+ * left/top/right/bottomは1080x1920基準のpx指定（実際の出力解像度には比率換算する）。
+ */
+var SAFE_ZONE_REF_W = 1080;
+var SAFE_ZONE_REF_H = 1920;
+var DEFAULT_SAFE_ZONE = { enabled: true, left: 40, top: 120, right: 150, bottom: 400 };
+/**
+ * safe_zone（enabled/left/top/right/bottom）を解決する
+ * （render.pyのresolve_safe_zoneと同じ方針：不正/未指定はDEFAULT_SAFE_ZONEで補う）
+ */
+function resolveSafeZone(cfg) {
+  cfg = cfg || {};
+  var out = { enabled: cfg.enabled !== undefined ? !!cfg.enabled : DEFAULT_SAFE_ZONE.enabled };
+  ["left", "top", "right", "bottom"].forEach(function (key) {
+    var v = Number(cfg[key]);
+    out[key] = (cfg[key] !== undefined && cfg[key] !== null && !isNaN(v)) ? Math.max(0, v) : DEFAULT_SAFE_ZONE[key];
+  });
+  return out;
+}
+/**
+ * safe_zone（1080x1920基準のpx）を実際の出力WxHのpx矩形{left,top,right,bottom}に変換する。
+ * render.pyのsafe_zone_rect_pxと同じロジック（無効時・矩形が潰れる場合は画面全体を返す）。
+ */
+function safeZoneRectPx(safeZone, W, H) {
+  if (!safeZone || !safeZone.enabled) return { left: 0, top: 0, right: W, bottom: H };
+  var left = (safeZone.left || 0) / SAFE_ZONE_REF_W * W;
+  var right = (safeZone.right || 0) / SAFE_ZONE_REF_W * W;
+  var top = (safeZone.top || 0) / SAFE_ZONE_REF_H * H;
+  var bottom = (safeZone.bottom || 0) / SAFE_ZONE_REF_H * H;
+  var rect = { left: left, top: top, right: W - right, bottom: H - bottom };
+  if (rect.right <= rect.left || rect.bottom <= rect.top) return { left: 0, top: 0, right: W, bottom: H };
+  return rect;
 }
 
 /** ctx.font文字列を組み立てる（TITLE_FONT_CHOICESの実際のweightに合わせる） */
@@ -2977,6 +3063,10 @@ if (typeof module !== "undefined" && module.exports) {
     TEXT_BACKING_MODES_WITH_OPTIONS: TEXT_BACKING_MODES_WITH_OPTIONS,
     DEFAULT_SUBJECT_OUTLINE: DEFAULT_SUBJECT_OUTLINE,
     resolveSubjectOutlineConfig: resolveSubjectOutlineConfig,
+    DEFAULT_SAFE_ZONE: DEFAULT_SAFE_ZONE,
+    resolveSafeZone: resolveSafeZone,
+    safeZoneRectPx: safeZoneRectPx,
+    clampBoxToRect: clampBoxToRect,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3167,6 +3257,8 @@ var appState = {
   autoContrast: DEFAULT_STYLE.auto_contrast,
   textBackingOptions: Object.assign({}, DEFAULT_TEXT_BACKING_OPTIONS),
   subjectOutline: Object.assign({}, DEFAULT_SUBJECT_OUTLINE),
+  safeZone: Object.assign({}, DEFAULT_SAFE_ZONE),
+  showSafeZone: false,
   titleBounce: DEFAULT_STYLE.title_bounce,
   titlePos: DEFAULT_STYLE.title_pos.slice(),
   titleSize: DEFAULT_STYLE.title_size,
@@ -3338,6 +3430,12 @@ function init() {
     "subjectOutlineAutoColorCheckbox", "subjectOutlineColorField",
     "subjectOutlineColorRow", "subjectOutlineColorInput",
     "subjectOutlineWidthSlider", "subjectOutlineWidthValue",
+    "safeZoneEnabledCheckbox", "safeZoneOptionsBody",
+    "safeZoneLeftSlider", "safeZoneLeftValue",
+    "safeZoneTopSlider", "safeZoneTopValue",
+    "safeZoneRightSlider", "safeZoneRightValue",
+    "safeZoneBottomSlider", "safeZoneBottomValue",
+    "showSafeZoneCheckbox",
     "titleBounceCheckbox", "titleSizeDefaultSlider", "titleSizeDefaultValue", "titleAlignDefaultSelect",
     "titleFontDefaultSelect",
     "audioDuringFreezeSelect", "revealSelect", "maskModelSelect", "appleVisionHint",
@@ -3611,6 +3709,41 @@ function init() {
   els.subjectOutlineWidthSlider.addEventListener("input", function () {
     appState.subjectOutline.width = Number(els.subjectOutlineWidthSlider.value);
     els.subjectOutlineWidthValue.textContent = appState.subjectOutline.width.toFixed(4);
+    saveToLocalStorage();
+  });
+  els.safeZoneEnabledCheckbox.addEventListener("change", function () {
+    appState.safeZone.enabled = els.safeZoneEnabledCheckbox.checked;
+    els.safeZoneOptionsBody.hidden = !appState.safeZone.enabled;
+    redrawTelopOverlay();
+    saveToLocalStorage();
+  });
+  els.safeZoneLeftSlider.addEventListener("input", function () {
+    appState.safeZone.left = Number(els.safeZoneLeftSlider.value);
+    els.safeZoneLeftValue.textContent = String(appState.safeZone.left);
+    redrawTelopOverlay();
+    saveToLocalStorage();
+  });
+  els.safeZoneTopSlider.addEventListener("input", function () {
+    appState.safeZone.top = Number(els.safeZoneTopSlider.value);
+    els.safeZoneTopValue.textContent = String(appState.safeZone.top);
+    redrawTelopOverlay();
+    saveToLocalStorage();
+  });
+  els.safeZoneRightSlider.addEventListener("input", function () {
+    appState.safeZone.right = Number(els.safeZoneRightSlider.value);
+    els.safeZoneRightValue.textContent = String(appState.safeZone.right);
+    redrawTelopOverlay();
+    saveToLocalStorage();
+  });
+  els.safeZoneBottomSlider.addEventListener("input", function () {
+    appState.safeZone.bottom = Number(els.safeZoneBottomSlider.value);
+    els.safeZoneBottomValue.textContent = String(appState.safeZone.bottom);
+    redrawTelopOverlay();
+    saveToLocalStorage();
+  });
+  els.showSafeZoneCheckbox.addEventListener("change", function () {
+    appState.showSafeZone = els.showSafeZoneCheckbox.checked;
+    redrawTelopOverlay();
     saveToLocalStorage();
   });
   els.titleBounceCheckbox.addEventListener("change", function () {
@@ -4995,18 +5128,34 @@ function draftVisibleTitleLines() {
   return lines.filter(function (l) { return l && l.text; });
 }
 
-/** telopCanvasへ、draft.titleLines（未入力なら何も描かない）を実効位置・大きさ・寄せ・フォントで描き直す */
+/** セーフゾーンの境界を薄い破線の枠として描く（appState.showSafeZoneがtrueの時だけ） */
+function drawSafeZoneOverlay(ctx, W, H) {
+  if (!appState.showSafeZone) return;
+  var safeZone = resolveSafeZone(appState.safeZone);
+  if (!safeZone.enabled) return;
+  var rect = safeZoneRectPx(safeZone, W, H);
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,0.6)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(rect.left + 0.5, rect.top + 0.5, rect.right - rect.left - 1, rect.bottom - rect.top - 1);
+  ctx.restore();
+}
+
+/** telopCanvasへ、セーフゾーンの枠（ON時）とdraft.titleLines（未入力なら描かない）を実効位置・大きさ・寄せ・フォントで描き直す */
 function redrawTelopOverlay() {
   if (!els.telopCanvas) return;
   var ctx = els.telopCanvas.getContext("2d");
   ctx.clearRect(0, 0, overlaySize.width, overlaySize.height);
+  drawSafeZoneOverlay(ctx, overlaySize.width, overlaySize.height);
   var lines = draftVisibleTitleLines();
   if (!lines.length) return;
   drawTelop(ctx, lines, overlaySize.width, overlaySize.height, 1, 1,
     resolveTitleField(draft.titlePos, appState.titlePos),
     resolveTitleField(draft.titleSize, appState.titleSize),
     resolveTitleField(draft.titleAlign, appState.titleAlign),
-    resolveTitleField(draft.titleFontKey, appState.titleFontKey));
+    resolveTitleField(draft.titleFontKey, appState.titleFontKey),
+    safeZoneRectPx(resolveSafeZone(appState.safeZone), overlaySize.width, overlaySize.height));
 }
 
 /**
@@ -5053,17 +5202,18 @@ function beginTelopDragIfHit(clientX, clientY) {
   return true;
 }
 
-/** ドラッグ中の移動先を計算し、画面外に出ないようクランプしてdraft.titlePosへ反映する */
+/** ドラッグ中の移動先を計算し、セーフゾーン（無効時は画面全体）の外に出ないようクランプしてdraft.titlePosへ反映する */
 function updateTelopDrag(clientX, clientY) {
   if (!draft) return;
-  var rect = els.drawCanvas.getBoundingClientRect();
-  var pt = ratioFromRect(clientX, clientY, rect);
+  var canvasRect = els.drawCanvas.getBoundingClientRect();
+  var pt = ratioFromRect(clientX, clientY, canvasRect);
   var rawPos = [pt.x - telopDragOffsetRatio.x, pt.y - telopDragOffsetRatio.y];
   var info = computeEditorTelopBox();
   var align = info ? info.align : "center";
   var textW = info ? info.textW : 0;
   var textH = info ? info.textH : 0;
-  draft.titlePos = clampTitlePosRatio(rawPos, textW, textH, align, overlaySize.width, overlaySize.height);
+  var safeRect = safeZoneRectPx(resolveSafeZone(appState.safeZone), overlaySize.width, overlaySize.height);
+  draft.titlePos = clampTitlePosRatio(rawPos, textW, textH, align, overlaySize.width, overlaySize.height, safeRect);
   redrawTelopOverlay();
 }
 
@@ -5925,7 +6075,8 @@ function startPreviewPlayback() {
             resolveTitleField(draft.titlePos, appState.titlePos),
             resolveTitleField(draft.titleSize, appState.titleSize),
             resolveTitleField(draft.titleAlign, appState.titleAlign),
-            resolveTitleField(draft.titleFontKey, appState.titleFontKey));
+            resolveTitleField(draft.titleFontKey, appState.titleFontKey),
+            safeZoneRectPx(resolveSafeZone(appState.safeZone), W, H));
           drawLogoIfReady(sinceLanding);
         }
       }
@@ -6437,7 +6588,7 @@ function drawAutoLabel(pctx, W, H, progress) {
  *   - 配列（行と同じ順の[{fade,scale,tx,ty}, ...]）: 行ごとに独立したfade/scale/tx/tyを適用する
  *     （resolveLineAnimParams/computeLineFrameStateの結果をそのまま渡す。「▶ プレビュー」再生用）
  */
-function drawTelop(ctx, lines, W, H, fadeOrStates, scale, posRatio, sizeRatio, align, fontKey) {
+function drawTelop(ctx, lines, W, H, fadeOrStates, scale, posRatio, sizeRatio, align, fontKey, safeZoneRect) {
   lines = (lines || []).filter(function (l) { return l && l.text; });
   if (!lines.length) return;
   var perLine = Array.isArray(fadeOrStates);
@@ -6455,7 +6606,8 @@ function drawTelop(ctx, lines, W, H, fadeOrStates, scale, posRatio, sizeRatio, a
   else if (align === "right") { blockLeft = refX - maxW; blockRight = refX; }
   else { blockLeft = refX - maxW / 2; blockRight = refX + maxW / 2; }
   var blockTop = py - blockH / 2;
-  var d = clampBoxToCanvas({ left: blockLeft, top: blockTop, right: blockRight, bottom: blockTop + blockH }, W, H);
+  var d = clampBoxToRect({ left: blockLeft, top: blockTop, right: blockRight, bottom: blockTop + blockH },
+    safeZoneRect || { left: 0, top: 0, right: W, bottom: H });
   // ブロックの位置・幅はここで確定（行ごとのalign指定の有無によらず不変）。dxのクランプは
   // ブロック全体（blockLeft/blockRight）に適用する（各行はこのブロック幅の中で寄せられる）。
   blockLeft += d.dx; blockRight += d.dx;
@@ -6922,6 +7074,18 @@ function applySettingsToInputs() {
   els.subjectOutlineWidthSlider.value = appState.subjectOutline.width;
   els.subjectOutlineWidthValue.textContent = Number(appState.subjectOutline.width).toFixed(4);
   updateSubjectOutlineColorPresetSelection();
+  appState.safeZone = resolveSafeZone(appState.safeZone);
+  els.safeZoneEnabledCheckbox.checked = !!appState.safeZone.enabled;
+  els.safeZoneOptionsBody.hidden = !appState.safeZone.enabled;
+  els.safeZoneLeftSlider.value = appState.safeZone.left;
+  els.safeZoneLeftValue.textContent = String(appState.safeZone.left);
+  els.safeZoneTopSlider.value = appState.safeZone.top;
+  els.safeZoneTopValue.textContent = String(appState.safeZone.top);
+  els.safeZoneRightSlider.value = appState.safeZone.right;
+  els.safeZoneRightValue.textContent = String(appState.safeZone.right);
+  els.safeZoneBottomSlider.value = appState.safeZone.bottom;
+  els.safeZoneBottomValue.textContent = String(appState.safeZone.bottom);
+  els.showSafeZoneCheckbox.checked = !!appState.showSafeZone;
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
 }
@@ -7053,6 +7217,8 @@ function buildLocalStoragePayload(dropThumbs) {
     autoContrast: appState.autoContrast,
     textBackingOptions: appState.textBackingOptions,
     subjectOutline: appState.subjectOutline,
+    safeZone: appState.safeZone,
+    showSafeZone: appState.showSafeZone,
     titleBounce: appState.titleBounce,
     audioDuringFreeze: appState.audioDuringFreeze,
     reveal: appState.reveal,
@@ -7126,6 +7292,8 @@ function loadFromLocalStorage(videoFileName) {
     appState.autoContrast = data.autoContrast !== undefined ? !!data.autoContrast : DEFAULT_STYLE.auto_contrast;
     appState.textBackingOptions = resolveTextBackingOptions(data.textBackingOptions);
     appState.subjectOutline = resolveSubjectOutlineConfig(data.subjectOutline);
+    appState.safeZone = resolveSafeZone(data.safeZone);
+    appState.showSafeZone = !!data.showSafeZone;
     appState.titleBounce = !!data.titleBounce;
     appState.audioDuringFreeze = data.audioDuringFreeze === "keep" ? "keep" : "mute";
     appState.reveal = resolveReveal(data.reveal);
@@ -7850,6 +8018,7 @@ function handleJsonFileChange(e) {
       appState.autoContrast = loaded.autoContrast;
       appState.textBackingOptions = loaded.textBackingOptions;
       appState.subjectOutline = loaded.subjectOutline;
+      appState.safeZone = loaded.safeZone;
       appState.titleBounce = loaded.titleBounce;
       appState.audioDuringFreeze = loaded.audioDuringFreeze;
       appState.reveal = loaded.reveal;
