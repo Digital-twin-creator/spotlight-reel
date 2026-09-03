@@ -316,6 +316,7 @@ def load_project(json_path):
         "freezes": freezes,
         "logo": proj.get("logo"),   # 無指定ならNone（ロゴ演出なし）
         "watermark": proj.get("watermark"),  # 無指定ならNone（透かしロゴなし）
+        "hashtags": proj.get("hashtags"),    # 無指定ならNone（ハッシュタグ表示なし）
     }
 
 
@@ -2149,14 +2150,30 @@ def render_telop_line_layers(lines, W, H, font_cache, font_path, base_size_px,
     block_top = py - block_h / 2.0
     block_bottom = block_top + block_h
 
+    # box/bandの座布団はpadding分だけ文字のbboxより外側にはみ出して描かれるため、
+    # クランプ判定でもそのpaddingを見込んでおかないと、座布団の外周だけ
+    # safe_zone/画面端をわずかに超えてしまう（文字自体は収まっていても座布団がはみ出す）。
+    resolved_backing_opts = backing_options or TEXT_BACKING_OPTIONS_DEFAULTS
+    pad_left = pad_right = pad_top = pad_bottom = 0.0
+    for li in line_infos:
+        if li["backing"] in ("box", "band"):
+            pad = resolved_backing_opts["padding"] * li["size_px"]
+            pad_top = max(pad_top, pad)
+            pad_bottom = max(pad_bottom, pad)
+            if li["backing"] == "box":
+                pad_left = max(pad_left, pad)
+                pad_right = max(pad_right, pad)
+
     rect = safe_zone_rect if safe_zone_rect is not None else (0.0, 0.0, float(W), float(H))
-    dx, dy = clamp_box_to_rect((block_left, block_top, block_right, block_bottom), rect)
+    dx, dy = clamp_box_to_rect(
+        (block_left - pad_left, block_top - pad_top, block_right + pad_right, block_bottom + pad_bottom),
+        rect,
+    )
     block_left += dx
     block_right += dx
     block_top += dy
 
     shadow_alpha = 130   # 縁取り/ドロップシャドウの不透明度（0〜255。色は黒/白どちらでも同じ値を使う）
-    resolved_backing_opts = backing_options or TEXT_BACKING_OPTIONS_DEFAULTS
     anchor_h_by_align = {"left": "l", "center": "m", "right": "r"}
     cursor_y = block_top
     results = []
@@ -2865,6 +2882,87 @@ def render_watermark_frame(frame, wm_bgr, wm_alpha, wm_luma, W, H, t, cfg):
 
 
 # ---------------------------------------------------------------------------
+# ハッシュタグ表示（hashtags）。#タグの1行テキストオーバーレイ。render_telop_line_layers
+# （テロップと同じ描画・自動フチ/座布団・セーフゾーンクランプの仕組み）を1行だけ流用する。
+# 位置はtop/bottom（セーフゾーンの上端/下端に自動配置）またはcustom（pos指定）。
+# always=trueなら動画全体（フリーズ中含む）、falseならフリーズ中だけ表示する。
+# ---------------------------------------------------------------------------
+
+HASHTAGS_POSITIONS = ("top", "bottom", "custom")
+DEFAULT_HASHTAGS_POSITION = "bottom"
+HASHTAGS_BACKINGS = ("outline", "box")
+DEFAULT_HASHTAGS_BACKING = "outline"
+HASHTAGS_DEFAULTS = {"position": DEFAULT_HASHTAGS_POSITION, "size": 0.028, "color": "#FFFFFF",
+                      "backing": DEFAULT_HASHTAGS_BACKING, "always": True}
+
+
+def resolve_hashtags_config(project):
+    """
+    hashtags（{text, position, pos, size, font, color, backing, always}）を解決する。
+    project.get("hashtags")にtextが無ければNoneを返す（表示なし＝完全後方互換）。
+    """
+    raw = (project or {}).get("hashtags")
+    if not raw or not raw.get("text"):
+        return None
+    cfg = dict(HASHTAGS_DEFAULTS)
+    cfg["text"] = str(raw.get("text"))
+    position = raw.get("position") or DEFAULT_HASHTAGS_POSITION
+    if position not in HASHTAGS_POSITIONS:
+        warn(f"hashtags.position='{position}' は未知の値です。'{DEFAULT_HASHTAGS_POSITION}' として扱います。")
+        position = DEFAULT_HASHTAGS_POSITION
+    cfg["position"] = position
+    pos = raw.get("pos")
+    cfg["pos"] = [float(pos[0]), float(pos[1])] if isinstance(pos, (list, tuple)) and len(pos) >= 2 else None
+    cfg["size"] = max(0.005, float(raw.get("size") or HASHTAGS_DEFAULTS["size"]))
+    cfg["font"] = raw.get("font")
+    cfg["color"] = validate_hex_color(raw.get("color") or HASHTAGS_DEFAULTS["color"],
+                                       HASHTAGS_DEFAULTS["color"], "hashtags.color")
+    backing = raw.get("backing") or DEFAULT_HASHTAGS_BACKING
+    if backing not in HASHTAGS_BACKINGS:
+        warn(f"hashtags.backing='{backing}' は未知の値です（outline/boxのいずれかを指定してください）。"
+             f"'{DEFAULT_HASHTAGS_BACKING}' として扱います。")
+        backing = DEFAULT_HASHTAGS_BACKING
+    cfg["backing"] = backing
+    cfg["always"] = bool(raw.get("always", True))
+    return cfg
+
+
+def hashtags_pos_ratio(cfg):
+    """
+    hashtags.position/posから、render_telop_line_layers用のpos_ratio=[x,y]（0〜1）を決める。
+    top/bottomは画面端寄りの値を渡し、実際の安全域内へのクランプはrender_telop_line_layers
+    側のsafe_zone_rectが行う（結果的にセーフゾーンのすぐ内側に自動配置される）。
+    """
+    if cfg["position"] == "custom" and cfg["pos"]:
+        return cfg["pos"]
+    if cfg["position"] == "top":
+        return [0.5, 0.02]
+    return [0.5, 0.98]
+
+
+def resolve_hashtags_font_path(cfg):
+    """hashtags.fontが指定されていればSCRIPT_DIR基準で解決し、無ければ既定フォント（DEFAULT_STYLE["font"]）を使う"""
+    path = cfg.get("font") or DEFAULT_STYLE["font"]
+    return resolve_path(path, [SCRIPT_DIR])
+
+
+def render_hashtags_layer(cfg, W, H, font_cache, safe_zone_rect):
+    """hashtags設定から、render_telop_line_layersを1行だけ流用して{"bgr","alpha",...}レイヤーを作る"""
+    if not cfg:
+        return None
+    line = {"text": cfg["text"], "size": 1.0, "underline": False, "color": cfg["color"],
+            "align": None, "backing": cfg["backing"]}
+    font_path = resolve_hashtags_font_path(cfg)
+    size_px = max(8, int(round(H * cfg["size"])))
+    layers = render_telop_line_layers(
+        [line], W, H, font_cache, font_path, size_px,
+        pos_ratio=hashtags_pos_ratio(cfg), align="center",
+        backing_options=TEXT_BACKING_OPTIONS_DEFAULTS, auto_contrast=False,
+        safe_zone_rect=safe_zone_rect)
+    return layers[0] if layers else None
+
+
+# ---------------------------------------------------------------------------
 # フリーズ区間の設計（映像と音声で同じ数値を使うため一箇所で計算する）
 # ---------------------------------------------------------------------------
 
@@ -3031,7 +3129,7 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
                         logo_bgr=None, logo_alpha=None, logo_luma=None,
                         logo_params=None, logo_bg_color=None,
                         watermark_bgr=None, watermark_alpha=None, watermark_luma=None,
-                        watermark_cfg=None):
+                        watermark_cfg=None, hashtags_cfg=None):
     """
     1回分のフリーズ区間のフレームを順に生成する（メモリに溜めない）。
       1. 静止（背景処理のみ、固定0.3秒）
@@ -3087,13 +3185,20 @@ def iter_freeze_frames(frame, plan, W, H, fps, font_cache, cache_dir=None, video
     # 簡易時計）、フレームごとに合成する。ラストロゴの着地演出（タメ+縮小+セトル）の間
     # だけ非表示にする（下のhold(4)ループでlanding_total_framesとして計算）
     wm_state = {"t": 0.0}
+    # ハッシュタグ（hashtags）：位置・見た目はフリーズの間ずっと同じなので1回だけ作って使い回す。
+    # always/フリーズ中限定のどちらでも、フリーズの表示中は常に出す（always=falseの間だけ表示、
+    # という「フリーズ中のみ」の要件を満たす側）
+    hashtags_layer = render_hashtags_layer(hashtags_cfg, W, H, font_cache, safe_zone_rect)
 
     def apply_wm(img, suppress=False):
         wm_state["t"] += 1.0 / fps
-        if suppress or watermark_bgr is None:
-            return img
-        return render_watermark_frame(img, watermark_bgr, watermark_alpha, watermark_luma,
-                                       W, H, wm_state["t"], watermark_cfg)
+        out_img = img
+        if not suppress and watermark_bgr is not None:
+            out_img = render_watermark_frame(out_img, watermark_bgr, watermark_alpha, watermark_luma,
+                                              W, H, wm_state["t"], watermark_cfg)
+        if hashtags_layer is not None:
+            out_img = blend_telop(out_img, hashtags_layer["bgr"], hashtags_layer["alpha"], 1.0)
+        return out_img
 
     # 1) 出現アニメ開始まで静止
     for _ in range(plan["n_pre"]):
@@ -3754,6 +3859,9 @@ def render(project, json_path, video_path, out_path, preview_path=None,
             else:
                 watermark_luma = build_logo_luminance_mask(watermark_bgr, watermark_alpha)
 
+        # --- ハッシュタグ表示（hashtags）の解決（無指定ならhashtags_cfg=Noneで以後素通り） ---
+        hashtags_cfg = resolve_hashtags_config(project)
+
         plans = plan_freezes(project["freezes"], fps, src_frames, json_dir, logo_cfg, logo_at,
                               logo_total_frames=(logo_total_frames if logo_params else 0),
                               logo_blackout_frames=(logo_blackout_frames if logo_at == "last_freeze" else 0))
@@ -3815,14 +3923,23 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         # 通常再生（フリーズ・ロゴ演出以外）の透かしロゴ用の簡易時計（動画全体で1つ、
         # フリーズ内部の時計とは別。iter_freeze_frames/末尾ロゴ演出はそれぞれ自前で持つ）
         wm_playback_t = 0.0
+        # hashtags.always=trueの場合だけ、フリーズ以外の通常再生にも重ねる（フリーズ中は
+        # iter_freeze_frames側がalwaysの値によらず常に表示する）
+        hashtags_playback_layer = None
+        if hashtags_cfg and hashtags_cfg["always"]:
+            playback_safe_zone_rect = safe_zone_rect_px(resolve_safe_zone(project["style"]), W, H)
+            hashtags_playback_layer = render_hashtags_layer(hashtags_cfg, W, H, font_cache, playback_safe_zone_rect)
 
         def watermark_playback(img):
             nonlocal wm_playback_t
             wm_playback_t += 1.0 / fps
-            if watermark_bgr is None:
-                return img
-            return render_watermark_frame(img, watermark_bgr, watermark_alpha, watermark_luma,
-                                           W, H, wm_playback_t, watermark_cfg)
+            out_img = img
+            if watermark_bgr is not None:
+                out_img = render_watermark_frame(out_img, watermark_bgr, watermark_alpha, watermark_luma,
+                                                  W, H, wm_playback_t, watermark_cfg)
+            if hashtags_playback_layer is not None:
+                out_img = blend_telop(out_img, hashtags_playback_layer["bgr"], hashtags_playback_layer["alpha"], 1.0)
+            return out_img
 
         try:
             for i, frame in enumerate(iter_frames(reader, W, H)):
@@ -3834,7 +3951,8 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                                                 logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
                                                 logo_params=logo_params, logo_bg_color=logo_bg_color,
                                                 watermark_bgr=watermark_bgr, watermark_alpha=watermark_alpha,
-                                                watermark_luma=watermark_luma, watermark_cfg=watermark_cfg):
+                                                watermark_luma=watermark_luma, watermark_cfg=watermark_cfg,
+                                                hashtags_cfg=hashtags_cfg):
                         writer.stdin.write(f.tobytes())
                         last_out_frame = f
                         written += 1
@@ -3855,7 +3973,8 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                                             logo_bgr=logo_bgr, logo_alpha=logo_alpha, logo_luma=logo_luma,
                                             logo_params=logo_params, logo_bg_color=logo_bg_color,
                                             watermark_bgr=watermark_bgr, watermark_alpha=watermark_alpha,
-                                            watermark_luma=watermark_luma, watermark_cfg=watermark_cfg):
+                                            watermark_luma=watermark_luma, watermark_cfg=watermark_cfg,
+                                            hashtags_cfg=hashtags_cfg):
                     writer.stdin.write(f.tobytes())
                     last_out_frame = f
                     written += 1

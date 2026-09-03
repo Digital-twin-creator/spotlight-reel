@@ -2432,6 +2432,104 @@ try:
     check(loaded_wm_none.get("watermark") is None,
           "watermarkキーが無い旧JSONではNoneのまま（完全後方互換）")
 
+    # ------------------------------------------------------------------
+    # 21) hashtags（D2）：常時/フリーズ中のみのハッシュタグ表示
+    # ------------------------------------------------------------------
+    print("")
+    print("=== hashtags：resolve_hashtags_configのフォールバック ===")
+    check(render.resolve_hashtags_config({}) is None,
+          "hashtags省略時はNoneを返す（表示なし）")
+    check(render.resolve_hashtags_config({"hashtags": {}}) is None,
+          "hashtags={}（textが無い）もNoneを返す")
+    check(render.resolve_hashtags_config({"hashtags": {"position": "bottom"}}) is None,
+          "textが無ければpositionだけ指定してもNoneを返す")
+
+    ht_cfg_default = render.resolve_hashtags_config({"hashtags": {"text": "#京都 #祇園"}})
+    check(ht_cfg_default is not None, "text指定があれば設定が解決される")
+    check(ht_cfg_default["position"] == "bottom", "position省略時はbottom")
+    check(ht_cfg_default["size"] == render.HASHTAGS_DEFAULTS["size"], "size省略時は既定値")
+    check(ht_cfg_default["color"] == "#FFFFFF", "color省略時は#FFFFFF")
+    check(ht_cfg_default["backing"] == render.DEFAULT_HASHTAGS_BACKING, "backing省略時はoutline")
+    check(ht_cfg_default["always"] is True, "always省略時はTrue")
+    check(ht_cfg_default["pos"] is None, "custom未指定ならposはNone")
+
+    ht_cfg_bad_pos = render.resolve_hashtags_config({"hashtags": {"text": "#x", "position": "center"}})
+    check(ht_cfg_bad_pos["position"] == "bottom", "未知のpositionはbottomにフォールバックする")
+
+    ht_cfg_bad_backing = render.resolve_hashtags_config({"hashtags": {"text": "#x", "backing": "shadow"}})
+    check(ht_cfg_bad_backing["backing"] == "outline", "未知のbackingはoutlineにフォールバックする")
+
+    ht_cfg_custom = render.resolve_hashtags_config(
+        {"hashtags": {"text": "#custom", "position": "custom", "pos": [0.3, 0.5], "always": False}})
+    check(ht_cfg_custom["position"] == "custom" and ht_cfg_custom["pos"] == [0.3, 0.5],
+          "position=customとposがそのまま反映される")
+    check(ht_cfg_custom["always"] is False, "always=falseもそのまま反映される（フリーズ中のみ表示）")
+
+    print("")
+    print("=== hashtags：hashtags_pos_ratio ===")
+    check(render.hashtags_pos_ratio({"position": "top", "pos": None}) == [0.5, 0.02],
+          "position=topは画面上端寄りのpos_ratio")
+    check(render.hashtags_pos_ratio({"position": "bottom", "pos": None}) == [0.5, 0.98],
+          "position=bottomは画面下端寄りのpos_ratio")
+    check(render.hashtags_pos_ratio({"position": "custom", "pos": [0.2, 0.4]}) == [0.2, 0.4],
+          "position=customはposをそのまま使う")
+
+    print("")
+    print("=== hashtags：render_hashtags_layer（セーフゾーン内への自動配置） ===")
+    ht_font_cache = {}
+    ht_W, ht_H = 1080, 1920
+    ht_safe_zone = render.resolve_safe_zone({})
+    ht_safe_rect = render.safe_zone_rect_px(ht_safe_zone, ht_W, ht_H)
+
+    check(render.render_hashtags_layer(None, ht_W, ht_H, ht_font_cache, ht_safe_rect) is None,
+          "cfg=Noneならレイヤーを作らない")
+
+    ht_layer_bottom_box = render.render_hashtags_layer(
+        render.resolve_hashtags_config(
+            {"hashtags": {"text": "#京都 #祇園 #ClubIRIS", "position": "bottom", "size": 0.03, "backing": "box"}}),
+        ht_W, ht_H, ht_font_cache, ht_safe_rect)
+    check(ht_layer_bottom_box is not None, "position=bottom, backing=boxでレイヤーが作られる")
+    ht_ys, ht_xs = np.nonzero(ht_layer_bottom_box["alpha"][:, :, 0] > 0.1)
+    check(ht_ys.max() <= ht_safe_rect[3] + 2,
+          f"backing=box（座布団）でも下端がセーフゾーンの外へはみ出さない: "
+          f"y_max={ht_ys.max()} safe_bottom={ht_safe_rect[3]}"
+          "（座布団のpaddingをクランプ計算に含める修正の回帰確認）")
+    check(ht_ys.min() >= ht_safe_rect[1] - 2, "backing=boxでも上端がセーフゾーンの外へはみ出さない")
+    check(ht_xs.min() >= ht_safe_rect[0] - 2 and ht_xs.max() <= ht_safe_rect[2] + 2,
+          "backing=boxでも左右がセーフゾーンの外へはみ出さない")
+
+    ht_layer_top = render.render_hashtags_layer(
+        render.resolve_hashtags_config({"hashtags": {"text": "#top", "position": "top"}}),
+        ht_W, ht_H, ht_font_cache, ht_safe_rect)
+    ht_ys_top, _ = np.nonzero(ht_layer_top["alpha"][:, :, 0] > 0.1)
+    check(ht_ys_top.min() < ht_ys.min(), "position=topはposition=bottomより上に配置される")
+
+    ht_layer_custom = render.render_hashtags_layer(
+        render.resolve_hashtags_config({"hashtags": {"text": "#custom", "position": "custom", "pos": [0.3, 0.5]}}),
+        ht_W, ht_H, ht_font_cache, ht_safe_rect)
+    ht_ys_c, ht_xs_c = np.nonzero(ht_layer_custom["alpha"][:, :, 0] > 0.1)
+    ht_cx = (ht_xs_c.min() + ht_xs_c.max()) / 2.0
+    check(abs(ht_cx - 0.3 * ht_W) < 100, f"position=customはposで指定した位置付近に配置される: cx={ht_cx}")
+
+    print("")
+    print("=== hashtags：load_project()がトップレベルのhashtagsキーを伝搬する ===")
+    ht_proj_path = os.path.join(tmpdir, "ht_project.json")
+    with open(ht_proj_path, "w", encoding="utf-8") as hf:
+        json_mod_wm.dump({"version": 1, "video": "input.mp4", "style": {}, "freezes": [],
+                          "hashtags": {"text": "#京都 #祇園", "position": "top"}}, hf)
+    loaded_ht_proj = render.load_project(ht_proj_path)
+    check("hashtags" in loaded_ht_proj and loaded_ht_proj["hashtags"] is not None,
+          "load_project()の戻り値にhashtagsキーが含まれ、JSONの内容がそのまま伝わる")
+    check(loaded_ht_proj["hashtags"]["position"] == "top",
+          f"hashtagsの内容自体もJSONどおりに読み込める: {loaded_ht_proj['hashtags']}")
+
+    ht_proj_no_key_path = os.path.join(tmpdir, "ht_project_none.json")
+    with open(ht_proj_no_key_path, "w", encoding="utf-8") as hf:
+        json_mod_wm.dump({"version": 1, "video": "input.mp4", "style": {}, "freezes": []}, hf)
+    loaded_ht_none = render.load_project(ht_proj_no_key_path)
+    check(loaded_ht_none.get("hashtags") is None,
+          "hashtagsキーが無い旧JSONではNoneのまま（完全後方互換）")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
