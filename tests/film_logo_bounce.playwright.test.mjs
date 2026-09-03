@@ -69,6 +69,7 @@ async function main() {
   await page.evaluate(() => {
     document.getElementById("settingsSection").open = true;
     document.getElementById("logoSection").open = true;
+    document.getElementById("watermarkSection").open = true;
   });
 
   console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec）の既定値・title_bounce ===");
@@ -171,6 +172,64 @@ async function main() {
   await page.selectOption("#logoBackgroundSelect", "auto");
   project = await page.evaluate(() => buildProjectJSON(appState));
   check(project.logo.background === "auto", "'auto'に戻すとbackgroundが'auto'になる: " + project.logo.background);
+
+  console.log("");
+  console.log("=== 透かしロゴ（watermark）：常時表示ONで画像選択・位置・サイズを設定するとJSONに反映される ===");
+  check(await page.isHidden("#watermarkOptionsBody"), "既定では透かしロゴOFFなのでwatermarkOptionsBodyは隠れている");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.watermark === undefined, "透かしロゴが無効な間はJSONにwatermarkブロックが出ない");
+
+  await page.check("#watermarkEnabledCheckbox");
+  check(await page.isVisible("#watermarkOptionsBody"), "常時表示をONにするとwatermarkOptionsBodyが表示される");
+  await page.setInputFiles("#watermarkFileInput", logoPath);
+  await page.selectOption("#watermarkPositionSelect", "top_left");
+  await page.fill("#watermarkWidthRatioSlider", "0.2");
+  await page.dispatchEvent("#watermarkWidthRatioSlider", "input");
+  await page.fill("#watermarkOpacitySlider", "0.6");
+  await page.dispatchEvent("#watermarkOpacitySlider", "input");
+  await page.fill("#watermarkMarginSlider", "0.05");
+  await page.dispatchEvent("#watermarkMarginSlider", "input");
+
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(!!project.watermark, "画像を選ぶとJSONにwatermarkブロックが現れる");
+  check(project.watermark && project.watermark.image === "watermark.png",
+    "watermark.imageが固定名watermark.<ext>になる: " + (project.watermark && project.watermark.image));
+  check(project.watermark && project.watermark.position === "top_left",
+    "watermark.positionが選択どおりになる: " + (project.watermark && project.watermark.position));
+  check(project.watermark && project.watermark.width_ratio === 0.2,
+    "watermark.width_ratioがスライダー操作どおりになる: " + (project.watermark && project.watermark.width_ratio));
+  check(project.watermark && project.watermark.opacity === 0.6,
+    "watermark.opacityがスライダー操作どおりになる: " + (project.watermark && project.watermark.opacity));
+  check(project.watermark && project.watermark.margin === 0.05,
+    "watermark.marginがスライダー操作どおりになる: " + (project.watermark && project.watermark.margin));
+  check(project.watermark && project.watermark.shine && project.watermark.shine.enabled === true,
+    "watermark.shine.enabledの既定はtrue");
+  check(project.watermark && project.watermark.spin && project.watermark.spin.enabled === true,
+    "watermark.spin.enabledの既定はtrue");
+
+  console.log("");
+  console.log("=== 透かしロゴ：shine/spinをそれぞれ個別にOFFにでき、周期・長さも変更できる ===");
+  await page.uncheck("#watermarkShineEnabledCheckbox");
+  await page.fill("#watermarkSpinIntervalSlider", "5");
+  await page.dispatchEvent("#watermarkSpinIntervalSlider", "input");
+  await page.fill("#watermarkSpinSecSlider", "1.5");
+  await page.dispatchEvent("#watermarkSpinSecSlider", "input");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.watermark.shine.enabled === false, "shineのチェックを外すとwatermark.shine.enabled=falseになる");
+  check(project.watermark.spin.interval_sec === 5,
+    "spinの周期スライダーがwatermark.spin.interval_secに反映される: " + project.watermark.spin.interval_sec);
+  check(project.watermark.spin.sec === 1.5,
+    "spinの長さスライダーがwatermark.spin.secに反映される: " + project.watermark.spin.sec);
+
+  console.log("");
+  console.log("=== 透かしロゴ：「ラストロゴの画像を流用する」ボタンでlogo画像をそのままwatermarkにも使える ===");
+  await page.click("#reuseLastLogoForWatermarkBtn");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.watermark && project.watermark.image === "watermark.png",
+    "流用ボタンでもwatermark.imageは固定名watermark.<ext>のまま: " + (project.watermark && project.watermark.image));
+  const watermarkFileNameAfterReuse = await page.textContent("#watermarkFileName");
+  check(watermarkFileNameAfterReuse.indexOf("流用") >= 0,
+    "流用したことが分かる表示文言になる: " + watermarkFileNameAfterReuse);
 
   console.log("");
   console.log("=== ラストロゴ：設定を削除するとlogoブロックが消える ===");

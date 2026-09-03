@@ -1208,6 +1208,115 @@ test("parseProjectJSON: logo.backgroundが省略されていれば既定値'auto
   assert.strictEqual(loaded.logo.background, "auto");
 });
 
+/* ---- watermark（常時表示の透かしロゴ） ---- */
+
+test("watermarkAssetName: 拡張子を保ったまま watermark.<ext> にする。無ければpngにフォールバック", () => {
+  assert.strictEqual(core.watermarkAssetName("mylogo.PNG"), "watermark.png");
+  assert.strictEqual(core.watermarkAssetName("mylogo.jpg"), "watermark.jpg");
+  assert.strictEqual(core.watermarkAssetName("noext"), "watermark.png");
+});
+
+test("defaultWatermarkState: 無効・画像未選択・render.pyのWATERMARK_DEFAULTS等と同じ既定値を返す", () => {
+  const wm = core.defaultWatermarkState();
+  assert.strictEqual(wm.enabled, false);
+  assert.strictEqual(wm.imageFile, null);
+  assert.strictEqual(wm.imageName, "");
+  assert.strictEqual(wm.position, core.DEFAULT_WATERMARK.position);
+  assert.strictEqual(wm.widthRatio, core.DEFAULT_WATERMARK.widthRatio);
+  assert.strictEqual(wm.opacity, core.DEFAULT_WATERMARK.opacity);
+  assert.strictEqual(wm.margin, core.DEFAULT_WATERMARK.margin);
+  assert.strictEqual(wm.shineEnabled, core.DEFAULT_WATERMARK_SHINE.enabled);
+  assert.strictEqual(wm.spinEnabled, core.DEFAULT_WATERMARK_SPIN.enabled);
+});
+
+test("buildProjectJSON: watermarkが有効かつimageNameがあればwatermarkブロックを出力し、無効/未選択なら省略する", () => {
+  const withWatermark = core.buildProjectJSON(Object.assign(sampleState(), {
+    watermark: Object.assign(core.defaultWatermarkState(), {
+      enabled: true, imageName: "watermark.png", position: "top_left",
+      widthRatio: 0.2, opacity: 0.9, margin: 0.05
+    })
+  }));
+  assert.deepStrictEqual(withWatermark.watermark, {
+    image: "watermark.png", position: "top_left", width_ratio: 0.2, opacity: 0.9, margin: 0.05,
+    shine: { enabled: core.DEFAULT_WATERMARK_SHINE.enabled,
+             interval_sec: core.DEFAULT_WATERMARK_SHINE.intervalSec, sec: core.DEFAULT_WATERMARK_SHINE.sec },
+    spin: { enabled: core.DEFAULT_WATERMARK_SPIN.enabled,
+            interval_sec: core.DEFAULT_WATERMARK_SPIN.intervalSec, sec: core.DEFAULT_WATERMARK_SPIN.sec }
+  });
+
+  const disabled = core.buildProjectJSON(Object.assign(sampleState(), {
+    watermark: Object.assign(core.defaultWatermarkState(), { enabled: false, imageName: "watermark.png" })
+  }));
+  assert.strictEqual(disabled.watermark, undefined);
+
+  const noImage = core.buildProjectJSON(Object.assign(sampleState(), {
+    watermark: Object.assign(core.defaultWatermarkState(), { enabled: true, imageName: "" })
+  }));
+  assert.strictEqual(noImage.watermark, undefined);
+
+  const noWatermarkAtAll = core.buildProjectJSON(sampleState());
+  assert.strictEqual(noWatermarkAtAll.watermark, undefined);
+});
+
+test("buildProjectJSON: watermark.shine/spinを個別にenabled=falseにでき、interval_sec/secも反映される", () => {
+  const project = core.buildProjectJSON(Object.assign(sampleState(), {
+    watermark: Object.assign(core.defaultWatermarkState(), {
+      enabled: true, imageName: "watermark.png",
+      shineEnabled: false, shineIntervalSec: 2, shineSec: 0.3,
+      spinEnabled: false, spinIntervalSec: 5, spinSec: 1.0
+    })
+  }));
+  assert.deepStrictEqual(project.watermark.shine, { enabled: false, interval_sec: 2, sec: 0.3 });
+  assert.deepStrictEqual(project.watermark.spin, { enabled: false, interval_sec: 5, sec: 1.0 });
+});
+
+test("parseProjectJSON: watermarkブロックを読み込める。省略時はdefaultWatermarkState()相当になる", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    watermark: {
+      image: "watermark.jpg", position: "top_right", width_ratio: 0.25, opacity: 0.7, margin: 0.04,
+      shine: { enabled: false, interval_sec: 3, sec: 0.4 },
+      spin: { enabled: true, interval_sec: 10, sec: 1.2 }
+    }
+  });
+  assert.deepStrictEqual(loaded.watermark, {
+    enabled: true, imageFile: null, imageName: "watermark.jpg", position: "top_right",
+    widthRatio: 0.25, opacity: 0.7, margin: 0.04,
+    shineEnabled: false, shineIntervalSec: 3, shineSec: 0.4,
+    spinEnabled: true, spinIntervalSec: 10, spinSec: 1.2
+  });
+
+  const loadedNone = core.parseProjectJSON({ version: 1, video: "v.mp4", freezes: [] });
+  assert.deepStrictEqual(loadedNone.watermark, core.defaultWatermarkState());
+});
+
+test("parseProjectJSON: watermark.positionが未知の値なら既定(bottom_right)にフォールバックする", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    watermark: { image: "watermark.png", position: "center" }
+  });
+  assert.strictEqual(loaded.watermark.position, core.DEFAULT_WATERMARK_POSITION);
+});
+
+test("buildProjectJSON/parseProjectJSON: watermarkの全フィールドが往復する", () => {
+  const state = Object.assign(sampleState(), {
+    watermark: {
+      enabled: true, imageFile: null, imageName: "watermark.png", position: "bottom_left",
+      widthRatio: 0.12, opacity: 0.6, margin: 0.02,
+      shineEnabled: true, shineIntervalSec: 6, shineSec: 0.8,
+      spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5
+    }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.deepStrictEqual(loaded.watermark, {
+    enabled: true, imageFile: null, imageName: "watermark.png", position: "bottom_left",
+    widthRatio: 0.12, opacity: 0.6, margin: 0.02,
+    shineEnabled: true, shineIntervalSec: 6, shineSec: 0.8,
+    spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5
+  });
+});
+
 test("parseProjectJSON: 'shadow'キーも旧film_offsetも含まない旧JSONは、既定で影が有効に解決される（実機で影が出ない不具合の再発防止）", () => {
   const loaded = core.parseProjectJSON({
     version: 1, video: "x.mp4",

@@ -856,6 +856,72 @@
     </div>
   </details>
 
+  <!-- 6.6 常時表示の透かしロゴ（watermark） -->
+  <details class="card" id="watermarkSection">
+    <summary>透かしロゴ（常時表示）</summary>
+    <div class="body stack">
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="watermarkEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="watermarkEnabledCheckbox">動画全体を通して四隅に小さく常時表示する（ラストロゴとは別演出）</label>
+      </div>
+      <div id="watermarkOptionsBody" hidden>
+        <button class="ghost" id="pickWatermarkBtn">🖼 透かしロゴ画像を選ぶ（PNG推奨）</button>
+        <input type="file" id="watermarkFileInput" accept="image/png,image/*" hidden>
+        <button class="ghost small" id="reuseLastLogoForWatermarkBtn">ラストロゴの画像を流用する</button>
+        <div class="muted" id="watermarkFileName">まだ透かしロゴ画像が選ばれていません</div>
+        <div class="field">
+          <label>位置 position</label>
+          <select id="watermarkPositionSelect">
+            <option value="top_left">左上</option>
+            <option value="top_right">右上</option>
+            <option value="bottom_left">左下</option>
+            <option value="bottom_right">右下</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>大きさ width_ratio（出力幅比） <span class="brush-slider-value" id="watermarkWidthRatioValue">0.16</span></label>
+          <input type="range" id="watermarkWidthRatioSlider" min="0.05" max="0.4" step="0.01" value="0.16">
+        </div>
+        <div class="field">
+          <label>不透明度 opacity <span class="brush-slider-value" id="watermarkOpacityValue">0.85</span></label>
+          <input type="range" id="watermarkOpacitySlider" min="0.1" max="1" step="0.05" value="0.85">
+        </div>
+        <div class="field">
+          <label>余白 margin（出力幅比） <span class="brush-slider-value" id="watermarkMarginValue">0.03</span></label>
+          <input type="range" id="watermarkMarginSlider" min="0" max="0.15" step="0.005" value="0.03">
+        </div>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="watermarkShineEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="watermarkShineEnabledCheckbox">shine（斜めの光沢が周期的に走る）</label>
+        </div>
+        <div id="watermarkShineOptionsBody">
+          <div class="field">
+            <label>周期 interval_sec <span class="brush-slider-value" id="watermarkShineIntervalValue">4.0秒</span></label>
+            <input type="range" id="watermarkShineIntervalSlider" min="1" max="15" step="0.5" value="4">
+          </div>
+          <div class="field">
+            <label>長さ sec <span class="brush-slider-value" id="watermarkShineSecValue">0.6秒</span></label>
+            <input type="range" id="watermarkShineSecSlider" min="0.1" max="3" step="0.1" value="0.6">
+          </div>
+        </div>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="watermarkSpinEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="watermarkSpinEnabledCheckbox">spin（Y軸回転風に周期的に一回転する）</label>
+        </div>
+        <div id="watermarkSpinOptionsBody">
+          <div class="field">
+            <label>周期 interval_sec <span class="brush-slider-value" id="watermarkSpinIntervalValue">9.0秒</span></label>
+            <input type="range" id="watermarkSpinIntervalSlider" min="2" max="20" step="0.5" value="9">
+          </div>
+          <div class="field">
+            <label>長さ sec <span class="brush-slider-value" id="watermarkSpinSecValue">0.8秒</span></label>
+            <input type="range" id="watermarkSpinSecSlider" min="0.2" max="3" step="0.1" value="0.8">
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>
+
   <!-- 効果音ライブラリ：自分のmp3/wavファイルを登録し、フリーズ・ロゴの効果音として使う -->
   <details class="card" id="sfxLibrarySection">
     <summary>効果音ライブラリ（自分のファイルを登録）</summary>
@@ -1627,6 +1693,28 @@ function buildProjectJSON(state) {
       project.logo.sfx = state.logo.sfx;
     }
   }
+  if (state.watermark && state.watermark.enabled && state.watermark.imageName) {
+    project.watermark = {
+      image: state.watermark.imageName,
+      position: WATERMARK_POSITIONS.indexOf(state.watermark.position) >= 0
+        ? state.watermark.position : DEFAULT_WATERMARK_POSITION,
+      width_ratio: round(numOr(state.watermark.widthRatio, DEFAULT_WATERMARK.widthRatio), 3),
+      opacity: round(numOr(state.watermark.opacity, DEFAULT_WATERMARK.opacity), 2),
+      margin: round(numOr(state.watermark.margin, DEFAULT_WATERMARK.margin), 3),
+      shine: {
+        enabled: state.watermark.shineEnabled !== undefined ? !!state.watermark.shineEnabled
+          : DEFAULT_WATERMARK_SHINE.enabled,
+        interval_sec: round(numOr(state.watermark.shineIntervalSec, DEFAULT_WATERMARK_SHINE.intervalSec), 2),
+        sec: round(numOr(state.watermark.shineSec, DEFAULT_WATERMARK_SHINE.sec), 2)
+      },
+      spin: {
+        enabled: state.watermark.spinEnabled !== undefined ? !!state.watermark.spinEnabled
+          : DEFAULT_WATERMARK_SPIN.enabled,
+        interval_sec: round(numOr(state.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec), 2),
+        sec: round(numOr(state.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec), 2)
+      }
+    };
+  }
   return project;
 }
 
@@ -1832,6 +1920,24 @@ function parseProjectJSON(json, sfxLibrary) {
       autoColorHex: ""
     };
   }
+  var watermark = defaultWatermarkState();
+  if (json.watermark && json.watermark.image) {
+    watermark.enabled = true;
+    watermark.imageName = json.watermark.image;
+    watermark.position = WATERMARK_POSITIONS.indexOf(json.watermark.position) >= 0
+      ? json.watermark.position : DEFAULT_WATERMARK_POSITION;
+    watermark.widthRatio = numOr(json.watermark.width_ratio, DEFAULT_WATERMARK.widthRatio);
+    watermark.opacity = numOr(json.watermark.opacity, DEFAULT_WATERMARK.opacity);
+    watermark.margin = numOr(json.watermark.margin, DEFAULT_WATERMARK.margin);
+    var wmShine = json.watermark.shine || {};
+    watermark.shineEnabled = wmShine.enabled !== undefined ? !!wmShine.enabled : DEFAULT_WATERMARK_SHINE.enabled;
+    watermark.shineIntervalSec = numOr(wmShine.interval_sec, DEFAULT_WATERMARK_SHINE.intervalSec);
+    watermark.shineSec = numOr(wmShine.sec, DEFAULT_WATERMARK_SHINE.sec);
+    var wmSpin = json.watermark.spin || {};
+    watermark.spinEnabled = wmSpin.enabled !== undefined ? !!wmSpin.enabled : DEFAULT_WATERMARK_SPIN.enabled;
+    watermark.spinIntervalSec = numOr(wmSpin.interval_sec, DEFAULT_WATERMARK_SPIN.intervalSec);
+    watermark.spinSec = numOr(wmSpin.sec, DEFAULT_WATERMARK_SPIN.sec);
+  }
   // reveal_sec/hold_sec（新）は、無ければ旧brush_anim_sec/freeze_secを読み替える（後方互換）。
   // slide_secは、shadow.slide_sec（旧・最優先）→style.slide_sec（新）→既定値の順で解決する
   // （render.pyのresolve_slide_secと同じ優先順位）。
@@ -1874,7 +1980,8 @@ function parseProjectJSON(json, sfxLibrary) {
     shadowBlurRatio: shadowBlurRatio,
     shadowSource: shadowSource,
     freezes: sortFreezesByTime(freezes),
-    logo: logo
+    logo: logo,
+    watermark: watermark
   };
 }
 
@@ -2409,6 +2516,41 @@ function safeZoneRectPx(safeZone, W, H) {
   var rect = { left: left, top: top, right: W - right, bottom: H - bottom };
   if (rect.right <= rect.left || rect.bottom <= rect.top) return { left: 0, top: 0, right: W, bottom: H };
   return rect;
+}
+
+/**
+ * 常時表示の透かしロゴ watermark（render.pyのWATERMARK_DEFAULTS/WATERMARK_SHINE_DEFAULTS/
+ * WATERMARK_SPIN_DEFAULTSと同じ値）。ラストロゴとは別の、動画全体を通して四隅のいずれかに
+ * 表示され続ける小さいロゴ。imageは選んだファイル名からjob branch内での固定名を作る
+ * （watermarkAssetName、logoAssetNameと同じ考え方）。
+ */
+var WATERMARK_POSITIONS = ["top_left", "top_right", "bottom_left", "bottom_right"];
+var DEFAULT_WATERMARK_POSITION = "bottom_right";
+var DEFAULT_WATERMARK = { position: DEFAULT_WATERMARK_POSITION, widthRatio: 0.16, opacity: 0.85, margin: 0.03 };
+var DEFAULT_WATERMARK_SHINE = { enabled: true, intervalSec: 4.0, sec: 0.6 };
+var DEFAULT_WATERMARK_SPIN = { enabled: true, intervalSec: 9.0, sec: 0.8 };
+var WATERMARK_POSITION_LABELS = [
+  { value: "top_left", label: "左上" }, { value: "top_right", label: "右上" },
+  { value: "bottom_left", label: "左下" }, { value: "bottom_right", label: "右下" }
+];
+/** 透かしロゴ画像も、ロゴ画像と同じ考え方でjob branch内での固定名（拡張子だけ元ファイルから引き継ぐ）にする */
+function watermarkAssetName(originalFileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
+  var ext = m ? m[1].toLowerCase() : "png";
+  return "watermark." + ext;
+}
+
+/** appState.watermark / draft相当の既定オブジェクトを新しく作る（毎回同じ参照を使い回さないため） */
+function defaultWatermarkState() {
+  return {
+    enabled: false, imageFile: null, imageName: "",
+    position: DEFAULT_WATERMARK.position, widthRatio: DEFAULT_WATERMARK.widthRatio,
+    opacity: DEFAULT_WATERMARK.opacity, margin: DEFAULT_WATERMARK.margin,
+    shineEnabled: DEFAULT_WATERMARK_SHINE.enabled, shineIntervalSec: DEFAULT_WATERMARK_SHINE.intervalSec,
+    shineSec: DEFAULT_WATERMARK_SHINE.sec,
+    spinEnabled: DEFAULT_WATERMARK_SPIN.enabled, spinIntervalSec: DEFAULT_WATERMARK_SPIN.intervalSec,
+    spinSec: DEFAULT_WATERMARK_SPIN.sec
+  };
 }
 
 /** ctx.font文字列を組み立てる（TITLE_FONT_CHOICESの実際のweightに合わせる） */
@@ -3067,6 +3209,13 @@ if (typeof module !== "undefined" && module.exports) {
     resolveSafeZone: resolveSafeZone,
     safeZoneRectPx: safeZoneRectPx,
     clampBoxToRect: clampBoxToRect,
+    WATERMARK_POSITIONS: WATERMARK_POSITIONS,
+    DEFAULT_WATERMARK_POSITION: DEFAULT_WATERMARK_POSITION,
+    DEFAULT_WATERMARK: DEFAULT_WATERMARK,
+    DEFAULT_WATERMARK_SHINE: DEFAULT_WATERMARK_SHINE,
+    DEFAULT_WATERMARK_SPIN: DEFAULT_WATERMARK_SPIN,
+    watermarkAssetName: watermarkAssetName,
+    defaultWatermarkState: defaultWatermarkState,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3277,7 +3426,9 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" }
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" },
+  // 常時表示の透かしロゴ（watermark）。imageFileはラストロゴと同様、このセッション中のみ有効
+  watermark: defaultWatermarkState()
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -3451,6 +3602,18 @@ function init() {
     "logoSettleSecSlider", "logoSettleSecValue",
     "logoDurationSlider", "logoDurationValue",
     "logoSfxSelect", "logoSfxAlignSelect", "clearLogoBtn",
+    "watermarkSection", "watermarkEnabledCheckbox", "watermarkOptionsBody",
+    "pickWatermarkBtn", "watermarkFileInput", "reuseLastLogoForWatermarkBtn", "watermarkFileName",
+    "watermarkPositionSelect",
+    "watermarkWidthRatioSlider", "watermarkWidthRatioValue",
+    "watermarkOpacitySlider", "watermarkOpacityValue",
+    "watermarkMarginSlider", "watermarkMarginValue",
+    "watermarkShineEnabledCheckbox", "watermarkShineOptionsBody",
+    "watermarkShineIntervalSlider", "watermarkShineIntervalValue",
+    "watermarkShineSecSlider", "watermarkShineSecValue",
+    "watermarkSpinEnabledCheckbox", "watermarkSpinOptionsBody",
+    "watermarkSpinIntervalSlider", "watermarkSpinIntervalValue",
+    "watermarkSpinSecSlider", "watermarkSpinSecValue",
     "sfxLibraryFileInput", "sfxLibraryStatus", "sfxLibraryList",
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
@@ -3868,6 +4031,86 @@ function init() {
     saveToLocalStorage();
   });
   els.clearLogoBtn.addEventListener("click", clearLogo);
+
+  els.watermarkEnabledCheckbox.addEventListener("change", function () {
+    appState.watermark.enabled = els.watermarkEnabledCheckbox.checked;
+    els.watermarkOptionsBody.hidden = !appState.watermark.enabled;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.pickWatermarkBtn.addEventListener("click", function () { els.watermarkFileInput.click(); });
+  els.watermarkFileInput.addEventListener("change", handleWatermarkFileChange);
+  els.reuseLastLogoForWatermarkBtn.addEventListener("click", function () {
+    if (!appState.logo || !appState.logo.imageFile) {
+      els.watermarkFileName.textContent = "ラストロゴの画像がまだ選ばれていません";
+      return;
+    }
+    appState.watermark.imageFile = appState.logo.imageFile;
+    appState.watermark.imageName = watermarkAssetName(appState.logo.imageFile.name);
+    els.watermarkFileName.textContent = "ラストロゴの画像を流用: " + appState.logo.imageFile.name;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkPositionSelect.addEventListener("change", function () {
+    appState.watermark.position = WATERMARK_POSITIONS.indexOf(els.watermarkPositionSelect.value) >= 0
+      ? els.watermarkPositionSelect.value : DEFAULT_WATERMARK_POSITION;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkWidthRatioSlider.addEventListener("input", function () {
+    appState.watermark.widthRatio = Number(els.watermarkWidthRatioSlider.value);
+    els.watermarkWidthRatioValue.textContent = appState.watermark.widthRatio.toFixed(2);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkOpacitySlider.addEventListener("input", function () {
+    appState.watermark.opacity = Number(els.watermarkOpacitySlider.value);
+    els.watermarkOpacityValue.textContent = appState.watermark.opacity.toFixed(2);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkMarginSlider.addEventListener("input", function () {
+    appState.watermark.margin = Number(els.watermarkMarginSlider.value);
+    els.watermarkMarginValue.textContent = appState.watermark.margin.toFixed(3);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkShineEnabledCheckbox.addEventListener("change", function () {
+    appState.watermark.shineEnabled = els.watermarkShineEnabledCheckbox.checked;
+    els.watermarkShineOptionsBody.hidden = !appState.watermark.shineEnabled;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkShineIntervalSlider.addEventListener("input", function () {
+    appState.watermark.shineIntervalSec = Number(els.watermarkShineIntervalSlider.value);
+    els.watermarkShineIntervalValue.textContent = appState.watermark.shineIntervalSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkShineSecSlider.addEventListener("input", function () {
+    appState.watermark.shineSec = Number(els.watermarkShineSecSlider.value);
+    els.watermarkShineSecValue.textContent = appState.watermark.shineSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkSpinEnabledCheckbox.addEventListener("change", function () {
+    appState.watermark.spinEnabled = els.watermarkSpinEnabledCheckbox.checked;
+    els.watermarkSpinOptionsBody.hidden = !appState.watermark.spinEnabled;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkSpinIntervalSlider.addEventListener("input", function () {
+    appState.watermark.spinIntervalSec = Number(els.watermarkSpinIntervalSlider.value);
+    els.watermarkSpinIntervalValue.textContent = appState.watermark.spinIntervalSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.watermarkSpinSecSlider.addEventListener("input", function () {
+    appState.watermark.spinSec = Number(els.watermarkSpinSecSlider.value);
+    els.watermarkSpinSecValue.textContent = appState.watermark.spinSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
 
   els.exportBtn.addEventListener("click", exportProjectJSON);
   els.copyJsonBtn.addEventListener("click", copyProjectJSON);
@@ -6996,6 +7239,58 @@ function applyLogoSettingsToInputs() {
   els.logoSfxAlignSelect.hidden = !logo.sfxLibraryId;
 }
 
+/* ---------------- 常時表示の透かしロゴ（watermark） ---------------- */
+
+function handleWatermarkFileChange(e) {
+  var file = e.target.files && e.target.files[0];
+  if (!file) return;
+  appState.watermark.imageFile = file;
+  appState.watermark.imageName = watermarkAssetName(file.name);
+  applyWatermarkSettingsToInputs();
+  saveToLocalStorage();
+  updateJsonPreview();
+}
+
+function applyWatermarkSettingsToInputs() {
+  var wm = appState.watermark || defaultWatermarkState();
+  els.watermarkEnabledCheckbox.checked = !!wm.enabled;
+  els.watermarkOptionsBody.hidden = !wm.enabled;
+  if (wm.imageFile) {
+    els.watermarkFileName.textContent = "選択中: " + wm.imageFile.name;
+  } else if (wm.imageName) {
+    els.watermarkFileName.textContent = "設定済み（" + wm.imageName + "）。「動画を作る」の前に透かしロゴ画像を選び直してください";
+  } else {
+    els.watermarkFileName.textContent = "まだ透かしロゴ画像が選ばれていません";
+  }
+  els.watermarkPositionSelect.value = WATERMARK_POSITIONS.indexOf(wm.position) >= 0
+    ? wm.position : DEFAULT_WATERMARK_POSITION;
+  var widthRatio = numOr(wm.widthRatio, DEFAULT_WATERMARK.widthRatio);
+  els.watermarkWidthRatioSlider.value = widthRatio;
+  els.watermarkWidthRatioValue.textContent = widthRatio.toFixed(2);
+  var opacity = numOr(wm.opacity, DEFAULT_WATERMARK.opacity);
+  els.watermarkOpacitySlider.value = opacity;
+  els.watermarkOpacityValue.textContent = opacity.toFixed(2);
+  var margin = numOr(wm.margin, DEFAULT_WATERMARK.margin);
+  els.watermarkMarginSlider.value = margin;
+  els.watermarkMarginValue.textContent = margin.toFixed(3);
+  els.watermarkShineEnabledCheckbox.checked = wm.shineEnabled !== false;
+  els.watermarkShineOptionsBody.hidden = wm.shineEnabled === false;
+  var shineIntervalSec = numOr(wm.shineIntervalSec, DEFAULT_WATERMARK_SHINE.intervalSec);
+  els.watermarkShineIntervalSlider.value = shineIntervalSec;
+  els.watermarkShineIntervalValue.textContent = shineIntervalSec.toFixed(1) + "秒";
+  var shineSec = numOr(wm.shineSec, DEFAULT_WATERMARK_SHINE.sec);
+  els.watermarkShineSecSlider.value = shineSec;
+  els.watermarkShineSecValue.textContent = shineSec.toFixed(1) + "秒";
+  els.watermarkSpinEnabledCheckbox.checked = wm.spinEnabled !== false;
+  els.watermarkSpinOptionsBody.hidden = wm.spinEnabled === false;
+  var spinIntervalSec = numOr(wm.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec);
+  els.watermarkSpinIntervalSlider.value = spinIntervalSec;
+  els.watermarkSpinIntervalValue.textContent = spinIntervalSec.toFixed(1) + "秒";
+  var spinSec = numOr(wm.spinSec, DEFAULT_WATERMARK_SPIN.sec);
+  els.watermarkSpinSecSlider.value = spinSec;
+  els.watermarkSpinSecValue.textContent = spinSec.toFixed(1) + "秒";
+}
+
 /* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
 
 function applySettingsToInputs() {
@@ -7088,6 +7383,7 @@ function applySettingsToInputs() {
   els.showSafeZoneCheckbox.checked = !!appState.showSafeZone;
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
+  applyWatermarkSettingsToInputs();
 }
 
 /* ---------------- localStorage ---------------- */
@@ -7252,6 +7548,21 @@ function buildLocalStoragePayload(dropThumbs) {
       sfx: appState.logo.sfx,
       sfxLibraryId: appState.logo.sfxLibraryId || null,
       sfxAlign: appState.logo.sfxAlign || SFX_ALIGN_DEFAULT
+    } : null,
+    // watermark画像本体(File)も保存できないため、ファイル名等の設定だけ保存する
+    watermark: (appState.watermark && appState.watermark.imageName) ? {
+      enabled: appState.watermark.enabled,
+      imageName: appState.watermark.imageName,
+      position: appState.watermark.position,
+      widthRatio: appState.watermark.widthRatio,
+      opacity: appState.watermark.opacity,
+      margin: appState.watermark.margin,
+      shineEnabled: appState.watermark.shineEnabled,
+      shineIntervalSec: appState.watermark.shineIntervalSec,
+      shineSec: appState.watermark.shineSec,
+      spinEnabled: appState.watermark.spinEnabled,
+      spinIntervalSec: appState.watermark.spinIntervalSec,
+      spinSec: appState.watermark.spinSec
     } : null
   };
 }
@@ -7322,6 +7633,24 @@ function loadFromLocalStorage(videoFileName) {
       sfxAlign: resolveSfxAlign(data.logo.sfxAlign, SFX_ALIGNS_LOGO),
       autoColorHex: ""
     } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+    appState.watermark = (data.watermark && data.watermark.imageName) ? {
+      enabled: data.watermark.enabled !== undefined ? !!data.watermark.enabled : true,
+      imageFile: null,
+      imageName: data.watermark.imageName,
+      position: WATERMARK_POSITIONS.indexOf(data.watermark.position) >= 0
+        ? data.watermark.position : DEFAULT_WATERMARK_POSITION,
+      widthRatio: numOr(data.watermark.widthRatio, DEFAULT_WATERMARK.widthRatio),
+      opacity: numOr(data.watermark.opacity, DEFAULT_WATERMARK.opacity),
+      margin: numOr(data.watermark.margin, DEFAULT_WATERMARK.margin),
+      shineEnabled: data.watermark.shineEnabled !== undefined ? !!data.watermark.shineEnabled
+        : DEFAULT_WATERMARK_SHINE.enabled,
+      shineIntervalSec: numOr(data.watermark.shineIntervalSec, DEFAULT_WATERMARK_SHINE.intervalSec),
+      shineSec: numOr(data.watermark.shineSec, DEFAULT_WATERMARK_SHINE.sec),
+      spinEnabled: data.watermark.spinEnabled !== undefined ? !!data.watermark.spinEnabled
+        : DEFAULT_WATERMARK_SPIN.enabled,
+      spinIntervalSec: numOr(data.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec),
+      spinSec: numOr(data.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec)
+    } : defaultWatermarkState();
     return true;
   } catch (e) {
     return false;
@@ -7740,6 +8069,17 @@ function startMakeVideoJob() {
     return;
   }
 
+  var watermarkFile = (appState.watermark && appState.watermark.imageFile) || null;
+  if (appState.watermark && appState.watermark.imageName && !watermarkFile) {
+    showJobError("透かしロゴの設定が残っていますが画像が選び直されていません。透かしロゴ画像を選び直してください");
+    els.watermarkSection.open = true;
+    return;
+  }
+  if (watermarkFile && exceedsBlobLimit(watermarkFile.size)) {
+    showJobError("透かしロゴ画像が大きすぎます（上限100MB）");
+    return;
+  }
+
   var user = els.ghUserInput.value.trim();
   var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
   var token = els.ghTokenInput.value.trim();
@@ -7773,6 +8113,7 @@ function showConfirmWarningsModal(warnings) {
 function runMakeVideoJobUpload() {
   var videoFile = appState.videoFile;
   var logoFile = (appState.logo && appState.logo.imageFile) || null;
+  var watermarkFile = (appState.watermark && appState.watermark.imageFile) || null;
   var user = els.ghUserInput.value.trim();
   var repo = (els.ghRepoInput.value || "").trim() || "spotlight-jobs";
   var token = els.ghTokenInput.value.trim();
@@ -7784,6 +8125,7 @@ function runMakeVideoJobUpload() {
   var jsonBlobSha = null;
   var videoBlobSha = null;
   var logoBlobSha = null;
+  var watermarkBlobSha = null;
   var releaseInfo = null;
   var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
   var sfxTreeEntries = [];
@@ -7833,6 +8175,17 @@ function runMakeVideoJobUpload() {
     })
     .then(function (logoBlob) {
       if (logoBlob) logoBlobSha = logoBlob.sha;
+      if (!watermarkFile) return null;
+      showJobProgress(86.3, "透かしロゴ画像をBase64に変換中…");
+      return blobToBase64(watermarkFile);
+    })
+    .then(function (watermarkBase64) {
+      if (!watermarkFile) return null;
+      showJobProgress(86.6, "透かしロゴ画像をアップロード中…");
+      return ghCreateBlob(user, repo, token, watermarkBase64);
+    })
+    .then(function (watermarkBlob) {
+      if (watermarkBlob) watermarkBlobSha = watermarkBlob.sha;
       // 効果音ライブラリ（自分のmp3/wav）のうち、実際に使われているファイルだけを
       // 1件ずつIndexedDBから取り出してアップロードする（動画・ロゴ画像と同じGit Data API経由）
       showJobProgress(87, "効果音ファイルをアップロード中… 0/" + usedSfxIds.length);
@@ -7875,6 +8228,9 @@ function runMakeVideoJobUpload() {
       ];
       if (logoFile && logoBlobSha) {
         entries.push({ path: logoAssetName(logoFile.name), sha: logoBlobSha });
+      }
+      if (watermarkFile && watermarkBlobSha) {
+        entries.push({ path: watermarkAssetName(watermarkFile.name), sha: watermarkBlobSha });
       }
       entries = entries.concat(sfxTreeEntries).concat(confirmedAlphaTreeEntries);
       return ghCreateTree(user, repo, token, baseCommit.tree.sha, entries);
@@ -8033,6 +8389,7 @@ function handleJsonFileChange(e) {
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
       appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+      appState.watermark = loaded.watermark || defaultWatermarkState();
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();
