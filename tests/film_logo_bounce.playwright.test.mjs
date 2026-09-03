@@ -150,6 +150,20 @@ async function main() {
   check(project.logo && project.logo.sfx === "don", "logo.sfxが選択どおりになる: " + (project.logo && project.logo.sfx));
 
   console.log("");
+  console.log("=== ラストロゴ：背景を自動で透明化するチェックボックス・プレビュー ===");
+  check(await page.isChecked("#logoAutoTransparentBgCheckbox"), "既定でauto_transparent_bgチェックボックスはONになっている");
+  check(project.logo && project.logo.auto_transparent_bg === true,
+    "既定ではlogo.auto_transparent_bg=trueがJSONに出力される");
+  check(await page.isVisible("#logoAutoTransparentPreviewCanvas"),
+    "画像選択後、背景自動透明化のプレビューcanvasが表示される");
+  await page.uncheck("#logoAutoTransparentBgCheckbox");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.auto_transparent_bg === false, "チェックを外すとlogo.auto_transparent_bg=falseになる");
+  await page.check("#logoAutoTransparentBgCheckbox");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.logo.auto_transparent_bg === true, "チェックを戻すとlogo.auto_transparent_bg=trueに戻る");
+
+  console.log("");
   console.log("=== ラストロゴ：背景モード（自動検出色／動画に重ねる／色指定） ===");
   await page.waitForFunction(() => {
     var el = document.getElementById("logoColorHint");
@@ -231,6 +245,21 @@ async function main() {
   const watermarkFileNameAfterReuse = await page.textContent("#watermarkFileName");
   check(watermarkFileNameAfterReuse.indexOf("流用") >= 0,
     "流用したことが分かる表示文言になる: " + watermarkFileNameAfterReuse);
+
+  console.log("");
+  console.log("=== 透かしロゴ：背景を自動で透明化するチェックボックス・プレビュー ===");
+  check(await page.isChecked("#watermarkAutoTransparentBgCheckbox"),
+    "既定でauto_transparent_bgチェックボックスはONになっている");
+  check(project.watermark && project.watermark.auto_transparent_bg === true,
+    "既定ではwatermark.auto_transparent_bg=trueがJSONに出力される");
+  check(await page.isVisible("#watermarkAutoTransparentPreviewCanvas"),
+    "画像選択後、背景自動透明化のプレビューcanvasが表示される");
+  await page.uncheck("#watermarkAutoTransparentBgCheckbox");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.watermark.auto_transparent_bg === false, "チェックを外すとwatermark.auto_transparent_bg=falseになる");
+  await page.check("#watermarkAutoTransparentBgCheckbox");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.watermark.auto_transparent_bg === true, "チェックを戻すとwatermark.auto_transparent_bg=trueに戻る");
 
   console.log("");
   console.log("=== ハッシュタグ表示：表示ONでテキスト・位置・サイズ・色・背景を設定するとJSONに反映される ===");

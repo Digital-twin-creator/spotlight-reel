@@ -1124,7 +1124,7 @@ test("buildProjectJSON: logoにimageNameがあればlogoブロックを出力し
       hold_big_sec: core.DEFAULT_LOGO_HOLD_BIG_SEC,
       shrink_sec: core.DEFAULT_LOGO_SHRINK_SEC,
       settle_sec: core.DEFAULT_LOGO_SETTLE_SEC,
-      duration_sec: 1.2, sfx: "don" });
+      duration_sec: 1.2, sfx: "don", auto_transparent_bg: true });
 
   const withoutLogo = core.buildProjectJSON(Object.assign(sampleState(), {
     logo: { imageFile: null, imageName: "", at: "end", background: "auto", durationSec: 1.2, sfx: "don" }
@@ -1196,7 +1196,7 @@ test("parseProjectJSON: 新しいstyleキー・style.shadow・logo(background込
     shrinkSec: core.DEFAULT_LOGO_SHRINK_SEC,
     settleSec: core.DEFAULT_LOGO_SETTLE_SEC,
     durationSec: 1.2, sfx: "don", sfxLibraryId: null, sfxAlign: "start_at_landing", sfxMissingFile: "",
-    autoColorHex: ""
+    autoColorHex: "", autoTransparentBg: true
   });
 });
 
@@ -1238,6 +1238,7 @@ test("buildProjectJSON: watermarkが有効かつimageNameがあればwatermark�
   }));
   assert.deepStrictEqual(withWatermark.watermark, {
     image: "watermark.png", position: "top_left", width_ratio: 0.2, opacity: 0.9, margin: 0.05,
+    auto_transparent_bg: true,
     shine: { enabled: core.DEFAULT_WATERMARK_SHINE.enabled,
              interval_sec: core.DEFAULT_WATERMARK_SHINE.intervalSec, sec: core.DEFAULT_WATERMARK_SHINE.sec },
     spin: { enabled: core.DEFAULT_WATERMARK_SPIN.enabled,
@@ -1283,7 +1284,8 @@ test("parseProjectJSON: watermarkブロックを読み込める。省略時はde
     enabled: true, imageFile: null, imageName: "watermark.jpg", position: "top_right",
     widthRatio: 0.25, opacity: 0.7, margin: 0.04,
     shineEnabled: false, shineIntervalSec: 3, shineSec: 0.4,
-    spinEnabled: true, spinIntervalSec: 10, spinSec: 1.2
+    spinEnabled: true, spinIntervalSec: 10, spinSec: 1.2,
+    autoTransparentBg: true
   });
 
   const loadedNone = core.parseProjectJSON({ version: 1, video: "v.mp4", freezes: [] });
@@ -1311,7 +1313,7 @@ test("buildProjectJSON/parseProjectJSON: watermarkの全フィールドが往復
   const loaded = core.parseProjectJSON(project);
   assert.deepStrictEqual(loaded.watermark, {
     enabled: true, imageFile: null, imageName: "watermark.png", position: "bottom_left",
-    widthRatio: 0.12, opacity: 0.6, margin: 0.02,
+    widthRatio: 0.12, opacity: 0.6, margin: 0.02, autoTransparentBg: true,
     shineEnabled: true, shineIntervalSec: 6, shineSec: 0.8,
     spinEnabled: false, spinIntervalSec: 12, spinSec: 1.5
   });
@@ -1417,6 +1419,89 @@ test("buildProjectJSON/parseProjectJSON: hashtagsの全フィールドが往復�
     enabled: true, text: "#京都 #祇園 #ClubIRIS", position: "custom", pos: [0.2, 0.7],
     size: 0.033, fontKey: "delagothicone", color: "#123456", backing: "box", always: false
   });
+});
+
+/* ---- auto_transparent_bg（透過の無いロゴ/透かし画像の背景色を自動で透明化） ---- */
+
+function makeSolidImageData(w, h, color) {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = color[0]; data[i * 4 + 1] = color[1]; data[i * 4 + 2] = color[2]; data[i * 4 + 3] = 255;
+  }
+  return { data, width: w, height: h };
+}
+
+test("autoTransparentBgImageData: 透過が無い単色画像は全面透明化される（中身が無いので四隅も中心も同じ背景色）", () => {
+  const img = makeSolidImageData(20, 20, [10, 10, 10]);
+  const result = core.autoTransparentBgImageData(img);
+  const centerIdx = (10 * 20 + 10) * 4;
+  assert.ok(result.data[centerIdx + 3] < 10, "背景色しか無い画像は中心も透明になる");
+});
+
+test("autoTransparentBgImageData: 中央に背景と異なる色の内容があれば、そこだけ不透明のまま残る", () => {
+  const img = makeSolidImageData(30, 30, [10, 10, 10]);
+  // 中央8x8を背景と大きく異なる色に塗る（連結していない「内容」領域）
+  for (let y = 11; y < 19; y++) {
+    for (let x = 11; x < 19; x++) {
+      const idx = (y * 30 + x) * 4;
+      img.data[idx] = 250; img.data[idx + 1] = 250; img.data[idx + 2] = 250;
+    }
+  }
+  const result = core.autoTransparentBgImageData(img);
+  const cornerIdx = (1 * 30 + 1) * 4;
+  const centerIdx = (15 * 30 + 15) * 4;
+  assert.ok(result.data[cornerIdx + 3] < 10, "四隅（背景色）は透明化される");
+  assert.ok(result.data[centerIdx + 3] > 200, "中央の内容（背景と異なる色）は不透明のまま残る");
+});
+
+test("autoTransparentBgImageData: 既に透過（アルファ<250の画素）を持つ画像はそのまま返す", () => {
+  const img = makeSolidImageData(10, 10, [10, 10, 10]);
+  img.data[3] = 0; // 1画素だけ透明にしておく
+  const result = core.autoTransparentBgImageData(img);
+  assert.strictEqual(result, img, "既に透過を持つ画像は同じ参照のまま返る（変更しない）");
+});
+
+test("autoTransparentBgImageData: RGB画素そのものは変更しない（アルファのみ変更）", () => {
+  const img = makeSolidImageData(20, 20, [10, 10, 10]);
+  const result = core.autoTransparentBgImageData(img);
+  assert.strictEqual(result.data[0], 10);
+  assert.strictEqual(result.data[1], 10);
+  assert.strictEqual(result.data[2], 10);
+});
+
+test("buildProjectJSON: logo.auto_transparent_bg/watermark.auto_transparent_bgが既定でtrue、falseも明示できる", () => {
+  const withDefaults = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "auto" },
+    watermark: Object.assign(core.defaultWatermarkState(), { enabled: true, imageName: "watermark.png" })
+  }));
+  assert.strictEqual(withDefaults.logo.auto_transparent_bg, true);
+  assert.strictEqual(withDefaults.watermark.auto_transparent_bg, true);
+
+  const withFalse = core.buildProjectJSON(Object.assign(sampleState(), {
+    logo: { imageName: "logo.png", at: "end", background: "auto", autoTransparentBg: false },
+    watermark: Object.assign(core.defaultWatermarkState(),
+      { enabled: true, imageName: "watermark.png", autoTransparentBg: false })
+  }));
+  assert.strictEqual(withFalse.logo.auto_transparent_bg, false);
+  assert.strictEqual(withFalse.watermark.auto_transparent_bg, false);
+});
+
+test("parseProjectJSON: logo.auto_transparent_bg/watermark.auto_transparent_bgを読み込める。省略時は既定でtrue", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    logo: { image: "logo.png", auto_transparent_bg: false },
+    watermark: { image: "watermark.png", auto_transparent_bg: false }
+  });
+  assert.strictEqual(loaded.logo.autoTransparentBg, false);
+  assert.strictEqual(loaded.watermark.autoTransparentBg, false);
+
+  const loadedDefault = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    logo: { image: "logo.png" },
+    watermark: { image: "watermark.png" }
+  });
+  assert.strictEqual(loadedDefault.logo.autoTransparentBg, true);
+  assert.strictEqual(loadedDefault.watermark.autoTransparentBg, true);
 });
 
 test("parseProjectJSON: 'shadow'キーも旧film_offsetも含まない旧JSONは、既定で影が有効に解決される（実機で影が出ない不具合の再発防止）", () => {

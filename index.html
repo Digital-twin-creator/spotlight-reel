@@ -800,6 +800,13 @@
       <button class="ghost" id="pickLogoBtn">🖼 ロゴ画像を選ぶ（PNG推奨）</button>
       <input type="file" id="logoFileInput" accept="image/png,image/*" hidden>
       <div class="muted" id="logoFileName">まだロゴ画像が選ばれていません</div>
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="logoAutoTransparentBgCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="logoAutoTransparentBgCheckbox">背景を自動で透明化する（透過の無い画像のみ。既に透過PNGなら何もしない）</label>
+      </div>
+      <canvas id="logoAutoTransparentPreviewCanvas" width="160" height="160"
+              style="display:none;border-radius:8px;background:
+                repeating-conic-gradient(#ccc 0% 25%, #fff 0% 50%) 0 0/16px 16px;"></canvas>
       <div class="field">
         <label>logo.at（表示タイミング）</label>
         <select id="logoAtSelect">
@@ -869,6 +876,13 @@
         <input type="file" id="watermarkFileInput" accept="image/png,image/*" hidden>
         <button class="ghost small" id="reuseLastLogoForWatermarkBtn">ラストロゴの画像を流用する</button>
         <div class="muted" id="watermarkFileName">まだ透かしロゴ画像が選ばれていません</div>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="watermarkAutoTransparentBgCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="watermarkAutoTransparentBgCheckbox">背景を自動で透明化する（透過の無い画像のみ。既に透過PNGなら何もしない）</label>
+        </div>
+        <canvas id="watermarkAutoTransparentPreviewCanvas" width="160" height="160"
+                style="display:none;border-radius:8px;background:
+                  repeating-conic-gradient(#ccc 0% 25%, #fff 0% 50%) 0 0/16px 16px;"></canvas>
         <div class="field">
           <label>位置 position</label>
           <select id="watermarkPositionSelect">
@@ -1738,7 +1752,8 @@ function buildProjectJSON(state) {
       hold_big_sec: round(numOr(state.logo.holdBigSec, DEFAULT_LOGO_HOLD_BIG_SEC), 2),
       shrink_sec: round(numOr(state.logo.shrinkSec, DEFAULT_LOGO_SHRINK_SEC), 2),
       settle_sec: round(numOr(state.logo.settleSec, DEFAULT_LOGO_SETTLE_SEC), 2),
-      duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2)
+      duration_sec: round(numOr(state.logo.durationSec, DEFAULT_LOGO_DURATION_SEC), 2),
+      auto_transparent_bg: state.logo.autoTransparentBg !== undefined ? !!state.logo.autoTransparentBg : true
     };
     if (state.logo.sfxLibraryId) {
       var logoLibFile = (state.sfxLibrary || [])
@@ -1759,6 +1774,7 @@ function buildProjectJSON(state) {
       width_ratio: round(numOr(state.watermark.widthRatio, DEFAULT_WATERMARK.widthRatio), 3),
       opacity: round(numOr(state.watermark.opacity, DEFAULT_WATERMARK.opacity), 2),
       margin: round(numOr(state.watermark.margin, DEFAULT_WATERMARK.margin), 3),
+      auto_transparent_bg: state.watermark.autoTransparentBg !== undefined ? !!state.watermark.autoTransparentBg : true,
       shine: {
         enabled: state.watermark.shineEnabled !== undefined ? !!state.watermark.shineEnabled
           : DEFAULT_WATERMARK_SHINE.enabled,
@@ -1995,7 +2011,8 @@ function parseProjectJSON(json, sfxLibrary) {
       sfxLibraryId: logoSfxFields.sfxLibraryId,
       sfxAlign: logoSfxFields.sfxAlign || SFX_ALIGN_DEFAULT,
       sfxMissingFile: logoSfxFields.sfxMissingFile || "",
-      autoColorHex: ""
+      autoColorHex: "",
+      autoTransparentBg: json.logo.auto_transparent_bg !== undefined ? !!json.logo.auto_transparent_bg : true
     };
   }
   var watermark = defaultWatermarkState();
@@ -2007,6 +2024,8 @@ function parseProjectJSON(json, sfxLibrary) {
     watermark.widthRatio = numOr(json.watermark.width_ratio, DEFAULT_WATERMARK.widthRatio);
     watermark.opacity = numOr(json.watermark.opacity, DEFAULT_WATERMARK.opacity);
     watermark.margin = numOr(json.watermark.margin, DEFAULT_WATERMARK.margin);
+    watermark.autoTransparentBg = json.watermark.auto_transparent_bg !== undefined
+      ? !!json.watermark.auto_transparent_bg : true;
     var wmShine = json.watermark.shine || {};
     watermark.shineEnabled = wmShine.enabled !== undefined ? !!wmShine.enabled : DEFAULT_WATERMARK_SHINE.enabled;
     watermark.shineIntervalSec = numOr(wmShine.interval_sec, DEFAULT_WATERMARK_SHINE.intervalSec);
@@ -2643,7 +2662,8 @@ function defaultWatermarkState() {
     shineEnabled: DEFAULT_WATERMARK_SHINE.enabled, shineIntervalSec: DEFAULT_WATERMARK_SHINE.intervalSec,
     shineSec: DEFAULT_WATERMARK_SHINE.sec,
     spinEnabled: DEFAULT_WATERMARK_SPIN.enabled, spinIntervalSec: DEFAULT_WATERMARK_SPIN.intervalSec,
-    spinSec: DEFAULT_WATERMARK_SPIN.sec
+    spinSec: DEFAULT_WATERMARK_SPIN.sec,
+    autoTransparentBg: true
   };
 }
 
@@ -2667,6 +2687,120 @@ function defaultHashtagsState() {
     size: DEFAULT_HASHTAGS.size, fontKey: DEFAULT_TITLE_FONT_KEY,
     color: DEFAULT_HASHTAGS.color, backing: DEFAULT_HASHTAGS.backing, always: DEFAULT_HASHTAGS.always
   };
+}
+
+/**
+ * auto_transparent_bg（render.pyのauto_transparent_bgと同じ考え方のJS版。エディタの
+ * プレビュー専用で、実際のレンダリングは常にサーバー側render.pyが行う）。
+ * ImageData相当の{data:Uint8ClampedArray, width, height}を受け取り、透過が無い
+ * （ほぼ全画素が不透明な）画像から、四隅の背景色に近い画素のうち外周から連結した
+ * 領域だけを透明化した{data, width, height}を返す。境界はboxBlurで数pxぼかす。
+ * 既に有意な透過を持つ画像はそのまま返す。
+ */
+var AUTO_TRANSPARENT_BG_COLOR_THRESH = 45;
+var AUTO_TRANSPARENT_ALREADY_ALPHA_THRESH = 250; // 0-255。これ未満のアルファがあれば「既に透過あり」
+var AUTO_TRANSPARENT_FEATHER_PX = 3;
+
+function cornerAvgColorImageData(imgData, patchPx) {
+  var w = imgData.width, h = imgData.height, data = imgData.data;
+  var p = Math.max(1, Math.min(patchPx, w, h));
+  var sum = [0, 0, 0], count = 0;
+  function addPatch(x0, y0) {
+    for (var y = y0; y < y0 + p; y++) {
+      for (var x = x0; x < x0 + p; x++) {
+        var idx = (y * w + x) * 4;
+        sum[0] += data[idx]; sum[1] += data[idx + 1]; sum[2] += data[idx + 2];
+        count++;
+      }
+    }
+  }
+  addPatch(0, 0); addPatch(w - p, 0); addPatch(0, h - p); addPatch(w - p, h - p);
+  return [sum[0] / count, sum[1] / count, sum[2] / count];
+}
+
+/** 1次元ボックスブラー（水平→垂直の2パス）。radius<=0ならそのまま返す */
+function boxBlur(src, w, h, radius) {
+  if (radius <= 0) return src;
+  var tmp = new Float32Array(w * h);
+  var out = new Float32Array(w * h);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var sum = 0, count = 0;
+      for (var dx = -radius; dx <= radius; dx++) {
+        var xx = x + dx;
+        if (xx >= 0 && xx < w) { sum += src[y * w + xx]; count++; }
+      }
+      tmp[y * w + x] = sum / count;
+    }
+  }
+  for (var x2 = 0; x2 < w; x2++) {
+    for (var y2 = 0; y2 < h; y2++) {
+      var sum2 = 0, count2 = 0;
+      for (var dy = -radius; dy <= radius; dy++) {
+        var yy = y2 + dy;
+        if (yy >= 0 && yy < h) { sum2 += tmp[yy * w + x2]; count2++; }
+      }
+      out[y2 * w + x2] = sum2 / count2;
+    }
+  }
+  return out;
+}
+
+function autoTransparentBgImageData(imgData, threshold, featherPx) {
+  threshold = threshold == null ? AUTO_TRANSPARENT_BG_COLOR_THRESH : threshold;
+  featherPx = featherPx == null ? AUTO_TRANSPARENT_FEATHER_PX : featherPx;
+  var w = imgData.width, h = imgData.height, data = imgData.data;
+  if (w < 3 || h < 3) return imgData;
+
+  var hasRealAlpha = false;
+  for (var i = 3; i < data.length; i += 4) {
+    if (data[i] < AUTO_TRANSPARENT_ALREADY_ALPHA_THRESH) { hasRealAlpha = true; break; }
+  }
+  if (hasRealAlpha) return imgData;
+
+  var bg = cornerAvgColorImageData(imgData, 6);
+  var candidate = new Uint8Array(w * h);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var idx = (y * w + x) * 4;
+      var dist = Math.abs(data[idx] - bg[0]) + Math.abs(data[idx + 1] - bg[1]) + Math.abs(data[idx + 2] - bg[2]);
+      candidate[y * w + x] = dist <= threshold ? 1 : 0;
+    }
+  }
+
+  // 外周から連結した候補画素だけを「背景」とみなす（ロゴ内部の同系色は保持する）
+  var bgMask = new Uint8Array(w * h);
+  var queue = [];
+  function tryEnqueue(x, y) {
+    var idx2 = y * w + x;
+    if (candidate[idx2] && !bgMask[idx2]) { bgMask[idx2] = 1; queue.push(idx2); }
+  }
+  for (var bx = 0; bx < w; bx++) { tryEnqueue(bx, 0); tryEnqueue(bx, h - 1); }
+  for (var by = 0; by < h; by++) { tryEnqueue(0, by); tryEnqueue(w - 1, by); }
+  var qi = 0;
+  while (qi < queue.length) {
+    var qidx = queue[qi++];
+    var qx = qidx % w, qy = (qidx - qx) / w;
+    if (qx > 0) tryEnqueue(qx - 1, qy);
+    if (qx < w - 1) tryEnqueue(qx + 1, qy);
+    if (qy > 0) tryEnqueue(qx, qy - 1);
+    if (qy < h - 1) tryEnqueue(qx, qy + 1);
+  }
+
+  var keep = new Float32Array(w * h);
+  for (var k = 0; k < w * h; k++) keep[k] = bgMask[k] ? 0 : 1;
+  var keepSoft = boxBlur(keep, w, h, featherPx);
+
+  var out = new Uint8ClampedArray(data.length);
+  out.set(data);
+  for (var py = 0; py < h; py++) {
+    for (var px = 0; px < w; px++) {
+      var pidx = py * w + px;
+      var a = data[pidx * 4 + 3] / 255;
+      out[pidx * 4 + 3] = Math.round(255 * a * keepSoft[pidx]);
+    }
+  }
+  return { data: out, width: w, height: h };
 }
 
 /** ctx.font文字列を組み立てる（TITLE_FONT_CHOICESの実際のweightに合わせる） */
@@ -3338,6 +3472,12 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_HASHTAGS_BACKING: DEFAULT_HASHTAGS_BACKING,
     DEFAULT_HASHTAGS: DEFAULT_HASHTAGS,
     defaultHashtagsState: defaultHashtagsState,
+    AUTO_TRANSPARENT_BG_COLOR_THRESH: AUTO_TRANSPARENT_BG_COLOR_THRESH,
+    AUTO_TRANSPARENT_ALREADY_ALPHA_THRESH: AUTO_TRANSPARENT_ALREADY_ALPHA_THRESH,
+    AUTO_TRANSPARENT_FEATHER_PX: AUTO_TRANSPARENT_FEATHER_PX,
+    cornerAvgColorImageData: cornerAvgColorImageData,
+    boxBlur: boxBlur,
+    autoTransparentBgImageData: autoTransparentBgImageData,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3548,7 +3688,7 @@ var appState = {
   freezes: [],
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
-  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" },
+  logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true },
   // 常時表示の透かしロゴ（watermark）。imageFileはラストロゴと同様、このセッション中のみ有効
   watermark: defaultWatermarkState(),
   // ハッシュタグ表示（hashtags）
@@ -3718,7 +3858,8 @@ function init() {
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
     "outputModeSelect",
-    "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName", "logoAtSelect",
+    "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName",
+    "logoAutoTransparentBgCheckbox", "logoAutoTransparentPreviewCanvas", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHint",
     "logoStartWidthRatioSlider", "logoStartWidthRatioValue",
     "logoHoldBigSecSlider", "logoHoldBigSecValue",
@@ -3728,6 +3869,7 @@ function init() {
     "logoSfxSelect", "logoSfxAlignSelect", "clearLogoBtn",
     "watermarkSection", "watermarkEnabledCheckbox", "watermarkOptionsBody",
     "pickWatermarkBtn", "watermarkFileInput", "reuseLastLogoForWatermarkBtn", "watermarkFileName",
+    "watermarkAutoTransparentBgCheckbox", "watermarkAutoTransparentPreviewCanvas",
     "watermarkPositionSelect",
     "watermarkWidthRatioSlider", "watermarkWidthRatioValue",
     "watermarkOpacitySlider", "watermarkOpacityValue",
@@ -4105,6 +4247,15 @@ function init() {
 
   els.pickLogoBtn.addEventListener("click", function () { els.logoFileInput.click(); });
   els.logoFileInput.addEventListener("change", handleLogoFileChange);
+  els.logoAutoTransparentBgCheckbox.addEventListener("change", function () {
+    appState.logo.autoTransparentBg = els.logoAutoTransparentBgCheckbox.checked;
+    if (appState.logo.imageFile) {
+      renderAutoTransparentPreview(appState.logo.imageFile, els.logoAutoTransparentPreviewCanvas,
+        appState.logo.autoTransparentBg);
+    }
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
   els.sfxLibraryFileInput.addEventListener("change", handleSfxLibraryFileChange);
   els.logoAtSelect.addEventListener("change", function () {
     appState.logo.at = els.logoAtSelect.value === "last_freeze" ? "last_freeze" : "end";
@@ -4170,6 +4321,15 @@ function init() {
   });
   els.pickWatermarkBtn.addEventListener("click", function () { els.watermarkFileInput.click(); });
   els.watermarkFileInput.addEventListener("change", handleWatermarkFileChange);
+  els.watermarkAutoTransparentBgCheckbox.addEventListener("change", function () {
+    appState.watermark.autoTransparentBg = els.watermarkAutoTransparentBgCheckbox.checked;
+    if (appState.watermark.imageFile) {
+      renderAutoTransparentPreview(appState.watermark.imageFile, els.watermarkAutoTransparentPreviewCanvas,
+        appState.watermark.autoTransparentBg);
+    }
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
   els.reuseLastLogoForWatermarkBtn.addEventListener("click", function () {
     if (!appState.logo || !appState.logo.imageFile) {
       els.watermarkFileName.textContent = "ラストロゴの画像がまだ選ばれていません";
@@ -4178,6 +4338,8 @@ function init() {
     appState.watermark.imageFile = appState.logo.imageFile;
     appState.watermark.imageName = watermarkAssetName(appState.logo.imageFile.name);
     els.watermarkFileName.textContent = "ラストロゴの画像を流用: " + appState.logo.imageFile.name;
+    renderAutoTransparentPreview(appState.watermark.imageFile, els.watermarkAutoTransparentPreviewCanvas,
+      appState.watermark.autoTransparentBg !== false);
     saveToLocalStorage();
     updateJsonPreview();
   });
@@ -7287,6 +7449,46 @@ function updateSubjectOutlineColorPresetSelection() {
 
 /* ---------------- ラストロゴ ---------------- */
 
+/**
+ * ロゴ/透かし画像の背景自動透明化（auto_transparent_bg）の結果をチェッカー背景の上に
+ * プレビュー表示する（実際のレンダリングは常にサーバー側render.pyが行う。ここでの結果は
+ * 目安）。enabled=falseなら元画像のままプレビューする（無効化時の見た目確認用）。
+ * ファイルが無ければcanvasを隠す。画像読み込みは非同期（onload待ち）。
+ */
+function renderAutoTransparentPreview(file, canvasEl, enabled) {
+  if (!file) { canvasEl.style.display = "none"; return; }
+  var url = URL.createObjectURL(file);
+  var img = new Image();
+  img.onload = function () {
+    try {
+      var w = Math.max(1, img.naturalWidth), h = Math.max(1, img.naturalHeight);
+      var srcCanvas = document.createElement("canvas");
+      srcCanvas.width = w; srcCanvas.height = h;
+      var sctx = srcCanvas.getContext("2d");
+      sctx.drawImage(img, 0, 0);
+      var imgData = sctx.getImageData(0, 0, w, h);
+      var resultData = enabled ? autoTransparentBgImageData(imgData) : imgData;
+      var outCanvas = document.createElement("canvas");
+      outCanvas.width = resultData.width; outCanvas.height = resultData.height;
+      outCanvas.getContext("2d").putImageData(
+        new ImageData(resultData.data, resultData.width, resultData.height), 0, 0);
+
+      var cw = canvasEl.width, ch = canvasEl.height;
+      var ctx = canvasEl.getContext("2d");
+      ctx.clearRect(0, 0, cw, ch);
+      var scale = Math.min(cw / w, ch / h);
+      var dw = w * scale, dh = h * scale;
+      ctx.drawImage(outCanvas, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+      canvasEl.style.display = "block";
+    } catch (err) {
+      canvasEl.style.display = "none";
+    }
+    URL.revokeObjectURL(url);
+  };
+  img.onerror = function () { URL.revokeObjectURL(url); canvasEl.style.display = "none"; };
+  img.src = url;
+}
+
 function handleLogoFileChange(e) {
   var file = e.target.files && e.target.files[0];
   if (!file) return;
@@ -7295,6 +7497,7 @@ function handleLogoFileChange(e) {
   appState.logo.autoColorHex = "";
   applyLogoSettingsToInputs();
   detectLogoAutoColor(file);
+  renderAutoTransparentPreview(file, els.logoAutoTransparentPreviewCanvas, appState.logo.autoTransparentBg !== false);
   saveToLocalStorage();
   updateJsonPreview();
 }
@@ -7359,8 +7562,9 @@ function cornerAverageColorHex(imgEl) {
 }
 
 function clearLogo() {
-  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+  appState.logo = { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
   els.logoFileInput.value = "";
+  els.logoAutoTransparentPreviewCanvas.style.display = "none";
   applyLogoSettingsToInputs();
   saveToLocalStorage();
   updateJsonPreview();
@@ -7403,6 +7607,12 @@ function applyLogoSettingsToInputs() {
   } else {
     els.logoFileName.textContent = "まだロゴ画像が選ばれていません";
   }
+  els.logoAutoTransparentBgCheckbox.checked = logo.autoTransparentBg !== false;
+  if (logo.imageFile) {
+    renderAutoTransparentPreview(logo.imageFile, els.logoAutoTransparentPreviewCanvas, logo.autoTransparentBg !== false);
+  } else {
+    els.logoAutoTransparentPreviewCanvas.style.display = "none";
+  }
   els.logoAtSelect.value = logo.at === "last_freeze" ? "last_freeze" : "end";
   els.logoBackgroundSelect.value = logoBackgroundSelectMode(logo.background);
   updateLogoColorRow();
@@ -7435,6 +7645,8 @@ function handleWatermarkFileChange(e) {
   appState.watermark.imageFile = file;
   appState.watermark.imageName = watermarkAssetName(file.name);
   applyWatermarkSettingsToInputs();
+  renderAutoTransparentPreview(file, els.watermarkAutoTransparentPreviewCanvas,
+    appState.watermark.autoTransparentBg !== false);
   saveToLocalStorage();
   updateJsonPreview();
 }
@@ -7449,6 +7661,13 @@ function applyWatermarkSettingsToInputs() {
     els.watermarkFileName.textContent = "設定済み（" + wm.imageName + "）。「動画を作る」の前に透かしロゴ画像を選び直してください";
   } else {
     els.watermarkFileName.textContent = "まだ透かしロゴ画像が選ばれていません";
+  }
+  els.watermarkAutoTransparentBgCheckbox.checked = wm.autoTransparentBg !== false;
+  if (wm.imageFile) {
+    renderAutoTransparentPreview(wm.imageFile, els.watermarkAutoTransparentPreviewCanvas,
+      wm.autoTransparentBg !== false);
+  } else {
+    els.watermarkAutoTransparentPreviewCanvas.style.display = "none";
   }
   els.watermarkPositionSelect.value = WATERMARK_POSITIONS.indexOf(wm.position) >= 0
     ? wm.position : DEFAULT_WATERMARK_POSITION;
@@ -7760,7 +7979,8 @@ function buildLocalStoragePayload(dropThumbs) {
       durationSec: appState.logo.durationSec,
       sfx: appState.logo.sfx,
       sfxLibraryId: appState.logo.sfxLibraryId || null,
-      sfxAlign: appState.logo.sfxAlign || SFX_ALIGN_DEFAULT
+      sfxAlign: appState.logo.sfxAlign || SFX_ALIGN_DEFAULT,
+      autoTransparentBg: appState.logo.autoTransparentBg !== false
     } : null,
     // watermark画像本体(File)も保存できないため、ファイル名等の設定だけ保存する
     watermark: (appState.watermark && appState.watermark.imageName) ? {
@@ -7775,7 +7995,8 @@ function buildLocalStoragePayload(dropThumbs) {
       shineSec: appState.watermark.shineSec,
       spinEnabled: appState.watermark.spinEnabled,
       spinIntervalSec: appState.watermark.spinIntervalSec,
-      spinSec: appState.watermark.spinSec
+      spinSec: appState.watermark.spinSec,
+      autoTransparentBg: appState.watermark.autoTransparentBg !== false
     } : null,
     hashtags: (appState.hashtags && appState.hashtags.text) ? {
       enabled: appState.hashtags.enabled,
@@ -7855,8 +8076,9 @@ function loadFromLocalStorage(videoFileName) {
       sfx: data.logo.sfx || "",
       sfxLibraryId: data.logo.sfxLibraryId || null,
       sfxAlign: resolveSfxAlign(data.logo.sfxAlign, SFX_ALIGNS_LOGO),
-      autoColorHex: ""
-    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+      autoColorHex: "",
+      autoTransparentBg: data.logo.autoTransparentBg !== undefined ? !!data.logo.autoTransparentBg : true
+    } : { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
     appState.watermark = (data.watermark && data.watermark.imageName) ? {
       enabled: data.watermark.enabled !== undefined ? !!data.watermark.enabled : true,
       imageFile: null,
@@ -7873,7 +8095,8 @@ function loadFromLocalStorage(videoFileName) {
       spinEnabled: data.watermark.spinEnabled !== undefined ? !!data.watermark.spinEnabled
         : DEFAULT_WATERMARK_SPIN.enabled,
       spinIntervalSec: numOr(data.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec),
-      spinSec: numOr(data.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec)
+      spinSec: numOr(data.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec),
+      autoTransparentBg: data.watermark.autoTransparentBg !== undefined ? !!data.watermark.autoTransparentBg : true
     } : defaultWatermarkState();
     appState.hashtags = (data.hashtags && data.hashtags.text) ? {
       enabled: data.hashtags.enabled !== undefined ? !!data.hashtags.enabled : true,
@@ -8626,7 +8849,7 @@ function handleJsonFileChange(e) {
       appState.shadowSource = loaded.shadowSource;
       appState.outputMode = loaded.outputMode;
       appState.freezes = loaded.freezes;
-      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
+      appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "", autoTransparentBg: true };
       appState.watermark = loaded.watermark || defaultWatermarkState();
       appState.hashtags = loaded.hashtags || defaultHashtagsState();
       applySettingsToInputs();
