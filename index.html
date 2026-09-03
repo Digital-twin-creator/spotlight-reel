@@ -922,6 +922,64 @@
     </div>
   </details>
 
+  <!-- 6.7 ハッシュタグ表示（hashtags） -->
+  <details class="card" id="hashtagsSection">
+    <summary>ハッシュタグ表示</summary>
+    <div class="body stack">
+      <div class="field row" style="align-items:center;">
+        <input type="checkbox" id="hashtagsEnabledCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+        <label style="margin:0;" for="hashtagsEnabledCheckbox">ハッシュタグを表示する</label>
+      </div>
+      <div id="hashtagsOptionsBody" hidden>
+        <div class="field">
+          <label>テキスト</label>
+          <input type="text" id="hashtagsTextInput" placeholder="#京都 #祇園 #ClubIRIS">
+        </div>
+        <div class="field">
+          <label>位置 position</label>
+          <select id="hashtagsPositionSelect">
+            <option value="top">上（セーフゾーン上端）</option>
+            <option value="bottom">下（セーフゾーン下端）</option>
+            <option value="custom">カスタム位置</option>
+          </select>
+        </div>
+        <div id="hashtagsCustomPosBody" hidden>
+          <div class="field">
+            <label>横位置 x <span class="brush-slider-value" id="hashtagsPosXValue">0.50</span></label>
+            <input type="range" id="hashtagsPosXSlider" min="0" max="1" step="0.01" value="0.5">
+          </div>
+          <div class="field">
+            <label>縦位置 y <span class="brush-slider-value" id="hashtagsPosYValue">0.50</span></label>
+            <input type="range" id="hashtagsPosYSlider" min="0" max="1" step="0.01" value="0.5">
+          </div>
+        </div>
+        <div class="field">
+          <label>文字サイズ size <span class="brush-slider-value" id="hashtagsSizeValue">0.028</span></label>
+          <input type="range" id="hashtagsSizeSlider" min="0.01" max="0.06" step="0.002" value="0.028">
+        </div>
+        <div class="field">
+          <label>フォント</label>
+          <select id="hashtagsFontSelect"></select>
+        </div>
+        <div class="field">
+          <label>文字色 color</label>
+          <input type="color" id="hashtagsColorInput" value="#ffffff">
+        </div>
+        <div class="field">
+          <label>背景 backing</label>
+          <select id="hashtagsBackingSelect">
+            <option value="outline">縁取りのみ（outline）</option>
+            <option value="box">座布団（box）</option>
+          </select>
+        </div>
+        <div class="field row" style="align-items:center;">
+          <input type="checkbox" id="hashtagsAlwaysCheckbox" style="width:auto;min-height:auto;flex:0 0 auto;">
+          <label style="margin:0;" for="hashtagsAlwaysCheckbox">動画全体を通して常時表示する（オフでフリーズ中のみ表示）</label>
+        </div>
+      </div>
+    </div>
+  </details>
+
   <!-- 効果音ライブラリ：自分のmp3/wavファイルを登録し、フリーズ・ロゴの効果音として使う -->
   <details class="card" id="sfxLibrarySection">
     <summary>効果音ライブラリ（自分のファイルを登録）</summary>
@@ -1715,6 +1773,26 @@ function buildProjectJSON(state) {
       }
     };
   }
+  if (state.hashtags && state.hashtags.enabled && state.hashtags.text) {
+    project.hashtags = {
+      text: state.hashtags.text,
+      position: HASHTAGS_POSITIONS.indexOf(state.hashtags.position) >= 0
+        ? state.hashtags.position : DEFAULT_HASHTAGS_POSITION,
+      size: round(numOr(state.hashtags.size, DEFAULT_HASHTAGS.size), 4),
+      color: state.hashtags.color || DEFAULT_HASHTAGS.color,
+      backing: HASHTAGS_BACKINGS.indexOf(state.hashtags.backing) >= 0
+        ? state.hashtags.backing : DEFAULT_HASHTAGS.backing,
+      always: state.hashtags.always !== undefined ? !!state.hashtags.always : DEFAULT_HASHTAGS.always
+    };
+    if (state.hashtags.position === "custom" && Array.isArray(state.hashtags.pos)) {
+      project.hashtags.pos = [round(numOr(state.hashtags.pos[0], 0.5), 4),
+                               round(numOr(state.hashtags.pos[1], 0.5), 4)];
+    }
+    if (state.hashtags.fontKey && state.hashtags.fontKey !== DEFAULT_TITLE_FONT_KEY) {
+      var htFontChoice = resolveTitleFontChoice(state.hashtags.fontKey);
+      if (htFontChoice.path) project.hashtags.font = htFontChoice.path;
+    }
+  }
   return project;
 }
 
@@ -1938,6 +2016,21 @@ function parseProjectJSON(json, sfxLibrary) {
     watermark.spinIntervalSec = numOr(wmSpin.interval_sec, DEFAULT_WATERMARK_SPIN.intervalSec);
     watermark.spinSec = numOr(wmSpin.sec, DEFAULT_WATERMARK_SPIN.sec);
   }
+  var hashtags = defaultHashtagsState();
+  if (json.hashtags && json.hashtags.text) {
+    hashtags.enabled = true;
+    hashtags.text = String(json.hashtags.text);
+    hashtags.position = HASHTAGS_POSITIONS.indexOf(json.hashtags.position) >= 0
+      ? json.hashtags.position : DEFAULT_HASHTAGS_POSITION;
+    hashtags.pos = Array.isArray(json.hashtags.pos)
+      ? [numOr(json.hashtags.pos[0], 0.5), numOr(json.hashtags.pos[1], 0.5)] : hashtags.pos;
+    hashtags.size = numOr(json.hashtags.size, DEFAULT_HASHTAGS.size);
+    hashtags.color = json.hashtags.color || DEFAULT_HASHTAGS.color;
+    hashtags.backing = HASHTAGS_BACKINGS.indexOf(json.hashtags.backing) >= 0
+      ? json.hashtags.backing : DEFAULT_HASHTAGS.backing;
+    hashtags.always = json.hashtags.always !== undefined ? !!json.hashtags.always : DEFAULT_HASHTAGS.always;
+    hashtags.fontKey = titleFontKeyFromPath(json.hashtags.font);
+  }
   // reveal_sec/hold_sec（新）は、無ければ旧brush_anim_sec/freeze_secを読み替える（後方互換）。
   // slide_secは、shadow.slide_sec（旧・最優先）→style.slide_sec（新）→既定値の順で解決する
   // （render.pyのresolve_slide_secと同じ優先順位）。
@@ -1981,7 +2074,8 @@ function parseProjectJSON(json, sfxLibrary) {
     shadowSource: shadowSource,
     freezes: sortFreezesByTime(freezes),
     logo: logo,
-    watermark: watermark
+    watermark: watermark,
+    hashtags: hashtags
   };
 }
 
@@ -2550,6 +2644,28 @@ function defaultWatermarkState() {
     shineSec: DEFAULT_WATERMARK_SHINE.sec,
     spinEnabled: DEFAULT_WATERMARK_SPIN.enabled, spinIntervalSec: DEFAULT_WATERMARK_SPIN.intervalSec,
     spinSec: DEFAULT_WATERMARK_SPIN.sec
+  };
+}
+
+/**
+ * ハッシュタグ表示 hashtags（render.pyのHASHTAGS_DEFAULTSと同じ値）。#タグの1行テキストを
+ * top/bottom（セーフゾーン端に自動配置）またはcustom（pos指定）で表示する。画像ファイルは
+ * 扱わないため、watermarkと違いjob branchへのアセットアップロードは不要（テキストのみ）。
+ */
+var HASHTAGS_POSITIONS = ["top", "bottom", "custom"];
+var DEFAULT_HASHTAGS_POSITION = "bottom";
+var HASHTAGS_BACKINGS = ["outline", "box"];
+var DEFAULT_HASHTAGS_BACKING = "outline";
+var DEFAULT_HASHTAGS = { position: DEFAULT_HASHTAGS_POSITION, size: 0.028, color: "#FFFFFF",
+                          backing: DEFAULT_HASHTAGS_BACKING, always: true };
+
+/** appState.hashtags / draft相当の既定オブジェクトを新しく作る（毎回同じ参照を使い回さないため） */
+function defaultHashtagsState() {
+  return {
+    enabled: false, text: "",
+    position: DEFAULT_HASHTAGS.position, pos: [0.5, 0.5],
+    size: DEFAULT_HASHTAGS.size, fontKey: DEFAULT_TITLE_FONT_KEY,
+    color: DEFAULT_HASHTAGS.color, backing: DEFAULT_HASHTAGS.backing, always: DEFAULT_HASHTAGS.always
   };
 }
 
@@ -3216,6 +3332,12 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_WATERMARK_SPIN: DEFAULT_WATERMARK_SPIN,
     watermarkAssetName: watermarkAssetName,
     defaultWatermarkState: defaultWatermarkState,
+    HASHTAGS_POSITIONS: HASHTAGS_POSITIONS,
+    DEFAULT_HASHTAGS_POSITION: DEFAULT_HASHTAGS_POSITION,
+    HASHTAGS_BACKINGS: HASHTAGS_BACKINGS,
+    DEFAULT_HASHTAGS_BACKING: DEFAULT_HASHTAGS_BACKING,
+    DEFAULT_HASHTAGS: DEFAULT_HASHTAGS,
+    defaultHashtagsState: defaultHashtagsState,
     estimateForegroundMaskCoarse: estimateForegroundMaskCoarse,
     isFrameInvalid: isFrameInvalid,
     makeJobTag: makeJobTag,
@@ -3428,7 +3550,9 @@ var appState = {
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
   logo: { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" },
   // 常時表示の透かしロゴ（watermark）。imageFileはラストロゴと同様、このセッション中のみ有効
-  watermark: defaultWatermarkState()
+  watermark: defaultWatermarkState(),
+  // ハッシュタグ表示（hashtags）
+  hashtags: defaultHashtagsState()
 };
 
 var draft = null;          // 現在編集中のフリーズ（未保存）
@@ -3614,6 +3738,11 @@ function init() {
     "watermarkSpinEnabledCheckbox", "watermarkSpinOptionsBody",
     "watermarkSpinIntervalSlider", "watermarkSpinIntervalValue",
     "watermarkSpinSecSlider", "watermarkSpinSecValue",
+    "hashtagsSection", "hashtagsEnabledCheckbox", "hashtagsOptionsBody",
+    "hashtagsTextInput", "hashtagsPositionSelect", "hashtagsCustomPosBody",
+    "hashtagsPosXSlider", "hashtagsPosXValue", "hashtagsPosYSlider", "hashtagsPosYValue",
+    "hashtagsSizeSlider", "hashtagsSizeValue", "hashtagsFontSelect", "hashtagsColorInput",
+    "hashtagsBackingSelect", "hashtagsAlwaysCheckbox",
     "sfxLibraryFileInput", "sfxLibraryStatus", "sfxLibraryList",
     "exportBtn", "copyJsonBtn", "loadJsonBtn", "jsonFileInput", "ioStatus", "jsonPreviewArea",
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
@@ -3632,6 +3761,7 @@ function init() {
   buildSubjectOutlineColorControls();
   populateTitleFontSelectOptions(els.titleFontDefaultSelect, false);
   populateTitleFontSelectOptions(els.freezeTitleFontSelect, true);
+  populateTitleFontSelectOptions(els.hashtagsFontSelect, false);
 
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
   els.videoFileInput.addEventListener("change", handleVideoFileChange);
@@ -4108,6 +4238,64 @@ function init() {
   els.watermarkSpinSecSlider.addEventListener("input", function () {
     appState.watermark.spinSec = Number(els.watermarkSpinSecSlider.value);
     els.watermarkSpinSecValue.textContent = appState.watermark.spinSec.toFixed(1) + "秒";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+
+  els.hashtagsEnabledCheckbox.addEventListener("change", function () {
+    appState.hashtags.enabled = els.hashtagsEnabledCheckbox.checked;
+    els.hashtagsOptionsBody.hidden = !appState.hashtags.enabled;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsTextInput.addEventListener("input", function () {
+    appState.hashtags.text = els.hashtagsTextInput.value;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsPositionSelect.addEventListener("change", function () {
+    appState.hashtags.position = HASHTAGS_POSITIONS.indexOf(els.hashtagsPositionSelect.value) >= 0
+      ? els.hashtagsPositionSelect.value : DEFAULT_HASHTAGS_POSITION;
+    els.hashtagsCustomPosBody.hidden = appState.hashtags.position !== "custom";
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsPosXSlider.addEventListener("input", function () {
+    appState.hashtags.pos[0] = Number(els.hashtagsPosXSlider.value);
+    els.hashtagsPosXValue.textContent = appState.hashtags.pos[0].toFixed(2);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsPosYSlider.addEventListener("input", function () {
+    appState.hashtags.pos[1] = Number(els.hashtagsPosYSlider.value);
+    els.hashtagsPosYValue.textContent = appState.hashtags.pos[1].toFixed(2);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsSizeSlider.addEventListener("input", function () {
+    appState.hashtags.size = Number(els.hashtagsSizeSlider.value);
+    els.hashtagsSizeValue.textContent = appState.hashtags.size.toFixed(3);
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsFontSelect.addEventListener("change", function () {
+    appState.hashtags.fontKey = els.hashtagsFontSelect.value;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsColorInput.addEventListener("input", function () {
+    appState.hashtags.color = els.hashtagsColorInput.value;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsBackingSelect.addEventListener("change", function () {
+    appState.hashtags.backing = HASHTAGS_BACKINGS.indexOf(els.hashtagsBackingSelect.value) >= 0
+      ? els.hashtagsBackingSelect.value : DEFAULT_HASHTAGS_BACKING;
+    saveToLocalStorage();
+    updateJsonPreview();
+  });
+  els.hashtagsAlwaysCheckbox.addEventListener("change", function () {
+    appState.hashtags.always = els.hashtagsAlwaysCheckbox.checked;
     saveToLocalStorage();
     updateJsonPreview();
   });
@@ -7291,6 +7479,30 @@ function applyWatermarkSettingsToInputs() {
   els.watermarkSpinSecValue.textContent = spinSec.toFixed(1) + "秒";
 }
 
+function applyHashtagsSettingsToInputs() {
+  var ht = appState.hashtags || defaultHashtagsState();
+  els.hashtagsEnabledCheckbox.checked = !!ht.enabled;
+  els.hashtagsOptionsBody.hidden = !ht.enabled;
+  els.hashtagsTextInput.value = ht.text || "";
+  els.hashtagsPositionSelect.value = HASHTAGS_POSITIONS.indexOf(ht.position) >= 0
+    ? ht.position : DEFAULT_HASHTAGS_POSITION;
+  els.hashtagsCustomPosBody.hidden = els.hashtagsPositionSelect.value !== "custom";
+  var posX = numOr(ht.pos && ht.pos[0], 0.5);
+  els.hashtagsPosXSlider.value = posX;
+  els.hashtagsPosXValue.textContent = posX.toFixed(2);
+  var posY = numOr(ht.pos && ht.pos[1], 0.5);
+  els.hashtagsPosYSlider.value = posY;
+  els.hashtagsPosYValue.textContent = posY.toFixed(2);
+  var size = numOr(ht.size, DEFAULT_HASHTAGS.size);
+  els.hashtagsSizeSlider.value = size;
+  els.hashtagsSizeValue.textContent = size.toFixed(3);
+  els.hashtagsFontSelect.value = ht.fontKey || DEFAULT_TITLE_FONT_KEY;
+  els.hashtagsColorInput.value = ht.color || DEFAULT_HASHTAGS.color;
+  els.hashtagsBackingSelect.value = HASHTAGS_BACKINGS.indexOf(ht.backing) >= 0
+    ? ht.backing : DEFAULT_HASHTAGS.backing;
+  els.hashtagsAlwaysCheckbox.checked = ht.always !== false;
+}
+
 /* ---------------- 全体設定 ⇄ 入力欄 ---------------- */
 
 function applySettingsToInputs() {
@@ -7384,6 +7596,7 @@ function applySettingsToInputs() {
   els.outputModeSelect.value = appState.outputMode;
   applyLogoSettingsToInputs();
   applyWatermarkSettingsToInputs();
+  applyHashtagsSettingsToInputs();
 }
 
 /* ---------------- localStorage ---------------- */
@@ -7563,6 +7776,17 @@ function buildLocalStoragePayload(dropThumbs) {
       spinEnabled: appState.watermark.spinEnabled,
       spinIntervalSec: appState.watermark.spinIntervalSec,
       spinSec: appState.watermark.spinSec
+    } : null,
+    hashtags: (appState.hashtags && appState.hashtags.text) ? {
+      enabled: appState.hashtags.enabled,
+      text: appState.hashtags.text,
+      position: appState.hashtags.position,
+      pos: appState.hashtags.pos,
+      size: appState.hashtags.size,
+      fontKey: appState.hashtags.fontKey,
+      color: appState.hashtags.color,
+      backing: appState.hashtags.backing,
+      always: appState.hashtags.always
     } : null
   };
 }
@@ -7651,6 +7875,20 @@ function loadFromLocalStorage(videoFileName) {
       spinIntervalSec: numOr(data.watermark.spinIntervalSec, DEFAULT_WATERMARK_SPIN.intervalSec),
       spinSec: numOr(data.watermark.spinSec, DEFAULT_WATERMARK_SPIN.sec)
     } : defaultWatermarkState();
+    appState.hashtags = (data.hashtags && data.hashtags.text) ? {
+      enabled: data.hashtags.enabled !== undefined ? !!data.hashtags.enabled : true,
+      text: String(data.hashtags.text),
+      position: HASHTAGS_POSITIONS.indexOf(data.hashtags.position) >= 0
+        ? data.hashtags.position : DEFAULT_HASHTAGS_POSITION,
+      pos: Array.isArray(data.hashtags.pos)
+        ? [numOr(data.hashtags.pos[0], 0.5), numOr(data.hashtags.pos[1], 0.5)] : [0.5, 0.5],
+      size: numOr(data.hashtags.size, DEFAULT_HASHTAGS.size),
+      fontKey: data.hashtags.fontKey || DEFAULT_TITLE_FONT_KEY,
+      color: data.hashtags.color || DEFAULT_HASHTAGS.color,
+      backing: HASHTAGS_BACKINGS.indexOf(data.hashtags.backing) >= 0
+        ? data.hashtags.backing : DEFAULT_HASHTAGS.backing,
+      always: data.hashtags.always !== undefined ? !!data.hashtags.always : DEFAULT_HASHTAGS.always
+    } : defaultHashtagsState();
     return true;
   } catch (e) {
     return false;
@@ -8390,6 +8628,7 @@ function handleJsonFileChange(e) {
       appState.freezes = loaded.freezes;
       appState.logo = loaded.logo || { imageFile: null, imageName: "", at: DEFAULT_LOGO_AT, background: DEFAULT_LOGO_BACKGROUND, startWidthRatio: DEFAULT_LOGO_START_WIDTH_RATIO, holdBigSec: DEFAULT_LOGO_HOLD_BIG_SEC, shrinkSec: DEFAULT_LOGO_SHRINK_SEC, settleSec: DEFAULT_LOGO_SETTLE_SEC, durationSec: DEFAULT_LOGO_DURATION_SEC, sfx: "impact", sfxLibraryId: null, sfxAlign: SFX_ALIGN_DEFAULT, autoColorHex: "" };
       appState.watermark = loaded.watermark || defaultWatermarkState();
+      appState.hashtags = loaded.hashtags || defaultHashtagsState();
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();

@@ -70,6 +70,7 @@ async function main() {
     document.getElementById("settingsSection").open = true;
     document.getElementById("logoSection").open = true;
     document.getElementById("watermarkSection").open = true;
+    document.getElementById("hashtagsSection").open = true;
   });
 
   console.log("=== 全体設定：①塗り②ズレ③静止（reveal_sec/slide_sec/hold_sec）の既定値・title_bounce ===");
@@ -230,6 +231,60 @@ async function main() {
   const watermarkFileNameAfterReuse = await page.textContent("#watermarkFileName");
   check(watermarkFileNameAfterReuse.indexOf("流用") >= 0,
     "流用したことが分かる表示文言になる: " + watermarkFileNameAfterReuse);
+
+  console.log("");
+  console.log("=== ハッシュタグ表示：表示ONでテキスト・位置・サイズ・色・背景を設定するとJSONに反映される ===");
+  check(await page.isHidden("#hashtagsOptionsBody"), "既定ではハッシュタグOFFなのでhashtagsOptionsBodyは隠れている");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.hashtags === undefined, "ハッシュタグが無効な間はJSONにhashtagsブロックが出ない");
+
+  await page.check("#hashtagsEnabledCheckbox");
+  check(await page.isVisible("#hashtagsOptionsBody"), "表示をONにするとhashtagsOptionsBodyが表示される");
+  check(await page.isHidden("#hashtagsCustomPosBody"),
+    "position既定値はbottomなのでhashtagsCustomPosBodyは隠れている");
+  await page.fill("#hashtagsTextInput", "#京都 #祇園 #ClubIRIS");
+  await page.selectOption("#hashtagsPositionSelect", "top");
+  await page.fill("#hashtagsSizeSlider", "0.032");
+  await page.dispatchEvent("#hashtagsSizeSlider", "input");
+  await page.fill("#hashtagsColorInput", "#ff0000");
+  await page.dispatchEvent("#hashtagsColorInput", "input");
+  await page.selectOption("#hashtagsBackingSelect", "box");
+
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(!!project.hashtags, "テキストを入力するとJSONにhashtagsブロックが現れる");
+  check(project.hashtags && project.hashtags.text === "#京都 #祇園 #ClubIRIS",
+    "hashtags.textが入力どおりになる: " + (project.hashtags && project.hashtags.text));
+  check(project.hashtags && project.hashtags.position === "top",
+    "hashtags.positionが選択どおりになる: " + (project.hashtags && project.hashtags.position));
+  check(project.hashtags && project.hashtags.size === 0.032,
+    "hashtags.sizeがスライダー操作どおりになる: " + (project.hashtags && project.hashtags.size));
+  check(project.hashtags && project.hashtags.color === "#ff0000",
+    "hashtags.colorが入力どおりになる: " + (project.hashtags && project.hashtags.color));
+  check(project.hashtags && project.hashtags.backing === "box",
+    "hashtags.backingが選択どおりになる: " + (project.hashtags && project.hashtags.backing));
+  check(project.hashtags && project.hashtags.always === true, "hashtags.alwaysの既定はtrue");
+  check(project.hashtags && project.hashtags.pos === undefined,
+    "position=topのときはposキーを出力しない");
+
+  console.log("");
+  console.log("=== ハッシュタグ表示：position=customにするとpos指定スライダーが現れ、posがJSONに出る ===");
+  await page.selectOption("#hashtagsPositionSelect", "custom");
+  check(await page.isVisible("#hashtagsCustomPosBody"), "position=customにするとhashtagsCustomPosBodyが表示される");
+  await page.fill("#hashtagsPosXSlider", "0.3");
+  await page.dispatchEvent("#hashtagsPosXSlider", "input");
+  await page.fill("#hashtagsPosYSlider", "0.6");
+  await page.dispatchEvent("#hashtagsPosYSlider", "input");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.hashtags && Array.isArray(project.hashtags.pos)
+    && project.hashtags.pos[0] === 0.3 && project.hashtags.pos[1] === 0.6,
+    "hashtags.posがスライダー操作どおりになる: " + JSON.stringify(project.hashtags && project.hashtags.pos));
+
+  console.log("");
+  console.log("=== ハッシュタグ表示：常時表示チェックを外すとalways=falseになる ===");
+  await page.uncheck("#hashtagsAlwaysCheckbox");
+  project = await page.evaluate(() => buildProjectJSON(appState));
+  check(project.hashtags && project.hashtags.always === false,
+    "常時表示チェックを外すとhashtags.always=falseになる");
 
   console.log("");
   console.log("=== ラストロゴ：設定を削除するとlogoブロックが消える ===");

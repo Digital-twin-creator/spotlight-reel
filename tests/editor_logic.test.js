@@ -1317,6 +1317,108 @@ test("buildProjectJSON/parseProjectJSON: watermarkの全フィールドが往復
   });
 });
 
+/* ---- hashtags（ハッシュタグ表示） ---- */
+
+test("defaultHashtagsState: 無効・render.pyのHASHTAGS_DEFAULTSと同じ既定値を返す", () => {
+  const ht = core.defaultHashtagsState();
+  assert.strictEqual(ht.enabled, false);
+  assert.strictEqual(ht.text, "");
+  assert.strictEqual(ht.position, core.DEFAULT_HASHTAGS_POSITION);
+  assert.deepStrictEqual(ht.pos, [0.5, 0.5]);
+  assert.strictEqual(ht.size, core.DEFAULT_HASHTAGS.size);
+  assert.strictEqual(ht.color, core.DEFAULT_HASHTAGS.color);
+  assert.strictEqual(ht.backing, core.DEFAULT_HASHTAGS.backing);
+  assert.strictEqual(ht.always, core.DEFAULT_HASHTAGS.always);
+});
+
+test("buildProjectJSON: hashtagsが有効かつtextがあればhashtagsブロックを出力し、無効/未入力なら省略する", () => {
+  const withHashtags = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), {
+      enabled: true, text: "#京都 #祇園", position: "bottom", size: 0.03, color: "#ff0000", backing: "box"
+    })
+  }));
+  assert.deepStrictEqual(withHashtags.hashtags, {
+    text: "#京都 #祇園", position: "bottom", size: 0.03, color: "#ff0000", backing: "box", always: true
+  });
+
+  const disabled = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), { enabled: false, text: "#x" })
+  }));
+  assert.strictEqual(disabled.hashtags, undefined);
+
+  const noText = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), { enabled: true, text: "" })
+  }));
+  assert.strictEqual(noText.hashtags, undefined);
+
+  const noHashtagsAtAll = core.buildProjectJSON(sampleState());
+  assert.strictEqual(noHashtagsAtAll.hashtags, undefined);
+});
+
+test("buildProjectJSON: hashtags.position=customのときだけposを出力し、フォントも既定以外のときだけ出力する", () => {
+  const custom = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), {
+      enabled: true, text: "#custom", position: "custom", pos: [0.3, 0.6]
+    })
+  }));
+  assert.deepStrictEqual(custom.hashtags.pos, [0.3, 0.6]);
+
+  const bottom = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), { enabled: true, text: "#bottom", position: "bottom" })
+  }));
+  assert.strictEqual(bottom.hashtags.pos, undefined);
+
+  const defaultFont = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), { enabled: true, text: "#f" })
+  }));
+  assert.strictEqual(defaultFont.hashtags.font, undefined);
+
+  const customFont = core.buildProjectJSON(Object.assign(sampleState(), {
+    hashtags: Object.assign(core.defaultHashtagsState(), { enabled: true, text: "#f", fontKey: "notoserifjp" })
+  }));
+  assert.strictEqual(customFont.hashtags.font, "assets/fonts/NotoSerifJP-Bold.ttf");
+});
+
+test("parseProjectJSON: hashtagsブロックを読み込める。省略時はdefaultHashtagsState()相当になる", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    hashtags: {
+      text: "#京都 #祇園", position: "top", size: 0.04, color: "#00FF00", backing: "box", always: false
+    }
+  });
+  assert.deepStrictEqual(loaded.hashtags, {
+    enabled: true, text: "#京都 #祇園", position: "top", pos: [0.5, 0.5],
+    size: 0.04, fontKey: core.DEFAULT_TITLE_FONT_KEY, color: "#00FF00", backing: "box", always: false
+  });
+
+  const loadedNone = core.parseProjectJSON({ version: 1, video: "v.mp4", freezes: [] });
+  assert.deepStrictEqual(loadedNone.hashtags, core.defaultHashtagsState());
+});
+
+test("parseProjectJSON: hashtags.position/backingが未知の値なら既定にフォールバックする", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "v.mp4", freezes: [],
+    hashtags: { text: "#x", position: "center", backing: "shadow" }
+  });
+  assert.strictEqual(loaded.hashtags.position, core.DEFAULT_HASHTAGS_POSITION);
+  assert.strictEqual(loaded.hashtags.backing, core.DEFAULT_HASHTAGS_BACKING);
+});
+
+test("buildProjectJSON/parseProjectJSON: hashtagsの全フィールドが往復する", () => {
+  const state = Object.assign(sampleState(), {
+    hashtags: {
+      enabled: true, text: "#京都 #祇園 #ClubIRIS", position: "custom", pos: [0.2, 0.7],
+      size: 0.033, fontKey: "delagothicone", color: "#123456", backing: "box", always: false
+    }
+  });
+  const project = core.buildProjectJSON(state);
+  const loaded = core.parseProjectJSON(project);
+  assert.deepStrictEqual(loaded.hashtags, {
+    enabled: true, text: "#京都 #祇園 #ClubIRIS", position: "custom", pos: [0.2, 0.7],
+    size: 0.033, fontKey: "delagothicone", color: "#123456", backing: "box", always: false
+  });
+});
+
 test("parseProjectJSON: 'shadow'キーも旧film_offsetも含まない旧JSONは、既定で影が有効に解決される（実機で影が出ない不具合の再発防止）", () => {
   const loaded = core.parseProjectJSON({
     version: 1, video: "x.mp4",
