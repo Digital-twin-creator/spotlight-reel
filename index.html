@@ -462,11 +462,13 @@
     </div>
   </section>
 
-  <!-- 複数クリップ一覧（「動画を追加」を一度でも使うと表示される） -->
+  <!-- 複数クリップ一覧（動画を1本読み込んだ後、常に表示される。
+       「動画を追加」で2本目以降を選ぶと複数クリップモードになる） -->
   <section class="card" id="clipListSection" hidden>
     <h2>クリップ一覧</h2>
     <div class="muted" style="margin-bottom:8px;">
-      複数の動画を1本につなげて出力できます。クリップを選ぶと、そのクリップに対して
+      複数の動画を1本につなげて出力できます。「動画を追加」で2本目以降を選ぶと、
+      ここにクリップの一覧が表示されます。クリップを選ぶと、そのクリップに対して
       シーク・フリーズ編集ができます。
     </div>
     <div id="clipList"></div>
@@ -5119,6 +5121,11 @@ function loadVideoFile(file) {
   var url = URL.createObjectURL(file);
   els.video.src = url;
   els.playerSection.hidden = false;
+  // 動画を1本読み込んだ時点で「動画を追加」ボタン（クリップ一覧セクション）を
+  // 表示する。以前はrenderClipList()（クリップが1件以上ある時だけ表示）に
+  // 頼っていたため、2本目を追加するボタン自体が最初は表示されず、複数クリップ機能に
+  // 到達できないバグがあった。
+  els.clipListSection.hidden = false;
   // 動画が変わったら、次のlayoutOverlayCanvasesは必ず実際に
   // リサイズ処理を行う（別動画でも解像度が一致していたケースの誤検知を防ぐ）
   lastCanvasContentSize = { width: 0, height: 0 };
@@ -6646,12 +6653,41 @@ function loadClipMetaAndThumbnail(clip) {
   });
 }
 
+/** ファイル名・サイズが一致するかどうかで「同じ動画ファイル」を判定する（簡易的な重複判定） */
+function isSameVideoFile(a, b) {
+  return !!a && !!b && a.name === b.name && a.size === b.size;
+}
+
 /** 「動画を追加」で選ばれた1つ以上のファイルを、新しいクリップとして追加する */
 function addClipsFromFiles(fileList) {
   var files = Array.prototype.slice.call(fileList || []);
   if (!files.length) return;
   promoteCurrentVideoToClip0();
-  var newClips = files.map(function (file) {
+  // 既存クリップ（今回昇格したclip0も含む）と、今回選んだファイル同士の両方について、
+  // 同じファイル（名前+サイズが一致）の重複追加を防ぐ。
+  var accepted = [];
+  var skippedNames = [];
+  files.forEach(function (file) {
+    var isDup = appState.clips.some(function (c) { return isSameVideoFile(c.videoFile, file); }) ||
+      accepted.some(function (f) { return isSameVideoFile(f, file); });
+    if (isDup) {
+      skippedNames.push(file.name);
+    } else {
+      accepted.push(file);
+    }
+  });
+  if (!accepted.length) {
+    // 全て重複で1件も追加されなくても、promoteCurrentVideoToClip0()でappState.clipsに
+    // clip0が追加されている場合があるため、一覧の表示をそれに合わせて更新しておく
+    // （そうしないと、appState.clipsは1件なのに一覧のDOMは0件のままという食い違いが残る）。
+    renderClipList();
+    updateJsonPreview();
+    if (skippedNames.length) {
+      showError("「" + skippedNames.join("」「") + "」は既にクリップ一覧にあるため、重複して追加しませんでした");
+    }
+    return;
+  }
+  var newClips = accepted.map(function (file) {
     return {
       id: makeClipId(),
       videoFile: file,
@@ -6672,6 +6708,11 @@ function addClipsFromFiles(fileList) {
   });
   // 追加した最後のクリップを選択状態にする（すぐ編集を始められるように）
   selectClip(newClips[newClips.length - 1].id);
+  // selectClip()内部でhideError()が呼ばれるため、重複の通知はその後に出す
+  // （先に出すとすぐ消えてしまう）。
+  if (skippedNames.length) {
+    showError("「" + skippedNames.join("」「") + "」は既にクリップ一覧にあるため、重複して追加しませんでした");
+  }
 }
 
 /** クリップを選択し、シーク・フリーズ編集の対象をそのクリップへ切り替える */
@@ -6690,6 +6731,7 @@ function selectClip(id) {
   var url = URL.createObjectURL(clip.videoFile);
   els.video.src = url;
   els.playerSection.hidden = false;
+  els.clipListSection.hidden = false;
   lastCanvasContentSize = { width: 0, height: 0 };
   tryUnlockVideo();
   currentVideoMp4Rotation = null;
@@ -6747,6 +6789,7 @@ function resetToNoVideoState() {
   appState.freezes = [];
   els.videoFileName.textContent = "まだ動画が選ばれていません";
   els.playerSection.hidden = true;
+  els.clipListSection.hidden = true;
   els.video.removeAttribute("src");
   renderFreezeList();
   renderClipList();
@@ -6761,9 +6804,10 @@ function clipTrimSummaryText(clip) {
 
 function renderClipList() {
   if (!els.clipListSection) return;
-  var multi = appState.clips.length > 0;
-  els.clipListSection.hidden = !multi;
-  if (!multi) return;
+  // clipListSection自体の表示/非表示は、動画を1本読み込んだ時点（loadVideoFile/
+  // selectClip）・動画未選択に戻った時点（resetToNoVideoState）で制御する。
+  // ここではクリップが0件（＝まだ従来の単一動画モード）でも一覧を空のまま描画するだけ
+  // （「動画を追加」ボタン自体は常に見えている必要があるため、ここでは隠さない）。
   els.clipList.innerHTML = "";
   appState.clips.forEach(function (clip, i) {
     var card = document.createElement("div");

@@ -55,6 +55,32 @@ function prepareTestVideo() {
   return out;
 }
 
+/** 「動画を追加」の重複判定はファイル名+サイズで行うため、1本目とは名前もサイズも異なる
+ * 別ファイルを用意する（同じソースを違うcrfで焼き直し、ファイル名・サイズの両方を変える）。 */
+function prepareSecondTestVideo() {
+  const src = path.join(REPO_ROOT, "examples", "dummy_input_landscape.mp4");
+  const out = path.join(os.tmpdir(), "spotlight_reel_test_clip2_vp9.webm");
+  if (!fs.existsSync(out)) {
+    execSync(
+      `ffmpeg -y -v error -i "${src}" -c:v libvpx-vp9 -crf 28 -b:v 0 -c:a libopus "${out}"`,
+      { stdio: "inherit" }
+    );
+  }
+  return out;
+}
+
+function prepareThirdTestVideo() {
+  const src = path.join(REPO_ROOT, "examples", "dummy_input.mp4");
+  const out = path.join(os.tmpdir(), "spotlight_reel_test_clip3_vp9.webm");
+  if (!fs.existsSync(out)) {
+    execSync(
+      `ffmpeg -y -v error -i "${src}" -c:v libvpx-vp9 -crf 40 -b:v 0 -c:a libopus "${out}"`,
+      { stdio: "inherit" }
+    );
+  }
+  return out;
+}
+
 let failed = 0;
 let passed = 0;
 function check(cond, label) {
@@ -242,10 +268,12 @@ async function addSimpleFreeze(page, name) {
 
 async function main() {
   const videoPath = prepareTestVideo();
+  const videoPath2 = prepareSecondTestVideo();
+  const videoPath3 = prepareThirdTestVideo();
   const iphone = devices["iPhone 13"];
   const browser = await chromium.launch({ executablePath: CHROMIUM_PATH, headless: true });
 
-  console.log("=== シナリオ1: 「動画を追加」でクリップ一覧が現れ、1本目がclip0として取り込まれる ===");
+  console.log("=== シナリオ1: 1本目を選んだ直後から「動画を追加」ボタンが常に見えている（実機バグの回帰確認） ===");
   {
     const context = await browser.newContext({ ...iphone });
     const page = await context.newPage();
@@ -257,16 +285,138 @@ async function main() {
     await page.setInputFiles("#videoFileInput", videoPath);
     await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
 
-    const clipSectionHiddenBefore = await page.evaluate(() => document.getElementById("clipListSection").hidden);
-    check(clipSectionHiddenBefore === true, "1本目を選んだだけではクリップ一覧はまだ表示されない（従来どおりの単一動画扱い）");
+    // 実機バグ: 以前はrenderClipList()（クリップが1件以上ある時だけ表示）に頼っていたため、
+    // 「動画を追加」ボタン自体が1本目を選んだだけでは表示されず、2本目を追加する手段が
+    // 存在しなかった。クリップ一覧セクション自体、およびボタンが実際に見えている
+    // （非表示のsection内に隠れていない）ことを確認する。
+    const clipSectionHiddenAfterFirst = await page.evaluate(() => document.getElementById("clipListSection").hidden);
+    check(clipSectionHiddenAfterFirst === false, "1本目を選んだ直後から、クリップ一覧セクション自体は非表示ではない（＝「動画を追加」ボタンに到達できる）");
+    const addClipBtnVisible = await page.isVisible("#addClipBtn");
+    check(addClipBtnVisible === true, "1本目を選んだ直後から「🎬 動画を追加」ボタンが実際に見える状態になっている");
 
-    await page.setInputFiles("#clipFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("clipListSection").hidden === false, null, { timeout: 10000 });
+    const clipCardCountBefore = await page.$$eval(".clip-card", (els) => els.length);
+    check(clipCardCountBefore === 0, "1本目だけの時点ではクリップカードはまだ0枚（従来どおりの単一動画扱い、一覧は空のまま）");
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ1b: 「動画を追加」でクリップ一覧が現れ、1本目がclip0として取り込まれる ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.setInputFiles("#videoFileInput", videoPath);
+    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+
+    await page.setInputFiles("#clipFileInput", videoPath2);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 2, null, { timeout: 10000 });
     const clipCardCount = await page.$$eval(".clip-card", (els) => els.length);
     check(clipCardCount === 2, "「動画を追加」後、クリップ一覧に2枚のカードが表示される: " + clipCardCount);
 
     const clipsInState = await page.evaluate(() => appState.clips.length);
     check(clipsInState === 2, "appState.clips が2件になっている: " + clipsInState);
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ1c: 2回に分けて追加しても、既存のクリップ一覧に追加される（置き換わらない） ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.setInputFiles("#videoFileInput", videoPath);
+    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+
+    // 1回目の追加（2本目のクリップ）
+    await page.setInputFiles("#clipFileInput", videoPath2);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 2, null, { timeout: 10000 });
+    const countAfterFirstAdd = await page.$$eval(".clip-card", (els) => els.length);
+    check(countAfterFirstAdd === 2, "1回目の追加後、クリップ一覧は2件: " + countAfterFirstAdd);
+
+    // 2回目の追加（3本目のクリップ。videoPath3が無ければvideoPathを複製元と別ファイルとして扱う）
+    await page.setInputFiles("#clipFileInput", videoPath3);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 3, null, { timeout: 10000 });
+    const countAfterSecondAdd = await page.$$eval(".clip-card", (els) => els.length);
+    check(countAfterSecondAdd === 3, "2回に分けて追加すると、既存の一覧に追加されていく（置き換わらない）: 2件→" + countAfterSecondAdd + "件");
+
+    const clipsInState = await page.evaluate(() => appState.clips.length);
+    check(clipsInState === 3, "appState.clips も3件になっている: " + clipsInState);
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ1d: 1回の選択で複数本まとめて追加できる（<input multiple>） ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.setInputFiles("#videoFileInput", videoPath);
+    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+
+    const hasMultipleAttr = await page.evaluate(() => document.getElementById("clipFileInput").multiple);
+    check(hasMultipleAttr === true, "#clipFileInput に multiple 属性が付いている（iOSの写真ピッカーで複数選択可能にするため）");
+
+    // 1回のsetInputFilesで2本（2本目・3本目相当）をまとめて渡す＝「1回の選択で複数選ぶ」の再現。
+    // 既にclip0（1本目）があるため、成功時は clip0 + 新規2件 = 3枚になる。
+    await page.setInputFiles("#clipFileInput", [videoPath2, videoPath3]);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 3, null, { timeout: 10000 });
+    const clipCardCount = await page.$$eval(".clip-card", (els) => els.length);
+    check(clipCardCount === 3, "1回の選択で2本渡すと、クリップ一覧が一気に3枚（clip0＋新規2件）になる: " + clipCardCount);
+
+    const clipsInState = await page.evaluate(() => appState.clips.length);
+    check(clipsInState === 3, "appState.clips も3件になっている（1回の選択で複数追加できている）: " + clipsInState);
+
+    check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
+    await context.close();
+  }
+
+  console.log("");
+  console.log("=== シナリオ1e: 同じファイルを重複して選んでも二重追加されず、通知が出る ===");
+  {
+    const context = await browser.newContext({ ...iphone });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+
+    await page.goto(BASE_URL, { waitUntil: "load" });
+    await page.click("#guideCloseBtn").catch(() => {});
+    await page.setInputFiles("#videoFileInput", videoPath);
+    await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
+
+    // videoPath（クリップ一覧への昇格前は単一動画）と全く同じファイルを「動画を追加」で選ぶ。
+    // 重複自体は弾かれるが、1本目はこの時点でclip0として正式にクリップ一覧へ昇格するため、
+    // 一覧にはclip0の1枚だけが表示される（新規クリップは追加されない）。
+    await page.setInputFiles("#clipFileInput", videoPath);
+    await page.waitForTimeout(300);
+
+    const clipCardCount = await page.$$eval(".clip-card", (els) => els.length);
+    check(clipCardCount === 1, "clip0と同じファイルを選んでも、新規クリップとしては追加されない（clip0自身の1枚のみ）: " + clipCardCount);
+
+    const clipsInState = await page.evaluate(() => appState.clips.length);
+    check(clipsInState === 1, "appState.clips もclip0の1件のみ（重複分は追加されていない）: " + clipsInState);
+
+    const errorText = await page.evaluate(() => document.getElementById("errorBannerText").textContent);
+    const errorHidden = await page.evaluate(() => document.getElementById("errorBanner").hidden);
+    check(errorHidden === false && errorText.indexOf("重複") >= 0,
+      "重複のため追加しなかった旨の通知が表示される: " + JSON.stringify({ errorHidden, errorText }));
 
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
     await context.close();
@@ -284,8 +434,8 @@ async function main() {
     await page.click("#guideCloseBtn").catch(() => {});
     await page.setInputFiles("#videoFileInput", videoPath);
     await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
-    await page.setInputFiles("#clipFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("clipListSection").hidden === false, null, { timeout: 10000 });
+    await page.setInputFiles("#clipFileInput", videoPath2);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 2, null, { timeout: 10000 });
 
     // 「動画を追加」直後は2本目（クリップ2）が選択状態になっている想定。
     // そのままクリップ2にフリーズを1つ追加する。
@@ -329,8 +479,8 @@ async function main() {
     await page.click("#guideCloseBtn").catch(() => {});
     await page.setInputFiles("#videoFileInput", videoPath);
     await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
-    await page.setInputFiles("#clipFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("clipListSection").hidden === false, null, { timeout: 10000 });
+    await page.setInputFiles("#clipFileInput", videoPath2);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 2, null, { timeout: 10000 });
 
     await page.selectOption(".clip-transition-row select", "crossfade");
     await page.fill('.clip-transition-row input[type="number"]', "0.8");
@@ -368,8 +518,8 @@ async function main() {
     await page.click("#guideCloseBtn").catch(() => {});
     await page.setInputFiles("#videoFileInput", videoPath);
     await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
-    await page.setInputFiles("#clipFileInput", videoPath);
-    await page.waitForFunction(() => document.getElementById("clipListSection").hidden === false, null, { timeout: 10000 });
+    await page.setInputFiles("#clipFileInput", videoPath2);
+    await page.waitForFunction(() => document.querySelectorAll(".clip-card").length === 2, null, { timeout: 10000 });
     await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
 
     await addSimpleFreeze(page, "クリップ2のフリーズ");
