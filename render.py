@@ -5583,6 +5583,122 @@ def merge_clip_pair(a_path, b_path, transition, out_path):
     return out_path
 
 
+def prepare_multi_clip_normalized(project, json_path, tmpdir):
+    """
+    render_multi_clipとextract_apple_frames_multi_clipの両方が使う共通の下ごしらえ：
+    project["clips"]の各動画を解決し、出力解像度・fps（project["output"]、無ければ
+    1本目のクリップに合わせる）を決めてから、prepare_clip_videoでin/outトリム＋
+    解像度/fps正規化した動画をtmpdir/clip_<i>_normalized.mp4として書き出す。
+
+    この命名規則（clip_<i:02d>_normalized.mp4）はcache_path_for_alpha()の
+    キャッシュキー（動画パスのbasename＋時刻）にそのまま使われるため、
+    render_multi_clip本番と抽出用の呼び出しとで必ず一致させる必要がある
+    （extract_apple_frames_multi_clipのdocstring参照）。
+
+    戻り値: (W, H, fps, normalized_paths)
+    """
+    clips = project["clips"]
+    n = len(clips)
+    json_dir = os.path.dirname(os.path.abspath(json_path))
+    out_cfg = project["output"] or {}
+
+    clip_video_paths = []
+    for i, c in enumerate(clips):
+        p = resolve_path(c["video"], [os.getcwd(), json_dir, SCRIPT_DIR])
+        if not os.path.exists(p):
+            raise RuntimeError(f"clips[{i}]の動画が見つかりません: {c['video']}")
+        clip_video_paths.append(p)
+
+    first_info = probe_video(clip_video_paths[0])
+    fps = float(out_cfg.get("fps") or first_info["fps"])
+    W = even(out_cfg.get("width") or first_info["width"])
+    H = even(out_cfg.get("height") or first_info["height"])
+    if fps <= 0 or W <= 0 or H <= 0:
+        raise RuntimeError("出力サイズ/fpsが不正です。")
+
+    log(f"複数クリップ: {n}本のクリップを {W}x{H} {fps:.3f}fps へ正規化します")
+
+    normalized_paths = []
+    for i, (c, src_path) in enumerate(zip(clips, clip_video_paths)):
+        norm_path = os.path.join(tmpdir, f"clip_{i:02d}_normalized.mp4")
+        prepare_clip_video(src_path, c["in"], c["out"], W, H, fps, norm_path)
+        normalized_paths.append(norm_path)
+
+    return W, H, fps, normalized_paths
+
+
+def clip_project_for(project, clips, i, norm_path, W, H, fps):
+    """
+    render_multi_clipとextract_apple_frames_multi_clipの両方が使う共通処理：
+    クリップ単体をあたかも独立した1本の動画であるかのようにrender()へ渡すための
+    project辞書を組み立てる。ラストロゴ（project["logo"]）は最後のクリップにだけ
+    渡し、それ以外はNone（全体の末尾に1回だけ表示されるようにする）。
+    """
+    return {
+        "raw": {},
+        "video": norm_path,
+        "output": {"width": W, "height": H, "fps": fps},
+        "style": project["style"],
+        "freezes": clips[i]["freezes"],
+        "logo": project["logo"] if i == len(clips) - 1 else None,
+        "watermark": project["watermark"],
+        "hashtags": project["hashtags"],
+    }
+
+
+def extract_apple_frames_multi_clip(project, json_path, model_name, out_dir):
+    """
+    複数クリップ（clips[]）版の--extract-apple-frames。spotlight-jobsのprepare段
+    （ubuntu）が、model=apple-visionが必要なフリーズの静止フレームをmacOSランナーへ
+    委ねる前の下ごしらえとして呼ぶ（extract_frames_for_modelの単一動画版と同じ役割）。
+
+    render_multi_clipと全く同じ手順（prepare_multi_clip_normalized）で各クリップを
+    トリム・正規化してから、クリップごとにrender()のextract_frames_for経路を
+    そのまま呼び出す（ロゴ解決・plan_freezes・本番と同じシーケンシャルデコード経路を
+    render_multi_clipの本番レンダリングと完全に共通化し、二重実装によるズレを防ぐ）。
+
+    書き出すPNGは他クリップと衝突しないよう "clip<i>_<time:.3f>.png" という名前にし、
+    まとめたmanifest.jsonの各frameエントリに"clip_index"を持たせる。これにより、
+    spotlight-jobs側のcache配置スクリプトは、render.pyのcache_path_for_alpha()と
+    同じ命名（"clip_<i:02d>_normalized_<time:.3f>.npz"。prepare_multi_clip_normalized
+    が正規化動画に使うファイル名と一致）でcache/へアルファを配置できる。
+    """
+    clips = project["clips"]
+    tmpdir = tempfile.mkdtemp(prefix="spotlight_multiclip_extract_")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        W, H, fps, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
+
+        all_frames = []
+        for i, norm_path in enumerate(normalized_paths):
+            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps)
+            clip_json_path = os.path.join(tmpdir, f"clip_{i:02d}_project.json")
+            clip_frames_dir = os.path.join(tmpdir, f"clip_{i:02d}_frames")
+            manifest_path = render(clip_project, clip_json_path, norm_path, None,
+                                    extract_frames_for=model_name,
+                                    extract_frames_out=clip_frames_dir)
+            with open(manifest_path, encoding="utf-8") as f:
+                clip_manifest = json.load(f)
+            for entry in clip_manifest["frames"]:
+                dst_name = f"clip{i:02d}_{float(entry['time']):.3f}.png"
+                shutil.copyfile(os.path.join(clip_frames_dir, entry["path"]),
+                                 os.path.join(out_dir, dst_name))
+                all_frames.append({"time": entry["time"], "path": dst_name, "clip_index": i})
+
+        manifest_path = os.path.join(out_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"model": model_name, "output_width": W, "output_height": H,
+                       "frames": all_frames}, f, ensure_ascii=False, indent=2)
+        log(f"model={model_name} が必要なフリーズのフレームを{len(all_frames)}枚"
+            f"（{len(clips)}クリップ分）書き出しました: {out_dir}")
+        return manifest_path
+    finally:
+        if not os.environ.get("SPOTLIGHT_KEEP_TMPDIR"):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            print(f"[debug] tmpdir kept: {tmpdir}")
+
+
 def render_multi_clip(project, json_path, out_path, mode="auto"):
     """
     複数クリップ（project["clips"]。load_project()により常に1件以上のリストに
@@ -5600,34 +5716,11 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
     """
     clips = project["clips"]
     n = len(clips)
-    json_dir = os.path.dirname(os.path.abspath(json_path))
-    out_cfg = project["output"] or {}
 
     tmpdir = tempfile.mkdtemp(prefix="spotlight_multiclip_")
     render_start = time.time()
     try:
-        clip_video_paths = []
-        for i, c in enumerate(clips):
-            p = resolve_path(c["video"], [os.getcwd(), json_dir, SCRIPT_DIR])
-            if not os.path.exists(p):
-                raise RuntimeError(f"clips[{i}]の動画が見つかりません: {c['video']}")
-            clip_video_paths.append(p)
-
-        first_info = probe_video(clip_video_paths[0])
-        fps = float(out_cfg.get("fps") or first_info["fps"])
-        W = even(out_cfg.get("width") or first_info["width"])
-        H = even(out_cfg.get("height") or first_info["height"])
-        if fps <= 0 or W <= 0 or H <= 0:
-            raise RuntimeError("出力サイズ/fpsが不正です。")
-
-        log(f"複数クリップ結合: {n}本のクリップを {W}x{H} {fps:.3f}fps へ正規化して結合します")
-
-        # --- 各クリップをin/outでトリム＋解像度/fps正規化 ---
-        normalized_paths = []
-        for i, (c, src_path) in enumerate(zip(clips, clip_video_paths)):
-            norm_path = os.path.join(tmpdir, f"clip_{i:02d}_normalized.mp4")
-            prepare_clip_video(src_path, c["in"], c["out"], W, H, fps, norm_path)
-            normalized_paths.append(norm_path)
+        W, H, fps, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
 
         # --- 各クリップを個別にレンダリングする。watermarkの位相を全クリップを通して
         #     連続させるため、各クリップのrender()呼び出しには、そのクリップが最終
@@ -5644,16 +5737,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         for i, (c, norm_path) in enumerate(zip(clips, normalized_paths)):
             is_last = (i == n - 1)
             watermark_time_offset = cumulative_time
-            clip_project = {
-                "raw": {},
-                "video": norm_path,
-                "output": {"width": W, "height": H, "fps": fps},
-                "style": project["style"],
-                "freezes": c["freezes"],
-                "logo": project["logo"] if is_last else None,
-                "watermark": project["watermark"],
-                "hashtags": project["hashtags"],
-            }
+            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps)
             clip_json_path = os.path.join(tmpdir, f"clip_{i:02d}_project.json")
             clip_out_path = os.path.join(tmpdir, f"clip_{i:02d}_rendered.mp4")
             log(f"--- クリップ {i + 1}/{n} をレンダリング（{c['video']}） ---")
@@ -5748,13 +5832,19 @@ def main(argv=None):
     # --- clips（複数動画）が明示的に指定されている場合は、単一videoの経路とは別の
     #     render_multi_clipへ回す（clips未指定時は、load_project()が従来のvideo/
     #     freezesを1件のclipsとして扱うだけなので、この分岐には来ない＝完全後方互換）。
-    #     --preview/--extract-apple-framesはクリップ単位のもの（エディタは1クリップ分の
-    #     project.json+videoとして個別に呼び出す）なので、clips指定時は未対応とする。
+    #     --previewはクリップ単位のもの（エディタは1クリップ分のproject.json+videoとして
+    #     個別に呼び出す）なので、clips指定時は未対応のまま。--extract-apple-framesは
+    #     spotlight-jobsのprepare段が使うため、clips指定時も
+    #     extract_apple_frames_multi_clipへ回して対応する。
     if project["raw"].get("clips"):
-        if args.preview is not None or args.extract_apple_frames:
-            parser.error("clips 指定時は --preview / --extract-apple-frames は未対応です"
-                          "（クリップ単位のプレビュー/抽出は、そのクリップ単体を"
+        if args.preview is not None:
+            parser.error("clips 指定時は --preview は未対応です"
+                          "（クリップ単位のプレビューは、そのクリップ単体を"
                           "従来の video 形式で個別に呼び出してください）")
+        if args.extract_apple_frames:
+            extract_apple_frames_multi_clip(project, args.project, args.extract_apple_frames,
+                                             args.extract_apple_frames_out)
+            return 0
         os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
         render_multi_clip(project, args.project, args.out, mode=args.mode)
         return 0
