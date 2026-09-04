@@ -379,11 +379,20 @@ def load_project(json_path):
             out_t = float(out_raw) if out_raw is not None else None
             if out_t is not None and out_t <= in_t:
                 raise RuntimeError(f"clips[{i}] の out（{out_t}）が in（{in_t}）以下です。")
+            # clips[i].freezes[].time はエディタ側で「そのクリップの元動画（トリム前）
+            # 上の時刻」（<video>.currentTimeそのもの。トリムはin/outのメタデータだけで
+            # 実際の再生範囲は絞らないため）として記録される。一方render_multi_clipは
+            # 各クリップをprepare_clip_videoでin基準のトリム後・0起点の動画として
+            # render()へ渡すため、ここでinを引いてトリム後基準に変換しておく
+            # （in=0の従来単一video形式は無変換のまま＝完全後方互換）。
+            clip_freezes = merge_freezes(raw_clip.get("freezes"))
+            for fz in clip_freezes:
+                fz["time"] = max(0.0, fz["time"] - in_t)
             clips.append({
                 "video": clip_video,
                 "in": in_t,
                 "out": out_t,
-                "freezes": merge_freezes(raw_clip.get("freezes")),
+                "freezes": clip_freezes,
                 "transition_out": resolve_transition(raw_clip.get("transition_out")),
             })
     else:
@@ -5555,17 +5564,30 @@ def transition_blend_sec(transition):
     return max(0.001, transition["sec"])
 
 
-def merge_clip_pair(a_path, b_path, transition, out_path):
+def merge_clip_pair(a_path, b_path, transition, out_path, fps):
     """
     2本の動画（すでにそれぞれレンダリング済み・同じ解像度/fps。音声はrender()が
     常に付与するため両方に必ず存在する）を、transition（resolve_transitionの
     戻り値）に従って1本に結合する。
     映像はffmpegのxfadeフィルタ、音声はacrossfadeフィルタを使う（どちらも
     「2本の動画をブレンドしながら繋ぐ」ためのffmpeg組み込みフィルタ）。
+
+    xfadeのoffset（a_path側でブレンドを開始する時刻）は、a_pathを実際に
+    デコードして数えたフレーム数（probe_segment_frame_count）から計算する。
+    ffprobeのformat=duration（probe_duration）はコンテナのメタデータ値であり、
+    実際にデコードできる映像フレーム数よりわずかに長く報告されることがある
+    （probe_segment_frame_countのdocstring参照。CFR再エンコード後でも起こりうる）。
+    これをそのままoffsetに使うと、xfadeがa_pathの映像ストリームを最後まで
+    使い切ってしまい、そこで映像だけが打ち切られる（acrossfadeは音声側の
+    実際のサンプル数で動くため影響を受けず、音声だけそのまま続いてしまう＝
+    最終出力で音声より映像が大幅に短く終わり、後続クリップの映像が丸ごと
+    欠落する）。実機（複数クリップ・iPhone縦動画）でこの症状が実際に発生した
+    ため、必ず実測フレーム数を使う。
     """
     xfade_type = XFADE_TYPES[transition["type"]]
     sec = transition_blend_sec(transition)
-    dur_a = probe_duration(a_path)
+    frame_count_a = probe_segment_frame_count(a_path)
+    dur_a = frame_count_a / fps
     offset = max(0.0, dur_a - sec)
 
     ffmpeg = find_exe("ffmpeg")
@@ -5771,7 +5793,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
             merged_next = os.path.join(tmpdir, f"merged_{i:02d}.mp4")
             log(f"--- クリップ{i}/{i + 1}を遷移（{transition['type']}, "
                 f"{transition_blend_sec(transition):.3f}秒）で結合 ---")
-            merge_clip_pair(merged, clip_outputs[i], transition, merged_next)
+            merge_clip_pair(merged, clip_outputs[i], transition, merged_next, fps)
             merged = merged_next
 
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)

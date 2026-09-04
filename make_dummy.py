@@ -184,6 +184,74 @@ def gen_dummy_video_large_subject(out_path, w=W, h=H, duration_sec=2, fps=FPS):
     return out_path
 
 
+def set_display_rotation(video_path, degrees):
+    """
+    MP4のtkhd（trackヘッダ）boxのmatrixフィールドを直接書き換え、QuickTime/iPhoneの
+    実機動画と同じ形式（回転を"rotate"メタデータタグではなくdisplay matrixとして
+    格納する）でdegrees（90/-90/180のいずれか）分の回転を付与する。
+
+    このffmpeg環境では `-metadata:s:v:0 rotate=...` や `-display_rotation` を
+    出力オプションとして渡してもmov/mp4マルチプレクサがdisplay matrixを一切
+    書き込まない（試験環境のffmpegビルド固有の制限）ため、tkhdのmatrixを
+    直接パッチする。matrixは9個の32bit固定小数点値（16.16、最後の行のみ2.30）。
+    render.pyのprobe_videoはside_data_list（display matrix由来のrotation）を
+    読むため、これで実機のiPhone動画と同じ経路を再現できる。
+    """
+    import struct
+
+    FP = 0x00010000
+    # matrixは行優先3x3 [[a,b,u],[c,d,v],[x,y,w]]（u/v/x/yは常に0、wは0x40000000固定）。
+    # 表示時、実際の描画は (a,b;c,d) の2x2部分がピクセルをどう写すかで決まる
+    # （QuickTime/ffmpegの実機出力・ffprobeのrotation計算と突き合わせて確認済み）。
+    ROTATIONS = {
+        0: (FP, 0, 0, FP),
+        90: (0, -FP, FP, 0),
+        -90: (0, FP, -FP, 0),
+        180: (-FP, 0, 0, -FP),
+    }
+    if degrees not in ROTATIONS:
+        raise ValueError(f"set_display_rotationはdegrees={list(ROTATIONS)}のみ対応: {degrees}")
+    a, b, c, d = ROTATIONS[degrees]
+    matrix = (a, b, 0, c, d, 0, 0, 0, 0x40000000)
+
+    with open(video_path, "rb") as fp:
+        data = bytearray(fp.read())
+    idx = data.find(b"tkhd")
+    if idx < 0:
+        raise RuntimeError(f"tkhd boxが見つかりません: {video_path}")
+    box_start = idx - 4
+    version = data[box_start + 8]
+    # version 0: 中身は32bit時刻×2、version 1相当（64bit）は使わない前提
+    # （ffmpegが書き出すtkhdは通常version 0）。
+    if version != 0:
+        raise RuntimeError(f"tkhd version={version} は未対応です（version 0のみ想定）")
+    # box header(8) + version/flags(4) + ctime(4) + mtime(4) + track_id(4) +
+    # reserved(4) + duration(4) + reserved(8) + layer(2) + alt_group(2) +
+    # volume(2) + reserved(2) = 8+40 = 48 バイト目からmatrix(36バイト)
+    matrix_off = box_start + 48
+    packed = b"".join(struct.pack(">i", v) for v in matrix)
+    data[matrix_off:matrix_off + 36] = packed
+    with open(video_path, "wb") as fp:
+        fp.write(bytes(data))
+
+
+def gen_dummy_video_rotated(out_path, w=3840, h=2160, rotation=-90):
+    """
+    実機のiPhone（縦持ち撮影）と同じ形の入力を再現するダミー動画を作る：
+    生ピクセルは横長（既定3840x2160）のまま、tkhdのdisplay matrixで
+    rotation度（既定-90）を付与し、表示上は縦動画（2160x3840）として
+    扱われるようにする（render.pyのprobe_video/prepare_clip_videoが
+    ffmpegの自動回転経由でこれを正しく正規化できるかを検証するための
+    フィクスチャ）。中身の被写体（円）はrender_dummy_video（w,h基準・
+    DURATION_SEC秒・FPS）と同じ生成ロジックを使うため、通常のダミー動画と
+    同様にフリーズ位置のピクセル内容比較にも使える。
+    """
+    render_dummy_video(out_path, w=w, h=h)
+    mux_audio_into_video(out_path, make_tone_track())
+    set_display_rotation(out_path, rotation)
+    return out_path
+
+
 def render_dummy_video_vfr(out_path, w=W, h=H, base_fps=60, sub=2, duration_sec=DURATION_SEC,
                             stall_every=15, stall_extra_subframes=3):
     """

@@ -15,6 +15,10 @@
      伸びる。各クリップに重複して付かない）
   3. clips未指定の旧JSONは、load_project()が単一videoを1クリップとして扱う
      （完全後方互換）
+  4. in!=0のクリップでも、フリーズ時刻がエディタ記録どおり（クリップの元動画上の
+     絶対時刻）に変換される（load_project()のin基準変換 + plan_freezes()の実測）
+  5. iPhone風の縦動画（3840x2160・rotation=-90のdisplay matrix付き）が複数クリップ
+     経路でも正しい向き・アスペクト比で正規化され、映像/音声の尺も一致する
 
 実行方法:
     python make_dummy.py   # 初回のみ
@@ -101,17 +105,19 @@ WATERMARK_CHECK_LOCAL_TIME = 1.0  # 各クリップの遷移ブレンド終了�
 
 def base_clip(video_path, in_t, out_t, text, transition_out=None):
     """
-    freezes[].timeは、そのクリップ自身の（in/outでトリムした後の、0起点の）タイムライン上の
-    時刻として解釈される（render_multi_clipが各クリップをrender()へ渡す際、freeze時刻を
-    元動画の絶対時刻へ変換し直したりはしない。トリム後の動画をそのままrender()の入力に
-    しているため）。
+    project.json（raw JSON）上のfreezes[].timeは、エディタの<video>.currentTime
+    そのまま＝そのクリップの「元動画（トリム前）」上の絶対時刻として記録される
+    （トリムin/outは再生範囲を絞らないメタデータのため）。render.pyのload_project()が
+    各クリップのinを引いてトリム後・0起点の時刻へ変換するので、ここでは
+    「トリム後の狙った時刻(CLIP_FREEZE_LOCAL_TIME)」にin_tを足した値をJSONへ書く
+    （in_t=0のクリップでは従来どおりCLIP_FREEZE_LOCAL_TIMEと一致する）。
     """
     clip = {
         "video": video_path,
         "in": in_t,
         "out": out_t,
         "freezes": [{
-            "time": CLIP_FREEZE_LOCAL_TIME,
+            "time": in_t + CLIP_FREEZE_LOCAL_TIME,
             "name": {"lines": [{"text": text}]},
             "strokes": [{"width": 0.1, "points": [[0.3, 0.3], [0.5, 0.5], [0.6, 0.4]]}],
         }],
@@ -204,6 +210,33 @@ def main():
         check(info["has_audio"], "音声トラックが存在する")
         check(abs(info["duration"] - actual_total) < 0.15,
               f"音声を含む総尺が映像と一致する: {info['duration']:.2f}s")
+
+        # --- コンテナのduration値（ffprobe format=duration）だけに頼らず、実際に
+        #     デコードした映像フレーム数と音声ストリームの尺（フレーム換算）が一致する
+        #     ことを保証する（±1フレーム）。実機（iPhone縦動画・複数クリップ）で
+        #     「音声は最後まで残るのに映像だけ途中で打ち切られ、後続クリップの映像が
+        #     丸ごと欠落する」不具合が発生していた。原因はmerge_clip_pairのxfade
+        #     offsetをffprobeのcontainer duration（実デコード可能な映像フレーム数より
+        #     わずかに長く報告されることがある）から計算していたため。 ---
+        output_fps = float(proj["output"]["fps"])
+        video_frames = render.probe_segment_frame_count(out_path)
+        expected_frames = round(expected_total * output_fps)
+        check(abs(video_frames - expected_frames) <= 1,
+              f"実デコードした映像フレーム数も期待どおり（±1フレーム）: "
+              f"期待={expected_frames}枚 実際={video_frames}枚")
+
+        def audio_stream_duration(path):
+            ffprobe = render.find_exe("ffprobe")
+            cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+                   "-show_entries", "stream=duration", "-of", "csv=p=0", path]
+            out = subprocess.run(cmd, capture_output=True).stdout.decode().strip()
+            return float(out) if out else 0.0
+
+        audio_frames = round(audio_stream_duration(out_path) * output_fps)
+        check(abs(video_frames - audio_frames) <= 1,
+              f"映像の実フレーム数と音声の尺（フレーム換算）が一致する（±1フレーム。"
+              f"音声だけ長く残り映像が早期に打ち切られる不具合の回帰確認）: "
+              f"映像={video_frames}枚 音声換算={audio_frames}枚")
 
         # --- watermarkの位相連続性: 各クリップの遷移ブレンド終了後・フリーズ開始前
         #     （CLIP_FREEZE_LOCAL_TIME=2.5sより前）の安全な検証点で、実際の出力フレームの
@@ -311,6 +344,133 @@ def main():
               "project['video']/['freezes']はclips有無によらず従来どおり保たれる（完全後方互換）")
         check("raw" in loaded and not loaded["raw"].get("clips"),
               "raw JSONにclipsキーが無いことをmain()側のルーティング判定に使える")
+
+    print("")
+    print("=== シナリオ4: in!=0のクリップでも、フリーズ時刻がエディタ記録どおり"
+          "（クリップの元動画上の絶対時刻）に変換される ===")
+    with tempfile.TemporaryDirectory(prefix="multi_clip_test_") as tmpdir:
+        # portrait_pathは8秒。2.0〜7.0（5秒）にトリムし、トリム後0起点で1.5秒の位置に
+        # フリーズしたいとする。エディタは<video>.currentTimeをそのまま記録するため、
+        # project.json上のfreezes[].timeには「元動画上の絶対時刻」= in + 1.5 = 3.5を書く
+        # （実際にindex.htmlのloadVideoFile/selectClip後、els.video.currentTimeで
+        # フリーズを記録する処理と同じ値の作り方）。
+        in_t, out_t = 2.0, 7.0
+        target_local_t = 1.5
+        absolute_t = in_t + target_local_t
+        fps = 30.0
+
+        clip = {
+            "video": portrait_path, "in": in_t, "out": out_t,
+            "freezes": [{
+                "time": absolute_t, "name": "in_offset_check",
+                "strokes": [{"width": 0.1, "points": [[0.3, 0.3], [0.5, 0.5]]}],
+            }],
+        }
+        proj = {
+            "version": 1, "clips": [clip],
+            "style": {"font": "assets/fonts/NotoSansJP-Bold.ttf",
+                      "title_font": "assets/fonts/Anton-Regular.ttf",
+                      "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf"},
+        }
+        json_path = os.path.join(tmpdir, "in_offset.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(proj, f, ensure_ascii=False)
+        loaded = render.load_project(json_path)
+
+        converted = loaded["clips"][0]["freezes"][0]["time"]
+        check(abs(converted - target_local_t) < 1e-6,
+              f"load_project()がclips[].freezes[].timeを「元動画上の絶対時刻」から"
+              f"「トリム後0起点の時刻」へ変換する: 絶対時刻{absolute_t}s(JSON記載値) "
+              f"- in{in_t}s = {converted:.3f}s（狙い{target_local_t}s）")
+
+        # plan_freezes（render()が実際にフリーズ位置を決めるのに使う関数そのもの）に、
+        # render_multi_clipが渡すのと同じ「トリム後0起点」の値を渡し、
+        # 計算されるframe_indexが正確にtarget_local_t*fpsと一致することを直接確認する
+        # （元動画上の絶対時刻をそのまま使っていた修正前は、この値がズレていた）。
+        src_frames = int(round((out_t - in_t) * fps))
+        plans = render.plan_freezes(loaded["clips"][0]["freezes"], fps, src_frames, tmpdir)
+        expected_frame_index = round(target_local_t * fps)
+        check(plans[0]["frame_index"] == expected_frame_index,
+              f"plan_freezes()が計算するフリーズのフレーム位置も指定どおり: "
+              f"期待={expected_frame_index} 実際={plans[0]['frame_index']}"
+              f"（クリップ先頭付近にズレる不具合の回帰確認）")
+
+        # 統合確認として実際にrender_multi_clipを1本通し、クラッシュしないこと・
+        # in分だけ短くなったトリム後の尺（5秒）を土台に正しく完走することも見ておく
+        out_path = os.path.join(tmpdir, "in_offset_out.mp4")
+        render.render_multi_clip(loaded, json_path, out_path, mode="full")
+        actual_duration = render.probe_duration(out_path)
+        check(actual_duration > (out_t - in_t),
+              f"in!=0でも通しでレンダリングが完走し、トリム後尺（{out_t - in_t:.1f}s）に"
+              f"フリーズ演出の分だけ尺が伸びた動画が生成される: {actual_duration:.2f}s")
+
+    print("")
+    print("=== シナリオ5: iPhone風の縦動画（rotationメタデータ付き）が複数クリップ経路でも"
+          "正しい向きへ正規化される ===")
+    with tempfile.TemporaryDirectory(prefix="multi_clip_test_") as tmpdir:
+        import make_dummy as md
+
+        # 実際に失敗したproject.jsonと同じ入力（3840x2160、rotation=-90の縦持ち撮影）を
+        # 2本用意する。生ピクセルは横長のまま、tkhdのdisplay matrixで回転を付与する
+        # （render_dummy_videoと同じ被写体描画ロジックなので通常のダミー動画と同様に
+        # フリーズも使える）。
+        rot_dir = os.path.join(tmpdir, "rotated_src")
+        os.makedirs(rot_dir, exist_ok=True)
+        rot_path_1 = os.path.join(rot_dir, "clip1.mp4")
+        rot_path_2 = os.path.join(rot_dir, "clip2.mp4")
+        md.gen_dummy_video_rotated(rot_path_1, w=3840, h=2160, rotation=-90)
+        md.gen_dummy_video_rotated(rot_path_2, w=3840, h=2160, rotation=-90)
+
+        src_info = render.probe_video(rot_path_1)
+        check(src_info["width"] == 2160 and src_info["height"] == 3840,
+              f"probe_video()が生ピクセル(3840x2160)ではなく表示上の向き(縦2160x3840)を"
+              f"返す: {src_info['width']}x{src_info['height']} rotation={src_info['rotation']}")
+
+        clips = [
+            base_clip(rot_path_1, 1.0, 5.0, "縦動画1", transition_out={"type": "crossfade", "sec": 0.4}),
+            base_clip(rot_path_2, 0.5, 4.5, "縦動画2"),
+        ]
+        # 出力解像度は指定せず、1本目のクリップ（表示上の向き=縦2160x3840）に
+        # 自動で合わせさせる（実際のエディタも通常は出力サイズを明示しない）
+        proj = {
+            "version": 1, "clips": clips,
+            "style": {"font": "assets/fonts/NotoSansJP-Bold.ttf",
+                      "title_font": "assets/fonts/Anton-Regular.ttf",
+                      "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf"},
+        }
+        json_path = os.path.join(tmpdir, "rotated.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(proj, f, ensure_ascii=False)
+        loaded = render.load_project(json_path)
+
+        out_path = os.path.join(tmpdir, "rotated_out.mp4")
+        render.render_multi_clip(loaded, json_path, out_path, mode="full")
+
+        out_info = render.probe_video(out_path)
+        check(out_info["height"] > out_info["width"],
+              f"出力も縦動画のまま正規化される（横倒しにならない）: "
+              f"{out_info['width']}x{out_info['height']}")
+        check(abs(out_info["width"] / out_info["height"] - 2160 / 3840) < 0.02,
+              f"出力のアスペクト比が入力の表示上の向き（2160:3840）と一致する: "
+              f"{out_info['width']}/{out_info['height']}")
+
+        # ここでも実デコードした映像フレーム数と音声の尺（フレーム換算）が一致することを
+        # 確認する（回転付き入力×複数クリップという、実際に映像欠落が発生した組み合わせでの
+        # item1の回帰確認）
+        fps = 30.0
+        video_frames = render.probe_segment_frame_count(out_path)
+
+        def audio_stream_duration(path):
+            ffprobe = render.find_exe("ffprobe")
+            cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+                   "-show_entries", "stream=duration", "-of", "csv=p=0", path]
+            out = subprocess.run(cmd, capture_output=True).stdout.decode().strip()
+            return float(out) if out else 0.0
+
+        audio_frames = round(audio_stream_duration(out_path) * fps)
+        check(abs(video_frames - audio_frames) <= 1,
+              f"縦動画×複数クリップでも映像の実フレーム数と音声の尺が一致する（±1フレーム）: "
+              f"映像={video_frames}枚 音声換算={audio_frames}枚")
 
     print("")
     print(f"{passed} 件成功 / {failed} 件失敗")
