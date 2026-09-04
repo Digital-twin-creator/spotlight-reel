@@ -271,6 +271,27 @@
   .freeze-card .meta .s{font-size:11px; color:var(--muted);}
   .freeze-card .actions{display:flex; gap:6px;}
 
+  /* --- クリップ一覧カード --- */
+  .clip-card{
+    display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:10px;
+    background:var(--panel2); border-radius:12px; margin-bottom:4px; border:1px solid var(--line);
+  }
+  .clip-card.active{border-color:var(--accent);}
+  .clip-card .thumb{
+    width:64px; height:114px; border-radius:8px; background:#000 center/cover no-repeat; flex-shrink:0; cursor:pointer;
+  }
+  .clip-card .meta{flex:1 1 160px; min-width:0;}
+  .clip-card .meta .n{font-size:14px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .clip-card .meta .s{font-size:11px; color:var(--muted);}
+  .clip-card .clip-trim-row{display:flex; align-items:center; gap:6px; flex-wrap:wrap; width:100%; font-size:11px;}
+  .clip-card .clip-trim-row input[type="range"]{flex:1 1 100px; min-width:80px;}
+  .clip-card .actions{display:flex; gap:6px; flex-wrap:wrap;}
+  .clip-transition-row{
+    display:flex; align-items:center; gap:6px; padding:4px 10px; font-size:12px; color:var(--muted);
+  }
+  .clip-transition-row select{flex:0 0 auto;}
+  .clip-transition-row input[type="number"]{width:5em;}
+
   details.card summary{cursor:pointer; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between;}
   details.card summary::-webkit-details-marker{display:none;}
   details.card summary::after{content:"▸"; color:var(--muted); transition:transform .15s;}
@@ -438,6 +459,20 @@
           <button class="primary grow" id="addFreezeBtn"><span class="step-badge">③</span>＋ フリーズ追加</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- 複数クリップ一覧（「動画を追加」を一度でも使うと表示される） -->
+  <section class="card" id="clipListSection" hidden>
+    <h2>クリップ一覧</h2>
+    <div class="muted" style="margin-bottom:8px;">
+      複数の動画を1本につなげて出力できます。クリップを選ぶと、そのクリップに対して
+      シーク・フリーズ編集ができます。
+    </div>
+    <div id="clipList"></div>
+    <div class="stack" style="margin-top:8px;">
+      <button class="ghost" id="addClipBtn">🎬 動画を追加</button>
+      <input type="file" id="clipFileInput" accept="video/*" multiple hidden>
     </div>
   </section>
 
@@ -1513,6 +1548,47 @@ var OUTPUT_PRESETS = {
   "1080x1920": { width: 1080, height: 1920 },
   "720x1280": { width: 720, height: 1280 }
 };
+/** 複数クリップ（clips[]）間のトランジション種類。render.py側のTRANSITION_TYPESと同じ */
+var TRANSITION_TYPES = ["cut", "fade_black", "crossfade", "wipe"];
+var TRANSITION_TYPE_LABELS = {
+  cut: "カット（そのまま切替）",
+  fade_black: "黒フェード",
+  crossfade: "クロスフェード",
+  wipe: "ワイプ"
+};
+var DEFAULT_TRANSITION_TYPE = "cut";
+var DEFAULT_TRANSITION_SEC = 0.4;
+function defaultTransitionOut() {
+  return { type: DEFAULT_TRANSITION_TYPE, sec: DEFAULT_TRANSITION_SEC };
+}
+function resolveTransitionOut(t) {
+  var type = t && TRANSITION_TYPES.indexOf(t.type) >= 0 ? t.type : DEFAULT_TRANSITION_TYPE;
+  // t && t.sec だと t.sec が未指定/0 の時に t===null の0と区別できなくなる
+  // （numOrはNumber(null)===0を「有効な値」とみなしてしまう）ため、tの有無を先に見る。
+  var sec = numOr(t ? t.sec : undefined, DEFAULT_TRANSITION_SEC);
+  return { type: type, sec: Math.max(0.05, sec) };
+}
+/** 複数クリップのジョブアップロード時、クリップごとに一意な動画アセット名を作る（"clip0.mp4"等） */
+function clipVideoAssetName(index, originalFileName) {
+  var m = /\.([A-Za-z0-9]+)$/.exec(originalFileName || "");
+  var ext = m ? m[1].toLowerCase() : "mp4";
+  return "clip" + index + "." + ext;
+}
+/**
+ * クリップのトリム範囲（in/out、秒）を、既知のクリップ尺（durationSecが不明な間はnull）に対して
+ * 妥当な範囲へクランプする。out は「クリップの最後まで」を表す null を許す。
+ */
+function clampClipTrim(inSec, outSec, durationSec) {
+  var dur = durationSec || null;
+  var start = Math.max(0, numOr(inSec, 0));
+  if (dur !== null) start = Math.min(start, Math.max(0, dur - 0.05));
+  var end = (outSec === null || outSec === undefined) ? null : numOr(outSec, null);
+  if (end !== null) {
+    end = dur !== null ? Math.min(end, dur) : end;
+    end = Math.max(end, start + 0.05);
+  }
+  return { in: round(start, 2), out: end === null ? null : round(end, 2) };
+}
 /** 影（フィルム色）の色プリセット（参考動画は人物ごとに色が違う場合があるため複数用意） */
 var FILM_COLOR_PRESETS = {
   white: "#FFFFFF",
@@ -1805,6 +1881,24 @@ function buildProjectJSON(state) {
     },
     freezes: sortFreezesByTime(state.freezes).map(function (fz) { return freezeToJSON(fz, state.sfxLibrary); })
   };
+  // 複数クリップ（clips[]）がある場合はそれを正とし、video/freezesは使わない。
+  // clip.video はジョブブランチへ実際にコミットされるファイル名（clipVideoAssetName、
+  // 例: "clip0.mp4"）と必ず一致させる。単一動画パス（--video CLI引数）と違い、複数クリップの
+  // 各videoはrender.py側で --video による上書きが効かず project.json の値がそのまま使われるため。
+  if (state.clips && state.clips.length) {
+    delete project.video;
+    delete project.freezes;
+    project.clips = state.clips.map(function (c, i) {
+      var trim = clampClipTrim(c.in, c.out, c.duration || null);
+      return {
+        video: clipVideoAssetName(i, c.videoFileName),
+        in: trim.in,
+        out: trim.out,
+        freezes: sortFreezesByTime(c.freezes || []).map(function (fz) { return freezeToJSON(fz, state.sfxLibrary); }),
+        transition_out: resolveTransitionOut(c.transitionOut)
+      };
+    });
+  }
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
   }
@@ -2004,20 +2098,31 @@ function buildProjectJSON(state) {
  */
 function validateProjectForConfirmation(state) {
   var warnings = [];
-  var freezes = sortFreezesByTime(state.freezes || []);
-  freezes.forEach(function (fz, i) {
-    var label = "フリーズ" + (i + 1) + "（" + round(numOr(fz.time, 0), 2) + "秒）";
-    if (!(fz.name && fz.name.trim())) {
-      warnings.push({ freezeIndex: i, message: label + "：名前が入力されていません" });
-    }
-    var mode = resolveMaskMode(fz.maskMode);
-    if (mode === "brush" && (!fz.strokes || fz.strokes.length === 0)) {
-      warnings.push({
-        freezeIndex: i,
-        message: label + "：ブラシで何も塗られていません（色・影の範囲が指定されないままになります）"
-      });
-    }
-  });
+  function checkFreezes(freezes, clipLabelPrefix) {
+    sortFreezesByTime(freezes || []).forEach(function (fz, i) {
+      var label = clipLabelPrefix + "フリーズ" + (i + 1) + "（" + round(numOr(fz.time, 0), 2) + "秒）";
+      if (!(fz.name && fz.name.trim())) {
+        warnings.push({ freezeIndex: i, message: label + "：名前が入力されていません" });
+      }
+      var mode = resolveMaskMode(fz.maskMode);
+      if (mode === "brush" && (!fz.strokes || fz.strokes.length === 0)) {
+        warnings.push({
+          freezeIndex: i,
+          message: label + "：ブラシで何も塗られていません（色・影の範囲が指定されないままになります）"
+        });
+      }
+    });
+  }
+  // 複数クリップモードでは、全クリップのフリーズをチェックする（現在アクティブなクリップだけ
+  // ではない）。appState.freezes は現在選択中のクリップへの参照でしかないため、
+  // ここでは state.clips 側を正として見る。
+  if (state.clips && state.clips.length) {
+    state.clips.forEach(function (c, ci) {
+      checkFreezes(c.freezes, "クリップ" + (ci + 1) + "・");
+    });
+  } else {
+    checkFreezes(state.freezes, "");
+  }
   if (state.logo && !state.logo.imageName && state.logo.at && state.logo.at !== DEFAULT_LOGO_AT) {
     warnings.push({
       message: "ラストロゴの表示位置を設定していますが、ロゴ画像が選択されていないため、ロゴは表示されません"
@@ -3763,6 +3868,13 @@ if (typeof module !== "undefined" && module.exports) {
     sortFreezesByTime: sortFreezesByTime,
     buildProjectJSON: buildProjectJSON,
     parseProjectJSON: parseProjectJSON,
+    TRANSITION_TYPES: TRANSITION_TYPES,
+    DEFAULT_TRANSITION_TYPE: DEFAULT_TRANSITION_TYPE,
+    DEFAULT_TRANSITION_SEC: DEFAULT_TRANSITION_SEC,
+    defaultTransitionOut: defaultTransitionOut,
+    resolveTransitionOut: resolveTransitionOut,
+    clipVideoAssetName: clipVideoAssetName,
+    clampClipTrim: clampClipTrim,
     validateProjectForConfirmation: validateProjectForConfirmation,
     matchOutputPreset: matchOutputPreset,
     buildStrokeGeometry: buildStrokeGeometry,
@@ -4044,6 +4156,12 @@ var appState = {
   shadowBlurRatio: DEFAULT_SHADOW.blur,
   shadowSource: DEFAULT_SHADOW.source,
   freezes: [],
+  // 複数クリップ（clips[]）。空のうちは従来どおり単一動画（videoFile/videoFileName/freezes）
+  // として扱う。「動画を追加」で2本目以降を追加すると、その時点の単一動画が clips[0] として
+  // 取り込まれ（昇格）、以後 appState.videoFile/videoFileName/freezes は「現在選択中のクリップ
+  // （activeClipId）」への参照として振る舞う（selectClip参照）。
+  clips: [],
+  activeClipId: null,
   // ラストロゴ。imageFile は File（このセッション中のみ有効。JSON読み込み直後はnullで、
   // 動画と同様に「動画を作る」前にもう一度選び直してもらう必要がある）
   logo: defaultLogoState(),
@@ -4191,6 +4309,7 @@ function init() {
     "titleSizeSlider", "titleSizeValue", "titleAlignSelect", "titleDragHint",
     "cancelFreezeBtn", "commitFreezeBtn",
     "freezeList", "freezeListEmpty",
+    "clipListSection", "clipList", "addClipBtn", "clipFileInput",
     "revealSecSlider", "revealSecValue", "slideSecSlider", "slideSecValue",
     "holdSecSlider", "holdSecValue", "monoContrastSlider", "monoContrastValue",
     "backgroundModeSelect", "backgroundOptionsBody",
@@ -4282,6 +4401,11 @@ function init() {
   els.pickVideoBtn.addEventListener("click", function () { els.videoFileInput.click(); });
   els.videoFileInput.addEventListener("change", handleVideoFileChange);
   els.useSampleBtn.addEventListener("click", loadSampleVideo);
+  els.addClipBtn.addEventListener("click", function () { els.clipFileInput.click(); });
+  els.clipFileInput.addEventListener("change", function (e) {
+    addClipsFromFiles(e.target.files);
+    e.target.value = ""; // 同じファイルを続けて選び直せるようにする
+  });
 
   els.video.addEventListener("loadedmetadata", onVideoLoadedMetadata);
   // 一部の環境ではloadedmetadata時点でvideoWidth/videoHeightがまだ確定していないことが
@@ -5057,6 +5181,13 @@ function onVideoLoadedMetadata() {
   if (els.video.duration) setVideoStatus("準備完了（" + els.video.duration.toFixed(1) + "秒）");
   layoutOverlayCanvases();
   startPlayerRenderLoop();
+  // 複数クリップモード中、現在アクティブなクリップの尺が未確定・不正確だった場合に
+  // ここで確定させる（トリムスライダーの上限に使う）。
+  var activeClipForMeta = getActiveClip();
+  if (activeClipForMeta && els.video.duration && activeClipForMeta.duration !== els.video.duration) {
+    activeClipForMeta.duration = els.video.duration;
+    renderClipList();
+  }
 }
 
 function onVideoTimeUpdate() {
@@ -6375,6 +6506,11 @@ function captureThumbnail(fz) {
 
 function renderFreezeList() {
   appState.freezes = sortFreezesByTime(appState.freezes);
+  // 複数クリップモード中は、appState.freezes は「現在選択中のクリップ」への参照として
+  // 振る舞う。appState.freezes = appState.freezes.filter(...) のような再代入（上の削除
+  // ボタン等）が起きると参照が切れてしまうため、描画のたびに必ずクリップ側へ書き戻す。
+  var activeClipForSync = getActiveClip();
+  if (activeClipForSync) activeClipForSync.freezes = appState.freezes;
   els.freezeList.innerHTML = "";
   els.freezeListEmpty.hidden = appState.freezes.length > 0;
 
@@ -6419,6 +6555,319 @@ function renderFreezeList() {
     card.appendChild(meta);
     card.appendChild(actions);
     els.freezeList.appendChild(card);
+  });
+}
+
+/* ---------------- 複数クリップ（clips[]） ---------------- */
+
+function makeClipId() {
+  return "clip-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+/** 現在アクティブなクリップのオブジェクトを返す（複数クリップモードでなければnull） */
+function getActiveClip() {
+  if (!appState.clips || !appState.clips.length) return null;
+  var found = appState.clips.filter(function (c) { return c.id === appState.activeClipId; })[0];
+  return found || null;
+}
+
+/**
+ * 現在の単一動画（appState.videoFile/videoFileName/freezes）を clips[0] として取り込む。
+ * 既にclipsがある場合は何もしない。「動画を追加」が初めて押された時にだけ一度だけ呼ぶ。
+ */
+function promoteCurrentVideoToClip0() {
+  if (appState.clips.length > 0) return;
+  if (!appState.videoFile) return;
+  var clip = {
+    id: makeClipId(),
+    videoFile: appState.videoFile,
+    videoFileName: appState.videoFileName,
+    freezes: appState.freezes,
+    in: 0,
+    out: null,
+    duration: els.video.duration || 0,
+    transitionOut: defaultTransitionOut(),
+    thumb: null
+  };
+  appState.clips.push(clip);
+  appState.activeClipId = clip.id;
+  // 既に読み込み済みの動画から即座にサムネイルを取得できる（オフスクリーンで読み直す必要がない）
+  try {
+    var thumbCanvas = document.createElement("canvas");
+    var scale = Math.min(1, THUMB_LONG_EDGE_PX / Math.max(els.video.videoWidth || 1, els.video.videoHeight || 1));
+    thumbCanvas.width = Math.max(1, Math.round((els.video.videoWidth || 1) * scale));
+    thumbCanvas.height = Math.max(1, Math.round((els.video.videoHeight || 1) * scale));
+    thumbCanvas.getContext("2d").drawImage(els.video, 0, 0, thumbCanvas.width, thumbCanvas.height);
+    clip.thumb = thumbCanvas.toDataURL("image/jpeg", 0.6);
+    thumbCanvas.width = 0; thumbCanvas.height = 0;
+  } catch (err) { clip.thumb = null; }
+}
+
+/**
+ * File1本ぶんの尺・サムネイルを、メインのvideo要素に触れずオフスクリーンで取得する。
+ * 失敗しても致命的ではない（尺・サムネ無しでもクリップ自体は使える）ため、
+ * 例外は握りつぶしてresolveする。
+ */
+function loadClipMetaAndThumbnail(clip) {
+  return new Promise(function (resolve) {
+    var v = document.createElement("video");
+    v.muted = true; v.playsInline = true; v.preload = "auto";
+    var url = URL.createObjectURL(clip.videoFile);
+    var settled = false;
+    function finish() {
+      if (settled) return;
+      settled = true;
+      try { URL.revokeObjectURL(url); } catch (err) { /* 無視 */ }
+      v.src = "";
+      resolve();
+    }
+    var timeoutId = setTimeout(finish, 8000); // 読み込みが極端に遅い場合の保険
+    v.addEventListener("loadedmetadata", function () {
+      clip.duration = v.duration || 0;
+      // 先頭は黒フレームのことがあるため、ごく僅かにシークしてから撮る
+      try { v.currentTime = Math.min(0.15, Math.max(0, (v.duration || 0) - 0.05)); } catch (err) { onSeeked(); }
+    });
+    function onSeeked() {
+      try {
+        var scale = Math.min(1, THUMB_LONG_EDGE_PX / Math.max(v.videoWidth || 1, v.videoHeight || 1));
+        var c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round((v.videoWidth || 1) * scale));
+        c.height = Math.max(1, Math.round((v.videoHeight || 1) * scale));
+        c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+        clip.thumb = c.toDataURL("image/jpeg", 0.6);
+        c.width = 0; c.height = 0;
+      } catch (err) { /* サムネなしでも続行 */ }
+      clearTimeout(timeoutId);
+      finish();
+    }
+    v.addEventListener("seeked", onSeeked);
+    v.addEventListener("error", function () { clearTimeout(timeoutId); finish(); });
+    v.src = url;
+  });
+}
+
+/** 「動画を追加」で選ばれた1つ以上のファイルを、新しいクリップとして追加する */
+function addClipsFromFiles(fileList) {
+  var files = Array.prototype.slice.call(fileList || []);
+  if (!files.length) return;
+  promoteCurrentVideoToClip0();
+  var newClips = files.map(function (file) {
+    return {
+      id: makeClipId(),
+      videoFile: file,
+      videoFileName: file.name,
+      freezes: [],
+      in: 0,
+      out: null,
+      duration: 0,
+      transitionOut: defaultTransitionOut(),
+      thumb: null
+    };
+  });
+  appState.clips = appState.clips.concat(newClips);
+  renderClipList();
+  var metaChain = Promise.resolve();
+  newClips.forEach(function (clip) {
+    metaChain = metaChain.then(function () { return loadClipMetaAndThumbnail(clip); }).then(renderClipList);
+  });
+  // 追加した最後のクリップを選択状態にする（すぐ編集を始められるように）
+  selectClip(newClips[newClips.length - 1].id);
+}
+
+/** クリップを選択し、シーク・フリーズ編集の対象をそのクリップへ切り替える */
+function selectClip(id) {
+  var clip = appState.clips.filter(function (c) { return c.id === id; })[0];
+  if (!clip) return;
+  if (draft) cancelFreezeEdit();
+  appState.activeClipId = id;
+  appState.videoFile = clip.videoFile;
+  appState.videoFileName = clip.videoFileName;
+  appState.freezes = clip.freezes;
+  els.videoFileName.textContent = "選択中: " + clip.videoFileName;
+  setVideoStatus("読み込み中…");
+  setPlayStatus("待機中");
+  hideError();
+  var url = URL.createObjectURL(clip.videoFile);
+  els.video.src = url;
+  els.playerSection.hidden = false;
+  lastCanvasContentSize = { width: 0, height: 0 };
+  tryUnlockVideo();
+  currentVideoMp4Rotation = null;
+  var detectingFor = clip.videoFile;
+  clip.videoFile.arrayBuffer().then(function (buf) {
+    if (appState.videoFile !== detectingFor) return;
+    try { currentVideoMp4Rotation = parseMp4DisplayRotation(buf); } catch (err) { currentVideoMp4Rotation = null; }
+    if (els.video.videoWidth && !draft) {
+      var resized = layoutOverlayCanvases();
+      if (resized) drawPlayerFrameOnce();
+    }
+  }).catch(function () { /* 読み取れなくても致命的ではないので無視 */ });
+  els.restoreStatus.textContent = "";
+  renderFreezeList();
+  renderClipList();
+  updateJsonPreview();
+}
+
+/** クリップの並び替え（direction: -1で上へ、+1で下へ） */
+function moveClip(id, direction) {
+  var idx = appState.clips.map(function (c) { return c.id; }).indexOf(id);
+  var target = idx + direction;
+  if (idx < 0 || target < 0 || target >= appState.clips.length) return;
+  var tmp = appState.clips[idx];
+  appState.clips[idx] = appState.clips[target];
+  appState.clips[target] = tmp;
+  renderClipList();
+  updateJsonPreview();
+}
+
+/** クリップの削除。全クリップを消した場合は「まだ動画が選ばれていません」の初期状態に戻す */
+function removeClip(id) {
+  var clip = appState.clips.filter(function (c) { return c.id === id; })[0];
+  if (!clip) return;
+  if (!confirm('「' + clip.videoFileName + '」をクリップ一覧から削除しますか？（このクリップのフリーズも全て失われます）')) return;
+  appState.clips = appState.clips.filter(function (c) { return c.id !== id; });
+  if (appState.clips.length === 0) {
+    resetToNoVideoState();
+    return;
+  }
+  if (appState.activeClipId === id) {
+    selectClip(appState.clips[0].id);
+  } else {
+    renderClipList();
+    updateJsonPreview();
+  }
+}
+
+/** 最後の1本のクリップまで削除された場合、動画未選択の初期状態に戻す */
+function resetToNoVideoState() {
+  appState.clips = [];
+  appState.activeClipId = null;
+  appState.videoFile = null;
+  appState.videoFileName = "";
+  appState.freezes = [];
+  els.videoFileName.textContent = "まだ動画が選ばれていません";
+  els.playerSection.hidden = true;
+  els.video.removeAttribute("src");
+  renderFreezeList();
+  renderClipList();
+  updateJsonPreview();
+}
+
+function clipTrimSummaryText(clip) {
+  var inText = round(numOr(clip.in, 0), 1) + "s";
+  var outText = (clip.out === null || clip.out === undefined) ? "最後まで" : round(clip.out, 1) + "s";
+  return inText + " 〜 " + outText;
+}
+
+function renderClipList() {
+  if (!els.clipListSection) return;
+  var multi = appState.clips.length > 0;
+  els.clipListSection.hidden = !multi;
+  if (!multi) return;
+  els.clipList.innerHTML = "";
+  appState.clips.forEach(function (clip, i) {
+    var card = document.createElement("div");
+    card.className = "clip-card" + (clip.id === appState.activeClipId ? " active" : "");
+
+    var thumb = document.createElement("div");
+    thumb.className = "thumb";
+    if (clip.thumb) thumb.style.backgroundImage = "url(" + clip.thumb + ")";
+    thumb.addEventListener("click", function () { selectClip(clip.id); });
+
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML =
+      '<div class="n">クリップ' + (i + 1) + '： ' + escapeHtml(clip.videoFileName) + '</div>' +
+      '<div class="s">尺 ' + (clip.duration ? clip.duration.toFixed(1) + 's' : "取得中…") +
+      ' ・ フリーズ ' + clip.freezes.length + ' 件 ・ トリム ' + clipTrimSummaryText(clip) + '</div>';
+
+    var trimRow = document.createElement("div");
+    trimRow.className = "row wrap clip-trim-row";
+    var dur = clip.duration || 0;
+    var inLabel = document.createElement("label");
+    inLabel.textContent = "開始";
+    var inSlider = document.createElement("input");
+    inSlider.type = "range"; inSlider.min = "0"; inSlider.max = String(Math.max(dur, 0.1));
+    inSlider.step = "0.1"; inSlider.value = String(Math.min(numOr(clip.in, 0), dur));
+    inSlider.disabled = !dur;
+    inSlider.addEventListener("input", function () {
+      var trimmed = clampClipTrim(parseFloat(inSlider.value), clip.out, clip.duration);
+      clip.in = trimmed.in; clip.out = trimmed.out;
+      renderClipList();
+      updateJsonPreview();
+    });
+    var outLabel = document.createElement("label");
+    outLabel.textContent = "終了";
+    var outSlider = document.createElement("input");
+    outSlider.type = "range"; outSlider.min = "0"; outSlider.max = String(Math.max(dur, 0.1));
+    outSlider.step = "0.1"; outSlider.value = String(clip.out === null || clip.out === undefined ? dur : clip.out);
+    outSlider.disabled = !dur;
+    outSlider.addEventListener("input", function () {
+      var atMax = parseFloat(outSlider.value) >= dur - 0.05;
+      var trimmed = clampClipTrim(clip.in, atMax ? null : parseFloat(outSlider.value), clip.duration);
+      clip.in = trimmed.in; clip.out = trimmed.out;
+      renderClipList();
+      updateJsonPreview();
+    });
+    trimRow.appendChild(inLabel); trimRow.appendChild(inSlider);
+    trimRow.appendChild(outLabel); trimRow.appendChild(outSlider);
+
+    var actions = document.createElement("div");
+    actions.className = "actions stack";
+    var editBtn = document.createElement("button");
+    editBtn.className = "small"; editBtn.textContent = "編集";
+    editBtn.addEventListener("click", function (e) { e.stopPropagation(); selectClip(clip.id); });
+    var upBtn = document.createElement("button");
+    upBtn.className = "small"; upBtn.textContent = "↑"; upBtn.disabled = i === 0;
+    upBtn.addEventListener("click", function (e) { e.stopPropagation(); moveClip(clip.id, -1); });
+    var downBtn = document.createElement("button");
+    downBtn.className = "small"; downBtn.textContent = "↓"; downBtn.disabled = i === appState.clips.length - 1;
+    downBtn.addEventListener("click", function (e) { e.stopPropagation(); moveClip(clip.id, 1); });
+    var delBtn = document.createElement("button");
+    delBtn.className = "small danger"; delBtn.textContent = "削除";
+    delBtn.addEventListener("click", function (e) { e.stopPropagation(); removeClip(clip.id); });
+    actions.appendChild(editBtn);
+    actions.appendChild(upBtn);
+    actions.appendChild(downBtn);
+    actions.appendChild(delBtn);
+
+    card.appendChild(thumb);
+    card.appendChild(meta);
+    card.appendChild(trimRow);
+    card.appendChild(actions);
+    els.clipList.appendChild(card);
+
+    // クリップ間のつなぎ（最後のクリップの後ろには何も繋がらないので出さない）
+    if (i < appState.clips.length - 1) {
+      var transRow = document.createElement("div");
+      transRow.className = "clip-transition-row";
+      var transSelect = document.createElement("select");
+      TRANSITION_TYPES.forEach(function (t) {
+        var opt = document.createElement("option");
+        opt.value = t; opt.textContent = TRANSITION_TYPE_LABELS[t] || t;
+        if (clip.transitionOut && clip.transitionOut.type === t) opt.selected = true;
+        transSelect.appendChild(opt);
+      });
+      transSelect.addEventListener("change", function () {
+        clip.transitionOut = resolveTransitionOut({ type: transSelect.value, sec: clip.transitionOut && clip.transitionOut.sec });
+        updateJsonPreview();
+      });
+      var secInput = document.createElement("input");
+      secInput.type = "number"; secInput.min = "0.05"; secInput.step = "0.05"; secInput.className = "small";
+      secInput.value = String(clip.transitionOut ? clip.transitionOut.sec : DEFAULT_TRANSITION_SEC);
+      secInput.addEventListener("change", function () {
+        clip.transitionOut = resolveTransitionOut({ type: clip.transitionOut && clip.transitionOut.type, sec: parseFloat(secInput.value) });
+        secInput.value = String(clip.transitionOut.sec);
+        updateJsonPreview();
+      });
+      var secLabel = document.createElement("span");
+      secLabel.className = "muted"; secLabel.textContent = "秒";
+      transRow.appendChild(document.createTextNode("↓ つなぎ: "));
+      transRow.appendChild(transSelect);
+      transRow.appendChild(secInput);
+      transRow.appendChild(secLabel);
+      els.clipList.appendChild(transRow);
+    }
   });
 }
 
@@ -9194,14 +9643,25 @@ function showJobActionsLink(url) {
   els.jobActionsLink.hidden = false;
 }
 
+/** 複数クリップモードなら全クリップのfreezesを結合、そうでなければ単一動画のfreezesを返す */
+function allProjectFreezes() {
+  if (appState.clips && appState.clips.length) {
+    return [].concat.apply([], appState.clips.map(function (c) { return c.freezes || []; }));
+  }
+  return appState.freezes || [];
+}
+
 function startMakeVideoJob() {
   hideError();
-  if (!appState.videoFile) {
+  var isMulti = appState.clips && appState.clips.length > 0;
+  if (!isMulti && !appState.videoFile) {
     showJobError("先に動画を選んでください");
     return;
   }
-
-  var videoFile = appState.videoFile;
+  if (isMulti && appState.clips.some(function (c) { return !c.videoFile; })) {
+    showJobError("クリップの動画が読み込めていません。もう一度動画を選び直してください");
+    return;
+  }
 
   var logoFile = (appState.logo && appState.logo.imageFile) || null;
   if (appState.logo && appState.logo.imageName && !logoFile) {
@@ -9226,17 +9686,21 @@ function startMakeVideoJob() {
     return;
   }
 
-  // 動画・ロゴ・透かしロゴ・使用中の効果音（IndexedDB上のメタデータのみ、Blob本体は読まない）
-  // の合計サイズを、アップロード（通信）を一切開始する前に事前確認する。
+  // 動画（複数クリップ時は全クリップ合計）・ロゴ・透かしロゴ・使用中の効果音
+  // （IndexedDB上のメタデータのみ、Blob本体は読まない）の合計サイズを、
+  // アップロード（通信）を一切開始する前に事前確認する。
   // 分割アップロード自体はファイルサイズに上限を設けないが、実機での現実的な所要時間・
   // 安定性を考え、合計1.5GBを超える場合はここで中断する。
-  var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
+  var videoBytesTotal = isMulti
+    ? appState.clips.reduce(function (sum, c) { return sum + (c.videoFile ? c.videoFile.size : 0); }, 0)
+    : appState.videoFile.size;
+  var usedSfxIds = collectUsedSfxLibraryIds(allProjectFreezes(), appState.logo);
   sfxLibraryListMeta()
     .then(function (metas) {
       var sfxTotal = (metas || [])
         .filter(function (m) { return usedSfxIds.indexOf(m.id) >= 0; })
         .reduce(function (sum, m) { return sum + (m.size || 0); }, 0);
-      var totalBytes = videoFile.size + (logoFile ? logoFile.size : 0) + (watermarkFile ? watermarkFile.size : 0) + sfxTotal;
+      var totalBytes = videoBytesTotal + (logoFile ? logoFile.size : 0) + (watermarkFile ? watermarkFile.size : 0) + sfxTotal;
       if (exceedsTotalUploadLimit(totalBytes)) {
         showJobError("動画が大きすぎます。iPhoneの写真アプリで書き出し時に解像度を下げるか、短くトリミングしてください");
         return;
@@ -9291,7 +9755,8 @@ function showConfirmWarningsModal(warnings) {
 
 /** ハードエラーのチェックと内容確認（警告モーダル）を通過した後の、実際のアップロード・ジョブ実行本体 */
 function runMakeVideoJobUpload() {
-  var videoFile = appState.videoFile;
+  var isMulti = appState.clips && appState.clips.length > 0;
+  var videoFile = appState.videoFile; // 単一動画時のみ使う
   var logoFile = (appState.logo && appState.logo.imageFile) || null;
   var watermarkFile = (appState.watermark && appState.watermark.imageFile) || null;
   var user = els.ghUserInput.value.trim();
@@ -9299,12 +9764,11 @@ function runMakeVideoJobUpload() {
   var token = els.ghTokenInput.value.trim();
 
   var tag = makeJobTag(new Date());
-  var videoName = videoAssetName(videoFile.name);
   var jsonBlob = new Blob([currentProjectJSONText()], { type: "application/json" });
   var baseCommitSha = null;
   var jsonBlobSha = null;
   var releaseInfo = null;
-  var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
+  var usedSfxIds = collectUsedSfxLibraryIds(allProjectFreezes(), appState.logo);
   var videoTreeEntries = [];
   var logoTreeEntries = [];
   var watermarkTreeEntries = [];
@@ -9332,14 +9796,36 @@ function runMakeVideoJobUpload() {
     })
     .then(function (blob) {
       jsonBlobSha = blob.sha;
-      showJobProgress(14, "動画をアップロード中… 0%");
-      return uploadFileChunked(user, repo, token, videoFile, videoName, videoFile.name, function (pct, label) {
-        showJobProgress(14 + pct * 0.70, "動画をアップロード中…" + (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
+      if (!isMulti) {
+        showJobProgress(14, "動画をアップロード中… 0%");
+        return uploadFileChunked(user, repo, token, videoFile, videoAssetName(videoFile.name), videoFile.name, function (pct, label) {
+          showJobProgress(14 + pct * 0.70, "動画をアップロード中…" + (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
+        }).then(function (result) {
+          videoTreeEntries = result.entries;
+          if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+        });
+      }
+      // 複数クリップ：クリップごとに順番にアップロードする（アセット名はclipVideoAssetNameで
+      // project.json の各clip.videoと必ず一致させる。並列にしないのは単一動画時と同じ理由
+      // ＝GitHub APIへの同時リクエスト過多と進捗表示合成の複雑化を避けるため）
+      var perClipShare = 70 / appState.clips.length;
+      var chain = Promise.resolve();
+      appState.clips.forEach(function (clip, i) {
+        chain = chain.then(function () {
+          var assetName = clipVideoAssetName(i, clip.videoFileName);
+          return uploadFileChunked(user, repo, token, clip.videoFile, assetName, clip.videoFileName, function (pct, label) {
+            var overall = 14 + i * perClipShare + (pct / 100) * perClipShare;
+            showJobProgress(overall, "動画をアップロード中…（クリップ " + (i + 1) + "/" + appState.clips.length + "）" +
+              (label ? "（" + label + "）" : "") + " " + Math.round(pct) + "%");
+          }).then(function (result) {
+            videoTreeEntries = videoTreeEntries.concat(result.entries);
+            if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+          });
+        });
       });
+      return chain;
     })
-    .then(function (result) {
-      videoTreeEntries = result.entries;
-      if (result.manifestEntry) manifestFileEntries.push(result.manifestEntry);
+    .then(function () {
       if (!logoFile) return null;
       showJobProgress(84, "ロゴ画像をアップロード中… 0%");
       return uploadFileChunked(user, repo, token, logoFile, logoAssetName(logoFile.name), logoFile.name, function (pct, label) {
@@ -9385,6 +9871,11 @@ function runMakeVideoJobUpload() {
     .then(function () {
       // サーバー確認済みのフリーズがあれば、そのアルファキャッシュを本番jobブランチへ
       // 同梱する（モデルの再実行を防ぐ）。無ければ即座に空配列で解決する。
+      // 複数クリップ時はこの引き継ぎを行わない：render_multi_clip は各クリップをトリム後の
+      // 一時ファイル名（clip_00_normalized等）でレンダリングするため、"video_<time>.npz"
+      // 固定のキャッシュパスが一致しない（render.py側の対応が別途必要）。安全側に倒し、
+      // 常にモデルの再実行にフォールバックさせる（結果は正しいが確認済みの高速化は効かない）。
+      if (isMulti) return [];
       showJobProgress(87.5, "確認済みの切り抜き結果を引き継いでいます…");
       return reuseConfirmedAlphaForFreezes(
         user, repo, token, appState.freezes, appState.videoFileName, resolveMaskModel(appState.maskModel),

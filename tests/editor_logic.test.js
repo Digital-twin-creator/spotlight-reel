@@ -2871,6 +2871,119 @@ test("maskTokenStatus: 4文字未満のトークンはそのまま表示する",
   assert.strictEqual(core.maskTokenStatus("ab"), "保存済み（トークン末尾 …ab）");
 });
 
+/* ---- 複数クリップ（clips[]） ---- */
+test("defaultTransitionOut: 既定はcut・0.4秒", () => {
+  assert.deepStrictEqual(core.defaultTransitionOut(), { type: "cut", sec: 0.4 });
+});
+test("resolveTransitionOut: 不正なtypeは既定(cut)にフォールバックする", () => {
+  assert.deepStrictEqual(core.resolveTransitionOut({ type: "nonsense", sec: 1.0 }), { type: "cut", sec: 1.0 });
+});
+test("resolveTransitionOut: 正常なtype/secはそのまま通す", () => {
+  assert.deepStrictEqual(core.resolveTransitionOut({ type: "crossfade", sec: 0.6 }), { type: "crossfade", sec: 0.6 });
+});
+test("resolveTransitionOut: 未指定/nullは既定値になる", () => {
+  assert.deepStrictEqual(core.resolveTransitionOut(null), core.defaultTransitionOut());
+  assert.deepStrictEqual(core.resolveTransitionOut(undefined), core.defaultTransitionOut());
+});
+test("resolveTransitionOut: secが小さすぎる/負の場合は最低値にクランプする", () => {
+  assert.strictEqual(core.resolveTransitionOut({ type: "cut", sec: -1 }).sec, 0.05);
+  assert.strictEqual(core.resolveTransitionOut({ type: "cut", sec: 0 }).sec, 0.05);
+});
+
+test("clipVideoAssetName: インデックスごとに一意な名前になり、拡張子は元ファイルから引き継ぐ", () => {
+  assert.strictEqual(core.clipVideoAssetName(0, "IMG_0001.MOV"), "clip0.mov");
+  assert.strictEqual(core.clipVideoAssetName(1, "b.mp4"), "clip1.mp4");
+  assert.strictEqual(core.clipVideoAssetName(2, "no_ext"), "clip2.mp4");
+});
+
+test("clampClipTrim: in/outを0以上・尺以内にクランプする", () => {
+  assert.deepStrictEqual(core.clampClipTrim(-1, 100, 10), { in: 0, out: 10 });
+  assert.deepStrictEqual(core.clampClipTrim(2, 5, 10), { in: 2, out: 5 });
+});
+test("clampClipTrim: outがnullなら「最後まで」として維持する", () => {
+  assert.deepStrictEqual(core.clampClipTrim(1, null, 10), { in: 1, out: null });
+});
+test("clampClipTrim: outがinより小さい/近すぎる場合は最低差分を確保する", () => {
+  const r = core.clampClipTrim(5, 5, 10);
+  // 内部は2桁に丸めるため、0.05ちょうどの比較は浮動小数の誤差で崩れうる。
+  // 「ほぼ0.05以上の間隔が確保されている」ことだけを見る。
+  assert.ok(r.out - r.in >= 0.049);
+});
+test("clampClipTrim: 尺が未確定(null)でもin/outの相対関係だけはクランプする", () => {
+  assert.deepStrictEqual(core.clampClipTrim(0, 20, null), { in: 0, out: 20 });
+});
+
+function sampleClip(overrides) {
+  return Object.assign({
+    videoFileName: "a.mp4", in: 0, out: null, duration: 12,
+    freezes: [{ id: "x", time: 1.5, name: "クリップ内フリーズ", strokes: [] }],
+    transitionOut: { type: "crossfade", sec: 0.5 }
+  }, overrides || {});
+}
+
+test("buildProjectJSON: clipsがあればproject.clipsを出力し、video/freezesキーは省略する", () => {
+  const state = sampleState();
+  state.clips = [sampleClip({ videoFileName: "a.mp4" }), sampleClip({ videoFileName: "b.mp4", transitionOut: { type: "cut", sec: 0.4 } })];
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.video, undefined);
+  assert.strictEqual(project.freezes, undefined);
+  assert.strictEqual(project.clips.length, 2);
+  assert.strictEqual(project.clips[0].video, "clip0.mp4");
+  assert.strictEqual(project.clips[1].video, "clip1.mp4");
+});
+
+test("buildProjectJSON: clipsが空ならこれまでどおり単一video/freezesを出力する（完全後方互換）", () => {
+  const state = sampleState();
+  state.clips = [];
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.video, "dummy_input.mp4");
+  assert.ok(Array.isArray(project.freezes));
+  assert.strictEqual(project.clips, undefined);
+});
+
+test("buildProjectJSON: 各クリップのin/out/transition_outが契約どおりに出力される", () => {
+  const state = sampleState();
+  state.clips = [
+    sampleClip({ videoFileName: "a.mp4", in: 1.2, out: 9.5, transitionOut: { type: "wipe", sec: 0.3 } }),
+    sampleClip({ videoFileName: "b.mp4", in: 0, out: null })
+  ];
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.clips[0].in, 1.2);
+  assert.strictEqual(project.clips[0].out, 9.5);
+  assert.deepStrictEqual(project.clips[0].transition_out, { type: "wipe", sec: 0.3 });
+  assert.strictEqual(project.clips[1].out, null);
+});
+
+test("buildProjectJSON: 各クリップのfreezesは、そのクリップ自身の配列からtime昇順で出力される", () => {
+  const state = sampleState();
+  state.clips = [
+    sampleClip({
+      videoFileName: "a.mp4",
+      freezes: [
+        { id: "b", time: 5, name: "後", strokes: [] },
+        { id: "a", time: 1, name: "先", strokes: [] }
+      ]
+    })
+  ];
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.clips[0].freezes.length, 2);
+  assert.strictEqual(project.clips[0].freezes[0].time, 1);
+  assert.strictEqual(project.clips[0].freezes[1].time, 5);
+});
+
+test("buildProjectJSON: style/logo/watermark/hashtagsはclips使用時もプロジェクト全体で共有される（クリップごとに分裂しない）", () => {
+  const state = sampleState();
+  state.logo = { imageName: "logo.png", at: "end" };
+  state.watermark = { enabled: true, imageName: "wm.png" };
+  state.hashtags = { enabled: true, text: "#test" };
+  state.clips = [sampleClip({ videoFileName: "a.mp4" }), sampleClip({ videoFileName: "b.mp4" })];
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.logo.image, "logo.png");
+  assert.strictEqual(project.watermark.image, "wm.png");
+  assert.strictEqual(project.hashtags.text, "#test");
+  assert.ok(project.style);
+});
+
 /* ---- まとめ ---- */
 console.log("");
 console.log(passed + " 件成功 / " + failures + " 件失敗");
