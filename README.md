@@ -699,7 +699,14 @@ frameworkはmacOS/iOS専用のフレームワークで、ubuntuランナー上�
   詳細は次項）。無効にしたい場合は `"shadow": null` または
   `"shadow": {"enabled": false}` を明示的に指定してください。詳細は
   [「影（`shadow`）演出」](#影shadow演出)を参照。
-- `output` を省略した場合は、元動画と同じ解像度・fpsで出力します。
+- `output.width`/`output.height` を省略した場合は、入力の向き・解像度に関わらず常に
+  **1080x1920（縦・SNS向け既定サイズ）** で出力します（元動画のサイズには合わせません）。
+  `output.fps` を省略した場合は元動画のfpsを使います。入力が出力より高解像度の場合
+  （ダウンスケール）は、`scale`フィルタにLanczosアルゴリズムを使い、縮小でボケた輪郭を
+  軽く補償するアンシャープマスク（強さ0.3程度）をかけます。
+- `output.quality`：出力のH.264エンコード品質。`"standard"`（crf20）/ `"high"`（crf17。
+  **既定・省略時**）/ `"best"`（crf15）のいずれか。数値が小さいほど高画質・ファイルサイズ大。
+  presetは品質段階に関わらず常に`slow`（フリーズ区間・hybrid区間の再エンコードを含む）。
 - 未知のキーは無視されます（将来の拡張用に安全に読み飛ばします）。
 - `freezes` は `render.py` 内部で `time` 順にソートしてから処理します。JSON内の記述順は問いません。
 - 新しいキー（`mono_contrast` / `background` / `background_options` / `mask_style` /
@@ -1174,7 +1181,8 @@ mp3/wavファイルを選ぶとこの形式が自動的に書き出されます�
 
 - フレームは1枚ずつ読み書きし、全フレームをメモリに保持しません。
 - 映像は `cv2.VideoWriter` を使わず、ffmpegへ rawvideo をパイプして
-  `libx264 / yuv420p / crf 20` でエンコードします（Colabで確実にH.264 MP4を出すため）。
+  `libx264 / yuv420p` でエンコードします（Colabで確実にH.264 MP4を出すため）。
+  crf/presetは `output.quality`（既定 `"high"` = crf17・preset常時`slow`）に従います。
 - 縦動画の回転メタデータを考慮し、表示上の向きでフレームを処理します。
 - 音声の切り貼り・ミックスは numpy で行い、最後に ffmpeg で映像と結合します。
   フレーム数→サンプル数の変換は `frames_to_samples()` に一本化し、境界計算の

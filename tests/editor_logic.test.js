@@ -417,6 +417,62 @@ test("parseProjectJSON: buildProjectJSONで高精度モデルを書き出し→�
   assert.strictEqual(loaded.maskModel, "birefnet-portrait");
 });
 
+/* ---- 画質段階(quality) ---- */
+test("buildProjectJSON: qualityが既定(high)ならoutput.qualityキー自体を省略する（後方互換）", () => {
+  const state = sampleState();
+  state.quality = "high";
+  state.outputMode = "original";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.output, undefined);
+});
+
+test("buildProjectJSON: qualityが未指定でもoutput.qualityキーを省略する（既定扱い）", () => {
+  const state = sampleState();
+  state.outputMode = "original";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.output, undefined);
+});
+
+test("buildProjectJSON: qualityがstandardならoutput.qualityを明示的に出力する", () => {
+  const state = sampleState();
+  state.quality = "standard";
+  state.outputMode = "original";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.output, { quality: "standard" });
+});
+
+test("buildProjectJSON: qualityがbestならoutput.qualityを明示的に出力する（output.width/heightと共存できる）", () => {
+  const state = sampleState();
+  state.quality = "best";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.output, { width: 1080, height: 1920, fps: 30, quality: "best" });
+});
+
+test("resolveQuality: 不明な値はDEFAULT_QUALITYにフォールバックする", () => {
+  assert.strictEqual(core.resolveQuality("ultra"), core.DEFAULT_QUALITY);
+  assert.strictEqual(core.resolveQuality(undefined), core.DEFAULT_QUALITY);
+});
+
+test("parseProjectJSON: output.qualityを読み込んでqualityとして復元する", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [], style: {},
+    output: { quality: "best" }
+  });
+  assert.strictEqual(loaded.quality, "best");
+});
+
+test("parseProjectJSON: output.qualityが無ければqualityは既定(high)になる", () => {
+  const loaded = core.parseProjectJSON({ version: 1, video: "x.mp4", freezes: [], style: {} });
+  assert.strictEqual(loaded.quality, core.DEFAULT_QUALITY);
+});
+
+test("parseProjectJSON: buildProjectJSONでstandardを書き出し→読み込むと同じ画質段階に往復できる", () => {
+  const state = sampleState();
+  state.quality = "standard";
+  const loaded = core.parseProjectJSON(core.buildProjectJSON(state));
+  assert.strictEqual(loaded.quality, "standard");
+});
+
 /* ---- 効果音ライブラリ（自分のmp3/wav、align位置合わせ） ---- */
 
 test("resolveSfxAlign: 未知の値・未指定は既定(start_at_landing)にフォールバックする", () => {

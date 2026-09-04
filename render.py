@@ -209,6 +209,56 @@ AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
 KEEP_LOOP_SEC = 0.5           # audio_during_freeze="keep" のときにループする長さ
 
+# output.width/height が省略された場合の既定出力解像度。入力の向き・解像度に
+# 関わらず常にこのサイズへ正規化する（縦長のSNS向け動画を主用途とするため。
+# 横動画を入力してもレターボックスで縦1080x1920に収める＝アスペクト比を保った
+# 縮小を優先する特別扱いはしない）。
+DEFAULT_OUTPUT_WIDTH = 1080
+DEFAULT_OUTPUT_HEIGHT = 1920
+
+# ダウンスケール時（入力解像度 > 出力解像度）に scale フィルタへ付けるアルゴリズムと、
+# 縮小でボケた輪郭を軽く補償するアンシャープマスクの強さ。等倍・拡大時は付けない
+# （ボケていない/元から解像度が足りない映像に無理な先鋭化をかけると破綻するため）。
+DOWNSCALE_FLAGS = "lanczos"
+DOWNSCALE_UNSHARP = "unsharp=5:5:0.3:5:5:0.0"
+
+# output.quality（省略時は"high"）→ 出力のH.264 crf値。数値が小さいほど高画質・大容量。
+# presetは品質段階に関わらずslow固定（フリーズ区間・hybrid区間を含む最終エンコードの
+# 既定をcrf17/slowへ引き上げた際、段階を分けても速度優先にする理由がないため）。
+QUALITY_CRF = {"standard": 20, "high": 17, "best": 15}
+DEFAULT_QUALITY = "high"
+DEFAULT_ENCODE_PRESET = "slow"
+
+
+def resolve_quality_crf(output_cfg):
+    """
+    project["output"]["quality"]（"standard"/"high"/"best"。省略時DEFAULT_QUALITY）から
+    crf値を求める。不明な値はDEFAULT_QUALITYにフォールバックする。
+    """
+    quality = (output_cfg or {}).get("quality") or DEFAULT_QUALITY
+    if quality not in QUALITY_CRF:
+        quality = DEFAULT_QUALITY
+    return QUALITY_CRF[quality]
+
+
+# 現在有効なcrf値（render()/render_multi_clip()の先頭でset_encode_quality()により
+# project["output"]["quality"]から設定される）。open_video_writer等の最終エンコード
+# 呼び出し箇所は、render()から見て何段も深い場所に散らばっており、呼び出し階層
+# 全体にcrfを引数として通すのは煩雑なため、_TIMING_LOGと同じ考え方でモジュール
+# レベルの状態として持たせている。
+_CURRENT_CRF = QUALITY_CRF[DEFAULT_QUALITY]
+
+
+def set_encode_quality(output_cfg):
+    """render()系のエントリポイントの先頭で、その回のcrfを確定させる。"""
+    global _CURRENT_CRF
+    _CURRENT_CRF = resolve_quality_crf(output_cfg)
+
+
+def current_crf():
+    return _CURRENT_CRF
+
+
 COLOR_SOURCES = ("brush", "auto")
 SHADOW_SOURCES = ("same", "brush", "auto")
 MASK_MODES = ("brush", "auto", "auto+brush")   # 後方互換専用（旧maskキー）。新JSONはcolor_sourceを使う
@@ -536,15 +586,23 @@ def normalize_frame_rate(video_path, target_fps, has_audio, tmpdir):
     return out_path
 
 
-def build_scale_filter(W, H, fps):
+def build_scale_filter(W, H, fps, src_w=None, src_h=None):
     """
     出力解像度・fpsに合わせるフィルタ。
     アスペクト比は保ったまま縮小し、余白は黒でパディング（レターボックス）する。
+
+    src_w/src_h（入力の表示上の解像度）を渡すと、それが出力サイズより大きい＝
+    縮小になる場合にのみ、scaleのアルゴリズムをLanczosにし、縮小でボケた輪郭を
+    軽く補償するアンシャープマスクを付け加える。src_w/src_h省略時・等倍/拡大時は
+    ffmpeg既定のscaleアルゴリズム（bilinear相当）のまま、シャープ化もしない。
     """
+    downscaling = bool(src_w and src_h and (src_w > W or src_h > H))
+    scale_flags = f":flags={DOWNSCALE_FLAGS}" if downscaling else ""
+    unsharp = f",{DOWNSCALE_UNSHARP}" if downscaling else ""
     return (f"fps={fps:.6f},"
-            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+            f"scale={W}:{H}:force_original_aspect_ratio=decrease{scale_flags},"
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"setsar=1")
+            f"setsar=1{unsharp}")
 
 
 def open_frame_reader(path, W, H, fps, start_time=0.0, allow_early_close=False):
@@ -560,11 +618,12 @@ def open_frame_reader(path, W, H, fps, start_time=0.0, allow_early_close=False):
     ログが紛らわしいため黙らせる）。
     """
     ffmpeg = find_exe("ffmpeg")
+    src_info = probe_video(path)
     cmd = [ffmpeg, "-v", "error"]
     if start_time > 0:
         cmd += ["-ss", f"{start_time:.6f}"]
     cmd += ["-i", path,
-           "-vf", build_scale_filter(W, H, fps),
+           "-vf", build_scale_filter(W, H, fps, src_info["width"], src_info["height"]),
            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
     stderr = subprocess.DEVNULL if allow_early_close else None
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, bufsize=10 ** 8)
@@ -585,9 +644,10 @@ def iter_frames(proc, W, H):
 def grab_frame_at(path, t, W, H, fps):
     """指定時刻のフレームを1枚だけ取り出す（--preview 用）"""
     ffmpeg = find_exe("ffmpeg")
+    src_info = probe_video(path)
     cmd = [ffmpeg, "-v", "error", "-ss", f"{max(t, 0.0):.6f}", "-i", path,
            "-frames:v", "1",
-           "-vf", build_scale_filter(W, H, fps),
+           "-vf", build_scale_filter(W, H, fps, src_info["width"], src_info["height"]),
            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
     out = subprocess.run(cmd, check=True, capture_output=True).stdout
     need = W * H * 3
@@ -598,7 +658,8 @@ def grab_frame_at(path, t, W, H, fps):
 
 def open_video_writer(out_path, W, H, fps, audio_wav):
     """
-    rawvideo を stdin で受け取り、H.264(yuv420p, crf20) の MP4 を書く ffmpeg を開く。
+    rawvideo を stdin で受け取り、H.264(yuv420p) の MP4 を書く ffmpeg を開く
+    （crf/presetはcurrent_crf()/DEFAULT_ENCODE_PRESET。既定crf17・preset slow）。
     音声wavがあれば2つ目の入力として一緒にmuxする。
     """
     ffmpeg = find_exe("ffmpeg")
@@ -607,7 +668,7 @@ def open_video_writer(out_path, W, H, fps, audio_wav):
            "-s", f"{W}x{H}", "-r", f"{fps:.6f}", "-i", "pipe:0"]
     if audio_wav:
         cmd += ["-i", audio_wav]
-    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+    cmd += ["-c:v", "libx264", "-preset", DEFAULT_ENCODE_PRESET, "-crf", str(current_crf()),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
     if audio_wav:
         cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
@@ -618,7 +679,7 @@ def open_video_writer(out_path, W, H, fps, audio_wav):
 def open_segment_video_writer(out_path, W, H, fps):
     """
     スマートレンダリング用：rawvideoをstdinで受け取り、音声無し・映像のみの
-    H.264(yuv420p, crf20)断片MP4を書くffmpegを開く（open_video_writerと同じ
+    H.264(yuv420p)断片MP4を書くffmpegを開く（open_video_writerと同じ
     エンコード設定。フリーズ区間の画素がフルレンダリングと一致することが前提のため）。
     """
     ffmpeg = find_exe("ffmpeg")
@@ -626,7 +687,7 @@ def open_segment_video_writer(out_path, W, H, fps):
            "-f", "rawvideo", "-pix_fmt", "bgr24",
            "-s", f"{W}x{H}", "-r", f"{fps:.6f}", "-i", "pipe:0",
            "-an",
-           "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+           "-c:v", "libx264", "-preset", DEFAULT_ENCODE_PRESET, "-crf", str(current_crf()),
            "-pix_fmt", "yuv420p",
            out_path]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -934,7 +995,7 @@ def extract_hybrid_segment(video_path, start_time, n_frames, out_path, W, H, fps
     if n_frames is not None:
         cmd += ["-frames:v", str(n_frames)]
     cmd += ["-an", "-r", f"{fps:.6f}", "-s", f"{W}x{H}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", DEFAULT_ENCODE_PRESET, "-crf", str(current_crf()), "-pix_fmt", "yuv420p",
             out_path]
     res = subprocess.run(cmd)
     if res.returncode != 0 or not os.path.exists(out_path):
@@ -5195,6 +5256,7 @@ def render(project, json_path, video_path, out_path, preview_path=None,
     fps = float(out_cfg.get("fps") or info["fps"])
     if fps <= 0:
         raise RuntimeError("出力サイズ/fpsが不正です。")
+    set_encode_quality(out_cfg)
 
     # --- 一時ディレクトリは、確認用PNGだけの場合も含めて関数を抜ける時に必ず片付ける ---
     tmpdir = tempfile.mkdtemp(prefix="spotlight_")
@@ -5206,8 +5268,8 @@ def render(project, json_path, video_path, out_path, preview_path=None,
             video_path = normalize_frame_rate(video_path, fps, info["has_audio"], tmpdir)
             info = probe_video(video_path)
 
-        W = even(out_cfg.get("width") or info["width"])
-        H = even(out_cfg.get("height") or info["height"])
+        W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
+        H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
         if W <= 0 or H <= 0:
             raise RuntimeError("出力サイズ/fpsが不正です。")
 
@@ -5536,7 +5598,7 @@ def prepare_clip_video(video_path, in_t, out_t, W, H, fps, out_path):
     if out_t is not None:
         dur = max(0.0, out_t - in_t)
         cmd += ["-t", f"{dur:.6f}"]
-    cmd += ["-vf", build_scale_filter(W, H, fps), "-vsync", "cfr",
+    cmd += ["-vf", build_scale_filter(W, H, fps, info["width"], info["height"]), "-vsync", "cfr",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"]
     if info["has_audio"]:
         cmd += ["-c:a", "aac", "-b:a", "256k"]
@@ -5597,7 +5659,7 @@ def merge_clip_pair(a_path, b_path, transition, out_path, fps):
     )
     cmd = [ffmpeg, "-y", "-v", "error", "-i", a_path, "-i", b_path,
            "-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:v", "libx264", "-preset", DEFAULT_ENCODE_PRESET, "-crf", str(current_crf()), "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", out_path]
     res = subprocess.run(cmd)
     if res.returncode != 0 or not os.path.exists(out_path):
@@ -5633,8 +5695,8 @@ def prepare_multi_clip_normalized(project, json_path, tmpdir):
 
     first_info = probe_video(clip_video_paths[0])
     fps = float(out_cfg.get("fps") or first_info["fps"])
-    W = even(out_cfg.get("width") or first_info["width"])
-    H = even(out_cfg.get("height") or first_info["height"])
+    W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
+    H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
     if fps <= 0 or W <= 0 or H <= 0:
         raise RuntimeError("出力サイズ/fpsが不正です。")
 
@@ -5659,7 +5721,7 @@ def clip_project_for(project, clips, i, norm_path, W, H, fps):
     return {
         "raw": {},
         "video": norm_path,
-        "output": {"width": W, "height": H, "fps": fps},
+        "output": {"width": W, "height": H, "fps": fps, "quality": (project["output"] or {}).get("quality")},
         "style": project["style"],
         "freezes": clips[i]["freezes"],
         "logo": project["logo"] if i == len(clips) - 1 else None,
@@ -5786,7 +5848,10 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
             })
 
         # --- クリップ間の遷移を挟んで結合（先頭から順に、累積結果へ次のクリップを
-        #     マージしていく） ---
+        #     マージしていく）。各クリップのrender()呼び出しで既にcurrent_crf()は
+        #     project["output"]["quality"]から設定済みだが、念のためここでも
+        #     明示しておく（merge_clip_pairはrender()を経由しないため） ---
+        set_encode_quality(project["output"])
         merged = clip_outputs[0]
         for i in range(1, n):
             transition = clips[i - 1]["transition_out"]

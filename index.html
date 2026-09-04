@@ -921,6 +921,14 @@
           <option value="720x1280">720 x 1280</option>
         </select>
       </div>
+      <div class="field">
+        <label>画質</label>
+        <select id="qualitySelect">
+          <option value="standard">標準(crf20)</option>
+          <option value="high">高(crf17)</option>
+          <option value="best">最高(crf15)</option>
+        </select>
+      </div>
     </div>
   </details>
 
@@ -1506,6 +1514,17 @@ var RVM_MODEL_NAME = "rvm-mobilenetv3";
 var MASK_PREVIEW_CLIP_PRE_SEC = 1.5;
 var MASK_PREVIEW_CLIP_FPS = 12;
 var MASK_PREVIEW_CLIP_LONG_EDGE_PX = 480;
+/**
+ * 出力画質の段階（render.pyのQUALITY_CRFのキーと同じ3値）。
+ * output.quality省略時の既定値はrender.py側もDEFAULT_QUALITY="high"のため、
+ * "high"を選んでいる間はJSONにoutput.qualityキーを出さない（後方互換・JSONの見た目維持）。
+ */
+var QUALITY_LEVELS = ["standard", "high", "best"];
+var DEFAULT_QUALITY = "high";
+function resolveQuality(q) {
+  return QUALITY_LEVELS.indexOf(q) >= 0 ? q : DEFAULT_QUALITY;
+}
+
 /** ライブラリの効果音（自分のmp3/wav）を使うときの位置合わせ（render.pyのSFX_ALIGNS_FREEZE/LOGOと同じ） */
 var SFX_ALIGNS_FREEZE = ["start_at_landing", "end_at_landing"];
 var SFX_ALIGNS_LOGO = ["start_at_landing", "peak_at_landing"];
@@ -1903,6 +1922,13 @@ function buildProjectJSON(state) {
   }
   if (preset) {
     project.output = { width: preset.width, height: preset.height, fps: 30 };
+  }
+  // output.quality は既定（"high"）のときは省略する（JSONの見た目を変えない＝完全後方互換）。
+  // 既定以外を選んだ場合のみproject.outputを（無ければ新設して）明示的に書き出す。
+  var quality = resolveQuality(state.quality);
+  if (quality !== DEFAULT_QUALITY) {
+    project.output = project.output || {};
+    project.output.quality = quality;
   }
   // mask_options.model は既定（isnet-general-use）のときは省略する（JSONの見た目を変えない＝
   // 完全後方互換）。既定以外（高精度モデル）を選んだ場合のみ明示的に書き出す。
@@ -2361,6 +2387,7 @@ function parseProjectJSON(json, sfxLibrary) {
   return {
     videoFileName: json.video || "",
     outputMode: matchOutputPreset(json.output),
+    quality: resolveQuality(json.output && json.output.quality),
     revealSec: revealSec,
     slideSec: slideSec,
     holdSec: holdSec,
@@ -3847,6 +3874,9 @@ if (typeof module !== "undefined" && module.exports) {
     MASK_PREVIEW_CLIP_PRE_SEC: MASK_PREVIEW_CLIP_PRE_SEC,
     MASK_PREVIEW_CLIP_FPS: MASK_PREVIEW_CLIP_FPS,
     resolveMaskModel: resolveMaskModel,
+    QUALITY_LEVELS: QUALITY_LEVELS,
+    DEFAULT_QUALITY: DEFAULT_QUALITY,
+    resolveQuality: resolveQuality,
     SFX_ALIGNS_FREEZE: SFX_ALIGNS_FREEZE,
     SFX_ALIGNS_LOGO: SFX_ALIGNS_LOGO,
     SFX_ALIGN_DEFAULT: SFX_ALIGN_DEFAULT,
@@ -4127,6 +4157,7 @@ var appState = {
   videoFileName: "",
   videoFile: null,
   outputMode: "original",
+  quality: DEFAULT_QUALITY,
   sfxLibrary: [],  // reloadSfxLibrary()が起動時・登録/削除のたびに同期する（buildProjectJSON用）
   revealSec: REVEAL_SEC_DEFAULT,
   slideSec: SLIDE_SEC_DEFAULT,
@@ -4346,7 +4377,7 @@ function init() {
     "shadowEnabledCheckbox", "shadowOptionsBody", "shadowColorWheel", "shadowColorInput", "shadowColorNameLabel",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
-    "outputModeSelect",
+    "outputModeSelect", "qualitySelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName",
     "logoAutoTransparentBgCheckbox", "logoAutoTransparentPreviewCanvas", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHexInput", "logoColorNameLabel",
@@ -4732,6 +4763,11 @@ function init() {
   });
   els.outputModeSelect.addEventListener("change", function () {
     appState.outputMode = els.outputModeSelect.value;
+    saveToLocalStorage();
+  });
+
+  els.qualitySelect.addEventListener("change", function () {
+    appState.quality = resolveQuality(els.qualitySelect.value);
     saveToLocalStorage();
   });
 
@@ -8880,6 +8916,7 @@ function applySettingsToInputs() {
   els.safeZoneBottomValue.textContent = String(appState.safeZone.bottom);
   els.showSafeZoneCheckbox.checked = !!appState.showSafeZone;
   els.outputModeSelect.value = appState.outputMode;
+  els.qualitySelect.value = resolveQuality(appState.quality);
   applyLogoSettingsToInputs();
   applyWatermarkSettingsToInputs();
   applyHashtagsSettingsToInputs();
@@ -9026,6 +9063,7 @@ function buildLocalStoragePayload(dropThumbs) {
     shadowBlurRatio: appState.shadowBlurRatio,
     shadowSource: appState.shadowSource,
     outputMode: appState.outputMode,
+    quality: appState.quality,
     freezes: dropThumbs
       ? appState.freezes.map(function (fz) {
           var copy = Object.assign({}, fz);
@@ -9137,6 +9175,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blur);
     appState.shadowSource = resolveShadowSource(data.shadowSource);
     appState.outputMode = data.outputMode || "original";
+    appState.quality = resolveQuality(data.quality);
     appState.freezes = Array.isArray(data.freezes) ? data.freezes : [];
     appState.logo = (data.logo && data.logo.imageName) ? {
       imageFile: null,
