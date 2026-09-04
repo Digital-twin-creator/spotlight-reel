@@ -303,10 +303,39 @@ def even(n):
 # プロジェクトJSONの読み込み
 # ---------------------------------------------------------------------------
 
+TRANSITION_TYPES = ("cut", "fade_black", "crossfade", "wipe")
+DEFAULT_TRANSITION_TYPE = "cut"
+DEFAULT_TRANSITION_SEC = 0.4
+
+
+def resolve_transition(raw):
+    """
+    クリップ間の遷移（clips[i].transition_out）を解決する。
+    {"type": "cut"|"fade_black"|"crossfade"|"wipe", "sec": 秒数} 。
+    無指定・未知の値はcut（既定）にフォールバックする。
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    t = raw.get("type") or DEFAULT_TRANSITION_TYPE
+    if t not in TRANSITION_TYPES:
+        warn(f"transition_out.type='{t}' は未知の値です。'{DEFAULT_TRANSITION_TYPE}' として扱います。")
+        t = DEFAULT_TRANSITION_TYPE
+    sec_raw = raw.get("sec")
+    sec = max(0.0, float(sec_raw)) if sec_raw is not None else DEFAULT_TRANSITION_SEC
+    return {"type": t, "sec": sec}
+
+
 def load_project(json_path):
     """
     プロジェクトJSONを読み、style の既定値を各 freeze にマージした状態で返す。
     未知のキーは無視する（将来の拡張に備えて壊れないようにする）。
+
+    clips（[{video,in,out,freezes,transition_out}, ...]）が指定されていれば、
+    それを正としてproject["clips"]に格納する（各クリップのfreezesも、単一video時と
+    同じ規則でstyleをマージ済み）。clipsが無ければ、従来のvideo/freezesを1クリップ
+    として扱う（project["clips"]は常に1件以上のリストになるため、呼び出し側は
+    clipsの有無で分岐する必要が無い）。project["video"]/["freezes"]は、clipsの
+    有無によらず常に従来どおりの値を保つ（完全後方互換。単一video系の既存コード・
+    テスト・--previewはこちらを見続ける）。
     """
     with open(json_path, "r", encoding="utf-8") as f:
         proj = json.load(f)
@@ -319,21 +348,53 @@ def load_project(json_path):
     # （auto_contrastによる座布団への自動格上げを許すかどうかの判定に使う）
     style_backing_explicit = "text_backing" in style_raw
 
-    freezes = []
-    for fz in (proj.get("freezes") or []):
-        merged = dict(style)          # style を既定値として
-        merged.update(fz)             # freeze 側のキーで上書き
-        merged["strokes"] = fz.get("strokes") or []
-        merged["time"] = float(fz.get("time", 0.0))
-        merged["name"] = fz.get("name", "")
-        merged["sfx"] = fz.get("sfx")
-        # style または freeze のどちらかで text_backing が明示されていれば
-        # このfreezeの行はauto_contrastによる格上げの対象外にする
-        merged["text_backing_explicit"] = style_backing_explicit or ("text_backing" in fz)
-        freezes.append(merged)
+    def merge_freezes(raw_freezes):
+        merged_list = []
+        for fz in (raw_freezes or []):
+            merged = dict(style)          # style を既定値として
+            merged.update(fz)             # freeze 側のキーで上書き
+            merged["strokes"] = fz.get("strokes") or []
+            merged["time"] = float(fz.get("time", 0.0))
+            merged["name"] = fz.get("name", "")
+            merged["sfx"] = fz.get("sfx")
+            # style または freeze のどちらかで text_backing が明示されていれば
+            # このfreezeの行はauto_contrastによる格上げの対象外にする
+            merged["text_backing_explicit"] = style_backing_explicit or ("text_backing" in fz)
+            merged_list.append(merged)
+        # 必ず time 順に処理する
+        merged_list.sort(key=lambda f: f["time"])
+        return merged_list
 
-    # 必ず time 順に処理する
-    freezes.sort(key=lambda f: f["time"])
+    freezes = merge_freezes(proj.get("freezes"))
+
+    raw_clips = proj.get("clips")
+    if raw_clips:
+        clips = []
+        for i, raw_clip in enumerate(raw_clips):
+            clip_video = raw_clip.get("video")
+            if not clip_video:
+                raise RuntimeError(f"clips[{i}] に video が指定されていません。")
+            in_t = max(0.0, float(raw_clip.get("in", 0.0)))
+            out_raw = raw_clip.get("out")
+            out_t = float(out_raw) if out_raw is not None else None
+            if out_t is not None and out_t <= in_t:
+                raise RuntimeError(f"clips[{i}] の out（{out_t}）が in（{in_t}）以下です。")
+            clips.append({
+                "video": clip_video,
+                "in": in_t,
+                "out": out_t,
+                "freezes": merge_freezes(raw_clip.get("freezes")),
+                "transition_out": resolve_transition(raw_clip.get("transition_out")),
+            })
+    else:
+        # 従来の単一video形式を1クリップとして扱う（後方互換）
+        clips = [{
+            "video": proj.get("video"),
+            "in": 0.0,
+            "out": None,
+            "freezes": freezes,
+            "transition_out": resolve_transition(None),
+        }]
 
     return {
         "raw": proj,
@@ -341,6 +402,7 @@ def load_project(json_path):
         "output": proj.get("output") or {},
         "style": style,
         "freezes": freezes,
+        "clips": clips,
         "logo": proj.get("logo"),   # 無指定ならNone（ロゴ演出なし）
         "watermark": proj.get("watermark"),  # 無指定ならNone（透かしロゴなし）
         "hashtags": proj.get("hashtags"),    # 無指定ならNone（ハッシュタグ表示なし）
@@ -793,7 +855,8 @@ def build_watermark_loop_symlinks(seq_asset, start_time, tmpdir):
 
 
 def extract_hybrid_segment(video_path, start_time, n_frames, out_path, W, H, fps,
-                            watermark_asset=None, hashtags_asset=None, tmpdir=None):
+                            watermark_asset=None, hashtags_asset=None, tmpdir=None,
+                            watermark_time=None):
     """
     素通し区間を、無劣化コピー（-c copy）ではなく実際にデコードし、ffmpegのoverlay
     フィルタでwatermark/hashtagsを合成した上でlibx264に再エンコードして書き出す
@@ -812,8 +875,16 @@ def extract_hybrid_segment(video_path, start_time, n_frames, out_path, W, H, fps
     start_time/n_framesの意味・制約はextract_copy_segmentと同じ（n_frames=Noneで
     末尾まで）。ただしこちらは実デコードするため、キーフレーム境界である必要は無い。
 
+    watermark_time: watermarkの位相計算（build_watermark_loop_symlinks）に使う
+    「絶対時刻」。省略時はstart_timeをそのまま使う（単一動画の場合はクリップ内時刻＝
+    絶対時刻で一致するため従来どおり）。複数クリップ結合時は、このクリップ単体の
+    start_time（動画ファイル内のシーク時刻）と、動画全体（全クリップ通し）での
+    絶対時刻がずれるため、呼び出し側（render_video_hybrid）が別途計算した値を渡す。
+
     戻り値: 実際に書き出せたフレーム数（decode-based probe_segment_frame_countで検証）。
     """
+    if watermark_time is None:
+        watermark_time = start_time
     ffmpeg = find_exe("ffmpeg")
     cmd = [ffmpeg, "-y", "-v", "error", "-ss", f"{start_time:.6f}", "-i", video_path]
 
@@ -828,7 +899,7 @@ def extract_hybrid_segment(video_path, start_time, n_frames, out_path, W, H, fps
             extra_inputs += ["-loop", "1", "-i", watermark_asset["path"]]
             filter_parts.append(f"[{next_idx}:v]format=rgba[wm]")
         else:
-            seq_dir, pattern = build_watermark_loop_symlinks(watermark_asset, start_time, tmpdir)
+            seq_dir, pattern = build_watermark_loop_symlinks(watermark_asset, watermark_time, tmpdir)
             frame_count = watermark_asset["frame_count"]
             extra_inputs += ["-framerate", f"{fps:.6f}", "-i", os.path.join(seq_dir, pattern)]
             filter_parts.append(
@@ -4917,7 +4988,8 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
                          logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
                          logo_blackout_frames, logo_total_frames,
                          hashtags_cfg, watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg,
-                         watermark_asset, hashtags_asset, hashtags_playback_layer, total_out):
+                         watermark_asset, hashtags_asset, hashtags_playback_layer, total_out,
+                         watermark_time_offset=0.0):
     """
     hybridレンダリング本体：常時表示のwatermark/hashtags.alwaysがあり無劣化コピー
     （smart）が使えない場合に、素通し区間をPythonの1フレームずつの処理ではなく
@@ -4944,6 +5016,11 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
 
     音声（wav_path）は呼び出し側ですでに構築済みのものを最後にmuxするだけ
     （render_video_smartと同じ方針）。
+
+    watermark_time_offset: 複数クリップを結合する場合、このクリップの動画内時刻
+    （0起点）と、動画全体（全クリップ通し）での絶対時刻がずれるため、watermarkの
+    位相計算にだけ使う絶対時刻オフセット（このクリップの動画内時刻に加算する）。
+    単一動画の場合は0.0（従来どおり）。
     戻り値: (ffmpegフィルタ合成した秒数, Pythonで再エンコードした秒数)
     """
     groups = []
@@ -4966,7 +5043,8 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
             seg_i += 1
             actual = extract_hybrid_segment(video_path, cur / fps, target_idx - cur, seg_path,
                                              W, H, fps, watermark_asset=watermark_asset,
-                                             hashtags_asset=hashtags_asset, tmpdir=tmpdir)
+                                             hashtags_asset=hashtags_asset, tmpdir=tmpdir,
+                                             watermark_time=watermark_time_offset + cur / fps)
             passthrough_frames += actual
             cur += actual
             parts.append(seg_path)
@@ -4996,7 +5074,8 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
             own_frame = np.ascontiguousarray(seed_frame)
             if watermark_bgr is not None:
                 own_frame = render_watermark_frame(own_frame, watermark_bgr, watermark_alpha,
-                                                     watermark_luma, W, H, cur / fps, watermark_cfg)
+                                                     watermark_luma, W, H,
+                                                     watermark_time_offset + cur / fps, watermark_cfg)
             if hashtags_playback_layer is not None:
                 own_frame = blend_telop(own_frame, hashtags_playback_layer["bgr"],
                                          hashtags_playback_layer["alpha"], 1.0)
@@ -5019,7 +5098,8 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
         # 同じ理由。コメント参照）。
         actual = extract_hybrid_segment(video_path, cur / fps, src_frames - cur, seg_path, W, H, fps,
                                          watermark_asset=watermark_asset, hashtags_asset=hashtags_asset,
-                                         tmpdir=tmpdir)
+                                         tmpdir=tmpdir,
+                                         watermark_time=watermark_time_offset + cur / fps)
         passthrough_frames += actual
         parts.append(seg_path)
         cur += actual
@@ -5086,8 +5166,17 @@ def render_video_hybrid(video_path, out_path, W, H, fps, src_frames, plans,
 
 
 def render(project, json_path, video_path, out_path, preview_path=None,
-           extract_frames_for=None, extract_frames_out=None, mode="auto"):
-    """プロジェクト定義に従って1本のMP4（または確認用PNG）を作る"""
+           extract_frames_for=None, extract_frames_out=None, mode="auto",
+           watermark_time_offset=0.0):
+    """
+    プロジェクト定義に従って1本のMP4（または確認用PNG）を作る。
+
+    watermark_time_offset: render_multi_clip（複数クリップ結合）が、このクリップの
+    動画内時刻（0起点）と動画全体（全クリップ通し）での絶対時刻のずれを補正するために
+    渡す秒数。watermarkのshine/spinの位相計算にのみ使い、フリーズ内部の時計・
+    末尾ロゴ演出の時計には影響しない（render_video_hybridのdocstring参照）。
+    単一クリップ（CLIからの通常呼び出し）では常に0.0。
+    """
     _TIMING_LOG.clear()
     render_start = time.time()
     json_dir = os.path.dirname(os.path.abspath(json_path))
@@ -5286,7 +5375,8 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                 tmpdir, wav_path, logo_at, logo_bgr, logo_alpha, logo_luma, logo_params, logo_bg_color,
                 logo_blackout_frames, logo_total_frames, hashtags_cfg,
                 watermark_bgr, watermark_alpha, watermark_luma, watermark_cfg,
-                watermark_asset, hashtags_asset, hashtags_playback_layer, total_out)
+                watermark_asset, hashtags_asset, hashtags_playback_layer, total_out,
+                watermark_time_offset=watermark_time_offset)
             log(f"完成: {out_path}  （hybridレンダリング: ffmpegフィルタ合成{copied_seconds:.2f}秒 / "
                 f"再エンコード{reencoded_seconds:.2f}秒 / 合計{total_out / fps:.2f}秒）")
             _write_timing_summary(time.time() - render_start, render_mode="hybrid", mode_reason="",
@@ -5301,8 +5391,10 @@ def render(project, json_path, video_path, out_path, preview_path=None,
         written = 0
         last_out_frame = None
         # 通常再生（フリーズ・ロゴ演出以外）の透かしロゴ用の簡易時計（動画全体で1つ、
-        # フリーズ内部の時計とは別。iter_freeze_frames/末尾ロゴ演出はそれぞれ自前で持つ）
-        wm_playback_t = 0.0
+        # フリーズ内部の時計とは別。iter_freeze_frames/末尾ロゴ演出はそれぞれ自前で持つ）。
+        # watermark_time_offsetが0でなければ（複数クリップ結合時）、このクリップの
+        # 動画内時刻ではなく全体の絶対時刻から時計を始める
+        wm_playback_t = watermark_time_offset
         # hashtags.always=trueの場合だけ、フリーズ以外の通常再生にも重ねる（フリーズ中は
         # iter_freeze_frames側がalwaysの値によらず常に表示する）
         hashtags_playback_layer = None
@@ -5389,6 +5481,241 @@ def render(project, json_path, video_path, out_path, preview_path=None,
             print(f"[debug] tmpdir kept: {tmpdir}")
 
 
+# ---------------------------------------------------------------------------
+# 複数クリップ（clips[]）の結合
+#
+# 各クリップは、既存のrender()（smart/hybrid/full振り分け・フリーズ・
+# watermark/hashtags・ロゴをすべてそのまま含む）を1本の独立した動画として
+# そのまま呼び出してレンダリングする（クリップ内部の処理は一切変更しない）。
+# render_multi_clipはその「外側」の処理だけを担う:
+#   1. 各クリップをin/outでトリムし、出力解像度/fpsへ正規化（prepare_clip_video）
+#   2. 各クリップを個別にrender()でレンダリング（ラストロゴは最後のクリップにだけ
+#      project["logo"]を渡すことで、全体の末尾に1回だけ出るようにする）
+#   3. クリップ間をffmpegのxfade/acrossfadeフィルタでtransition_out通りに結合
+#      （merge_clip_pairで2本ずつ、先頭から順に結合していく）
+# watermarkの周期位相を全クリップを通して連続させるため、各クリップのrender()
+# 呼び出しに、そのクリップの最終タイムライン上での開始時刻（前のクリップまでの
+# 尺の累計－遷移で重なった秒数）をwatermark_time_offsetとして渡す。
+# ---------------------------------------------------------------------------
+
+def probe_duration(path):
+    """動画ファイルの尺（秒）をffprobeで取得する"""
+    ffprobe = find_exe("ffprobe")
+    cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path]
+    out = subprocess.run(cmd, capture_output=True).stdout.decode().strip()
+    return float(out) if out else 0.0
+
+
+def prepare_clip_video(video_path, in_t, out_t, W, H, fps, out_path):
+    """
+    クリップ（clips[i]）をin/outでトリムし、出力解像度・fpsに正規化した動画ファイルを
+    作る（render_multi_clipが、この結果をあたかも独立した1本の動画であるかのように
+    render()へそのまま渡す）。build_scale_filter（レターボックス方式。VFR正規化・
+    既存の出力整形と同じ）で解像度・fpsを揃える。
+
+    -ss（トリム開始）は-iより前に指定するが、後段で実際に再エンコードするため
+    （-c copyしない）、出力は要求した時刻から正確に始まる（ffmpegの高速シーク＋
+    再エンコードの標準的な挙動。キーフレームまで戻ってデコードし直すため、
+    指定した秒数ちょうどから出力される）。
+    """
+    ffmpeg = find_exe("ffmpeg")
+    info = probe_video(video_path)
+    cmd = [ffmpeg, "-y", "-v", "error"]
+    if in_t > 0:
+        cmd += ["-ss", f"{in_t:.6f}"]
+    cmd += ["-i", video_path]
+    if out_t is not None:
+        dur = max(0.0, out_t - in_t)
+        cmd += ["-t", f"{dur:.6f}"]
+    cmd += ["-vf", build_scale_filter(W, H, fps), "-vsync", "cfr",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"]
+    if info["has_audio"]:
+        cmd += ["-c:a", "aac", "-b:a", "256k"]
+    else:
+        cmd += ["-an"]
+    cmd += [out_path]
+    res = subprocess.run(cmd)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"クリップのトリム・正規化に失敗しました: {video_path}")
+    return out_path
+
+
+# xfadeフィルタの遷移タイプへのマッピング。cut/crossfadeはどちらもffmpeg側は"fade"
+# （単純なディゾルブ）だが、cutはCUT_TRANSITION_SECという非常に短い時間で行うことで
+# 見た目には瞬時の切り替わりに見せる（音声側だけ短くクロスフェードしてクリック音を
+# 防ぐのが目的で、映像側も同じ仕組みに統一することで実装を一本化している）。
+XFADE_TYPES = {"cut": "fade", "fade_black": "fadeblack", "crossfade": "fade", "wipe": "wipeleft"}
+CUT_TRANSITION_SEC = 0.01
+
+
+def transition_blend_sec(transition):
+    """遷移の実際のブレンド秒数（cutは常にCUT_TRANSITION_SEC固定）"""
+    if transition["type"] == "cut":
+        return CUT_TRANSITION_SEC
+    return max(0.001, transition["sec"])
+
+
+def merge_clip_pair(a_path, b_path, transition, out_path):
+    """
+    2本の動画（すでにそれぞれレンダリング済み・同じ解像度/fps。音声はrender()が
+    常に付与するため両方に必ず存在する）を、transition（resolve_transitionの
+    戻り値）に従って1本に結合する。
+    映像はffmpegのxfadeフィルタ、音声はacrossfadeフィルタを使う（どちらも
+    「2本の動画をブレンドしながら繋ぐ」ためのffmpeg組み込みフィルタ）。
+    """
+    xfade_type = XFADE_TYPES[transition["type"]]
+    sec = transition_blend_sec(transition)
+    dur_a = probe_duration(a_path)
+    offset = max(0.0, dur_a - sec)
+
+    ffmpeg = find_exe("ffmpeg")
+    filter_complex = (
+        f"[0:v][1:v]xfade=transition={xfade_type}:duration={sec:.6f}:offset={offset:.6f}[v];"
+        f"[0:a][1:a]acrossfade=d={sec:.6f}[a]"
+    )
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", a_path, "-i", b_path,
+           "-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "192k", out_path]
+    res = subprocess.run(cmd)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"クリップ間の遷移（{transition['type']}）の合成に失敗しました。")
+    return out_path
+
+
+def render_multi_clip(project, json_path, out_path, mode="auto"):
+    """
+    複数クリップ（project["clips"]。load_project()により常に1件以上のリストに
+    正規化済み）を1本のMP4に結合してレンダリングする。
+
+    各クリップは既存のrender()をそのまま呼び出してレンダリングする（smart/hybrid/full
+    振り分け・フリーズ・watermark/hashtagsは一切変更しない）。ラストロゴ
+    （project["logo"]。at="end"/"last_freeze"のどちらでも）は最後のクリップにだけ
+    渡すことで、全体の末尾に1回だけ表示されるようにする（それ以外のクリップの
+    project["logo"]はNone）。
+
+    出力解像度・fpsはproject["output"]（無ければ1本目のクリップ）に揃え、全クリップを
+    build_scale_filterで正規化してからレンダリングする。クリップ間はclips[i].
+    transition_outに従ってffmpegのxfade/acrossfadeフィルタで結合する。
+    """
+    clips = project["clips"]
+    n = len(clips)
+    json_dir = os.path.dirname(os.path.abspath(json_path))
+    out_cfg = project["output"] or {}
+
+    tmpdir = tempfile.mkdtemp(prefix="spotlight_multiclip_")
+    render_start = time.time()
+    try:
+        clip_video_paths = []
+        for i, c in enumerate(clips):
+            p = resolve_path(c["video"], [os.getcwd(), json_dir, SCRIPT_DIR])
+            if not os.path.exists(p):
+                raise RuntimeError(f"clips[{i}]の動画が見つかりません: {c['video']}")
+            clip_video_paths.append(p)
+
+        first_info = probe_video(clip_video_paths[0])
+        fps = float(out_cfg.get("fps") or first_info["fps"])
+        W = even(out_cfg.get("width") or first_info["width"])
+        H = even(out_cfg.get("height") or first_info["height"])
+        if fps <= 0 or W <= 0 or H <= 0:
+            raise RuntimeError("出力サイズ/fpsが不正です。")
+
+        log(f"複数クリップ結合: {n}本のクリップを {W}x{H} {fps:.3f}fps へ正規化して結合します")
+
+        # --- 各クリップをin/outでトリム＋解像度/fps正規化 ---
+        normalized_paths = []
+        for i, (c, src_path) in enumerate(zip(clips, clip_video_paths)):
+            norm_path = os.path.join(tmpdir, f"clip_{i:02d}_normalized.mp4")
+            prepare_clip_video(src_path, c["in"], c["out"], W, H, fps, norm_path)
+            normalized_paths.append(norm_path)
+
+        # --- 各クリップを個別にレンダリングする。watermarkの位相を全クリップを通して
+        #     連続させるため、各クリップのrender()呼び出しには、そのクリップが最終
+        #     タイムライン上で実際に始まる絶対時刻（watermark_time_offset）を渡す。
+        #     これは「前のクリップまでの実際にレンダリングされた尺の累計－遷移で重なった
+        #     秒数」で、1つ前のクリップを実際にレンダリングし終えて初めて分かる値のため
+        #     （フリーズ演出はクリップのトリム後の尺より出力を伸ばす。normalized_paths
+        #     （トリム直後、フリーズ挿入前）の尺ではなく、render()が実際に書き出した
+        #     クリップ単体の尺を使わないと、フリーズを含むクリップの直後で位相が
+        #     ズレてしまう）、1本ずつ順にレンダリングしながらその場で計算していく。 ---
+        clip_outputs = []
+        clip_timings = []
+        cumulative_time = 0.0
+        for i, (c, norm_path) in enumerate(zip(clips, normalized_paths)):
+            is_last = (i == n - 1)
+            watermark_time_offset = cumulative_time
+            clip_project = {
+                "raw": {},
+                "video": norm_path,
+                "output": {"width": W, "height": H, "fps": fps},
+                "style": project["style"],
+                "freezes": c["freezes"],
+                "logo": project["logo"] if is_last else None,
+                "watermark": project["watermark"],
+                "hashtags": project["hashtags"],
+            }
+            clip_json_path = os.path.join(tmpdir, f"clip_{i:02d}_project.json")
+            clip_out_path = os.path.join(tmpdir, f"clip_{i:02d}_rendered.mp4")
+            log(f"--- クリップ {i + 1}/{n} をレンダリング（{c['video']}） ---")
+            render(clip_project, clip_json_path, norm_path, clip_out_path, mode=mode,
+                   watermark_time_offset=watermark_time_offset)
+            clip_outputs.append(clip_out_path)
+            actual_clip_duration = probe_duration(clip_out_path)
+
+            if not is_last:
+                blend_sec = transition_blend_sec(clips[i]["transition_out"])
+                cumulative_time = watermark_time_offset + actual_clip_duration - blend_sec
+
+            clip_timing = {}
+            if os.path.exists(TIMING_JSON_NAME):
+                with open(TIMING_JSON_NAME, encoding="utf-8") as f:
+                    clip_timing = json.load(f)
+                os.remove(TIMING_JSON_NAME)
+            clip_timings.append({
+                "clip_index": i,
+                "video": c["video"],
+                "duration_seconds": round(actual_clip_duration, 2),
+                "render_mode": clip_timing.get("render_mode"),
+                "render_seconds": clip_timing.get("render_seconds"),
+            })
+
+        # --- クリップ間の遷移を挟んで結合（先頭から順に、累積結果へ次のクリップを
+        #     マージしていく） ---
+        merged = clip_outputs[0]
+        for i in range(1, n):
+            transition = clips[i - 1]["transition_out"]
+            merged_next = os.path.join(tmpdir, f"merged_{i:02d}.mp4")
+            log(f"--- クリップ{i}/{i + 1}を遷移（{transition['type']}, "
+                f"{transition_blend_sec(transition):.3f}秒）で結合 ---")
+            merge_clip_pair(merged, clip_outputs[i], transition, merged_next)
+            merged = merged_next
+
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+        shutil.copyfile(merged, out_path)
+
+        total_seconds = time.time() - render_start
+        total_duration = probe_duration(out_path)
+        log(f"完成: {out_path}  （{n}クリップ結合 / 総尺{total_duration:.2f}秒 / "
+            f"所要時間{total_seconds:.2f}秒）")
+        try:
+            summary = {
+                "clips": clip_timings,
+                "total_duration_seconds": round(total_duration, 2),
+                "render_seconds": round(total_seconds, 2),
+            }
+            with open(TIMING_JSON_NAME, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+        except Exception as exc:  # noqa: BLE001 - 内訳の書き出し失敗はレンダリング成功を妨げない
+            warn(f"所要時間の内訳（{TIMING_JSON_NAME}）の書き出しに失敗しました: {exc}")
+
+        return out_path
+    finally:
+        if not os.environ.get("SPOTLIGHT_KEEP_TMPDIR"):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            print(f"[debug] tmpdir kept: {tmpdir}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="プロジェクトJSONと元動画から、スポットライト演出付きMP4を書き出す")
@@ -5417,6 +5744,20 @@ def main(argv=None):
 
     project = load_project(args.project)
     json_dir = os.path.dirname(os.path.abspath(args.project))
+
+    # --- clips（複数動画）が明示的に指定されている場合は、単一videoの経路とは別の
+    #     render_multi_clipへ回す（clips未指定時は、load_project()が従来のvideo/
+    #     freezesを1件のclipsとして扱うだけなので、この分岐には来ない＝完全後方互換）。
+    #     --preview/--extract-apple-framesはクリップ単位のもの（エディタは1クリップ分の
+    #     project.json+videoとして個別に呼び出す）なので、clips指定時は未対応とする。
+    if project["raw"].get("clips"):
+        if args.preview is not None or args.extract_apple_frames:
+            parser.error("clips 指定時は --preview / --extract-apple-frames は未対応です"
+                          "（クリップ単位のプレビュー/抽出は、そのクリップ単体を"
+                          "従来の video 形式で個別に呼び出してください）")
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+        render_multi_clip(project, args.project, args.out, mode=args.mode)
+        return 0
 
     video = args.video or project["video"]
     if not video:
