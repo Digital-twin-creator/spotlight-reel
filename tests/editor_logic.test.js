@@ -2672,14 +2672,69 @@ test("chunkPartPath: 3桁を超えるパート数でも桁が伸びるだけで�
 });
 
 /* ---- exceedsTotalUploadLimit ---- */
-test("exceedsTotalUploadLimit: 400MBちょうどは超過ではない", () => {
+test("exceedsTotalUploadLimit: 上限ちょうどは超過ではない", () => {
   assert.strictEqual(core.exceedsTotalUploadLimit(core.MAX_TOTAL_UPLOAD_BYTES), false);
 });
-test("exceedsTotalUploadLimit: 400MBを1バイトでも超えたら超過", () => {
+test("exceedsTotalUploadLimit: 上限を1バイトでも超えたら超過", () => {
   assert.strictEqual(core.exceedsTotalUploadLimit(core.MAX_TOTAL_UPLOAD_BYTES + 1), true);
 });
 test("exceedsTotalUploadLimit: 小さい合計サイズは超過ではない", () => {
   assert.strictEqual(core.exceedsTotalUploadLimit(60 * 1024 * 1024), false);
+});
+test("MAX_TOTAL_UPLOAD_BYTES: 1.5GBになっている", () => {
+  assert.strictEqual(core.MAX_TOTAL_UPLOAD_BYTES, 1.5 * 1024 * 1024 * 1024);
+});
+
+/* ---- formatBytesShort ---- */
+test("formatBytesShort: 1GB未満は整数MB", () => {
+  assert.strictEqual(core.formatBytesShort(620 * 1024 * 1024), "620MB");
+});
+test("formatBytesShort: 1GB以上は小数点1桁のGB", () => {
+  assert.strictEqual(core.formatBytesShort(1.4 * 1024 * 1024 * 1024), "1.4GB");
+});
+test("formatBytesShort: 0バイトは0MB", () => {
+  assert.strictEqual(core.formatBytesShort(0), "0MB");
+});
+test("formatBytesShort: 負値は0MB扱い", () => {
+  assert.strictEqual(core.formatBytesShort(-100), "0MB");
+});
+
+/* ---- formatEstimatedDuration ---- */
+test("formatEstimatedDuration: 60秒未満は「約N秒」", () => {
+  assert.strictEqual(core.formatEstimatedDuration(30), "約30秒");
+});
+test("formatEstimatedDuration: 60秒以上・1時間未満は「約N分」", () => {
+  assert.strictEqual(core.formatEstimatedDuration(240), "約4分");
+});
+test("formatEstimatedDuration: 1時間以上は「約N時間M分」", () => {
+  assert.strictEqual(core.formatEstimatedDuration(65 * 60), "約1時間5分");
+});
+test("formatEstimatedDuration: ちょうど1時間は分を省く", () => {
+  assert.strictEqual(core.formatEstimatedDuration(60 * 60), "約1時間");
+});
+test("formatEstimatedDuration: 1秒未満は最低でも「約1秒」", () => {
+  assert.strictEqual(core.formatEstimatedDuration(0.2), "約1秒");
+});
+
+/* ---- estimateUploadSeconds ---- */
+test("estimateUploadSeconds: 合計バイト数÷速度", () => {
+  assert.strictEqual(core.estimateUploadSeconds(1000, 100), 10);
+});
+test("estimateUploadSeconds: 速度が0/未計測ならnull", () => {
+  assert.strictEqual(core.estimateUploadSeconds(1000, 0), null);
+  assert.strictEqual(core.estimateUploadSeconds(1000, null), null);
+  assert.strictEqual(core.estimateUploadSeconds(1000, undefined), null);
+});
+
+/* ---- buildUploadEstimateMessage ---- */
+test("buildUploadEstimateMessage: サイズと推定時間を「・」で連結する", () => {
+  const msg = core.buildUploadEstimateMessage(620 * 1024 * 1024, 240);
+  assert.strictEqual(msg, "合計 620MB・約4分");
+});
+test("buildUploadEstimateMessage: 推定時間nullなら計測失敗の注記のみ", () => {
+  const msg = core.buildUploadEstimateMessage(620 * 1024 * 1024, null);
+  assert.ok(msg.indexOf("合計 620MB") === 0);
+  assert.ok(msg.indexOf("約") === -1);
 });
 
 /* ---- buildManifestEntry / buildManifestPayload ---- */

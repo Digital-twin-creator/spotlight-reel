@@ -1206,6 +1206,21 @@
         </div>
       </div>
     </div>
+
+    <!-- 「動画を作る」実行前のアップロード見積もり確認モーダル -->
+    <div class="confirm-modal" id="uploadEstimateModal" hidden>
+      <div class="confirm-modal-card">
+        <strong>📤 アップロードしてよいか確認してください</strong>
+        <p id="uploadEstimateMessage" style="margin-top:6px;">計測中…</p>
+        <p class="muted" id="uploadEstimateWifiWarning" hidden>
+          ⚠️ Wi-Fi接続ではない可能性があります。モバイル回線の場合、通信量にご注意ください。
+        </p>
+        <div class="confirm-modal-actions">
+          <button type="button" class="ghost" id="uploadEstimateCancelBtn">キャンセル</button>
+          <button type="button" class="primary" id="uploadEstimateProceedBtn">送信する</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 8. 書き出し・読み込み -->
@@ -3405,9 +3420,11 @@ var CHUNK_SIZE_BYTES = 20 * 1024 * 1024;
 /**
  * エディタ側で事前にはじく、アップロード対象ファイル合計サイズの上限。
  * 分割アップロード自体は上限なく機能するが、実機（モバイル回線・メモリ）での
- * 現実的な所要時間・安定性を考え、合計400MBを超える場合はアップロードを開始せず中断する。
+ * 現実的な所要時間・安定性を考え、合計1.5GBを超える場合はアップロードを開始せず中断する。
+ * これを超えない範囲でも、送信前に推定アップロード時間を表示し（estimateUploadSeconds等
+ * 参照）ユーザーに確認を求める。
  */
-var MAX_TOTAL_UPLOAD_BYTES = 400 * 1024 * 1024;
+var MAX_TOTAL_UPLOAD_BYTES = 1.5 * 1024 * 1024 * 1024;
 
 /** ファイルサイズがチャンク分割の閾値を超えているか（超えていれば分割アップロード対象） */
 function needsChunkedUpload(sizeBytes) {
@@ -3424,9 +3441,68 @@ function chunkPartPath(assetName, partIndex) {
   return assetName + ".part" + String(partIndex).padStart(3, "0");
 }
 
-/** アップロード対象ファイル合計サイズが、事前確認の上限（400MB）を超えているか */
+/** アップロード対象ファイル合計サイズが、事前確認の上限（1.5GB）を超えているか */
 function exceedsTotalUploadLimit(totalBytes) {
   return (totalBytes || 0) > MAX_TOTAL_UPLOAD_BYTES;
+}
+
+/**
+ * バイト数を「620MB」「1.4GB」のような短い表示用文字列にする。
+ * 1GB未満はMB（整数）、1GB以上はGB（小数点1桁）で表す。
+ */
+function formatBytesShort(bytes) {
+  var b = Math.max(0, bytes || 0);
+  var GB = 1024 * 1024 * 1024;
+  var MB = 1024 * 1024;
+  if (b >= GB) return (b / GB).toFixed(1) + "GB";
+  return Math.round(b / MB) + "MB";
+}
+
+/**
+ * 推定所要秒数を「約30秒」「約4分」「約1時間5分」のような短い表示用文字列にする。
+ * 実測ベースの推定値であることが伝わるよう、常に「約」を付ける。
+ */
+function formatEstimatedDuration(seconds) {
+  var s = Math.max(1, Math.round(seconds || 0));
+  if (s < 60) return "約" + s + "秒";
+  var minutes = Math.round(s / 60);
+  if (minutes < 60) return "約" + minutes + "分";
+  var hours = Math.floor(minutes / 60);
+  var remMinutes = minutes % 60;
+  return "約" + hours + "時間" + (remMinutes > 0 ? remMinutes + "分" : "");
+}
+
+/**
+ * 合計バイト数と実測アップロード速度（バイト/秒）から、推定アップロード所要秒数を求める。
+ * bytesPerSecondが計測できなかった/0以下の場合はnullを返す（呼び出し側は「時間不明」扱いにする）。
+ */
+function estimateUploadSeconds(totalBytes, bytesPerSecond) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) return null;
+  return (totalBytes || 0) / bytesPerSecond;
+}
+
+/**
+ * 「動画を作る」確認モーダルに出す「合計 620MB・約4分」のようなメッセージを組み立てる。
+ * secondsがnull（速度計測に失敗した等）の場合は所要時間を省き、合計サイズだけ表示する。
+ */
+function buildUploadEstimateMessage(totalBytes, seconds) {
+  var sizeText = "合計 " + formatBytesShort(totalBytes);
+  if (seconds == null) return sizeText + "（回線速度を計測できなかったため、所要時間は不明です）";
+  return sizeText + "・" + formatEstimatedDuration(seconds);
+}
+
+/**
+ * Network Information API（navigator.connection。Chromium系のみ対応、iOS/macOS Safariは
+ * 非対応）から接続種別を読み取り、"cellular"（Wi-Fiではない可能性が高い）かどうかを判定する。
+ * APIが無い環境（Safari含む）ではnullを返す（＝判定不能。呼び出し側は誤った警告を
+ * 出さないよう、nullの場合は注意表示をしない）。
+ */
+function isLikelyNonWifiConnection() {
+  var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!conn) return null;
+  if (conn.type) return conn.type !== "wifi" && conn.type !== "ethernet";
+  if (conn.effectiveType) return conn.effectiveType === "2g" || conn.effectiveType === "3g";
+  return null;
 }
 
 /**
@@ -3767,6 +3843,11 @@ if (typeof module !== "undefined" && module.exports) {
     chunkCount: chunkCount,
     chunkPartPath: chunkPartPath,
     exceedsTotalUploadLimit: exceedsTotalUploadLimit,
+    formatBytesShort: formatBytesShort,
+    formatEstimatedDuration: formatEstimatedDuration,
+    estimateUploadSeconds: estimateUploadSeconds,
+    buildUploadEstimateMessage: buildUploadEstimateMessage,
+    isLikelyNonWifiConnection: isLikelyNonWifiConnection,
     buildManifestEntry: buildManifestEntry,
     buildManifestPayload: buildManifestPayload,
     bufferToHex: bufferToHex,
@@ -4184,7 +4265,9 @@ function init() {
     "ghSettingsDetails", "ghUserInput", "ghRepoInput", "ghTokenInput", "ghTokenToggleBtn",
     "ghSettingsSaveBtn", "ghSettingsStatus",
     "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobActionsLink", "jobResultLink",
-    "confirmWarningsModal", "confirmWarningsList", "confirmWarningsBackBtn", "confirmWarningsProceedBtn"
+    "confirmWarningsModal", "confirmWarningsList", "confirmWarningsBackBtn", "confirmWarningsProceedBtn",
+    "uploadEstimateModal", "uploadEstimateMessage", "uploadEstimateWifiWarning",
+    "uploadEstimateCancelBtn", "uploadEstimateProceedBtn"
   ].forEach(function (id) { els[id] = $(id); });
 
   wireGlobalErrorHandling();
@@ -4782,6 +4865,12 @@ function init() {
   els.confirmWarningsProceedBtn.addEventListener("click", function () {
     els.confirmWarningsModal.hidden = true;
     runMakeVideoJobUpload();
+  });
+
+  els.uploadEstimateCancelBtn.addEventListener("click", function () { els.uploadEstimateModal.hidden = true; });
+  els.uploadEstimateProceedBtn.addEventListener("click", function () {
+    els.uploadEstimateModal.hidden = true;
+    proceedPastUploadEstimate();
   });
 
   wireDrawCanvasTouch();
@@ -8919,6 +9008,37 @@ function ghCreateBlob(user, repo, token, base64Content, onProgress) {
   });
 }
 
+/**
+ * 「動画を作る」実行時、実際にGit Data APIへ小さなダミーblob（どのtree/commitからも
+ * 参照しないため実害なく、後でGitHub側のGCで自然に消える）を1回アップロードし、
+ * 所要時間からこの回線・このセッションでの実効アップロード速度（バイト/秒）を
+ * 簡易計測する。navigator.connection（downlink等）はiOS/macOS Safariが非対応のため、
+ * ダウンロード速度の間接計測ではなく、実際にこのアプリが使うアップロード経路そのものを
+ * 計測することで、より実態に近い推定値にする。
+ * 計測に失敗した場合（ネットワークエラー等）はnullを返す（呼び出し側は「時間不明」扱いにする）。
+ */
+var UPLOAD_SPEED_TEST_BYTES = 131072; // 128KB（生データ量。実際の送信バイト数はbase64化＋JSON分だけ増える）
+// 実データ（乱数）ではなく固定のマーカー文字列を繰り返して埋める。ランダムな内容だと
+// テスト側のモックが「実際のjson/動画blobと区別が付かない」ため、既知の先頭文字列で
+// このダミーblobだけを検出・除外できるようにする（tests/make_video_job.playwright.test.mjs参照）。
+var UPLOAD_SPEED_TEST_MARKER = "SPOTLIGHT_UPLOAD_SPEED_TEST\n";
+
+function measureUploadSpeedBps(user, repo, token) {
+  var text = "";
+  while (text.length < UPLOAD_SPEED_TEST_BYTES) text += UPLOAD_SPEED_TEST_MARKER;
+  text = text.slice(0, UPLOAD_SPEED_TEST_BYTES);
+  var start = performance.now();
+  return blobToBase64(new Blob([text]))
+    .then(function (base64) { return ghCreateBlob(user, repo, token, base64); })
+    .then(function () {
+      var elapsedSec = Math.max(0.05, (performance.now() - start) / 1000);
+      return UPLOAD_SPEED_TEST_BYTES / elapsedSec;
+    })
+    .catch(function () {
+      return null;
+    });
+}
+
 /** ファイル全体（分割前）のSHA-256を16進文字列で求める。manifest.json記録・結合後検証に使う */
 function sha256OfFile(file) {
   return file.arrayBuffer().then(function (buf) {
@@ -9109,7 +9229,7 @@ function startMakeVideoJob() {
   // 動画・ロゴ・透かしロゴ・使用中の効果音（IndexedDB上のメタデータのみ、Blob本体は読まない）
   // の合計サイズを、アップロード（通信）を一切開始する前に事前確認する。
   // 分割アップロード自体はファイルサイズに上限を設けないが、実機での現実的な所要時間・
-  // 安定性を考え、合計400MBを超える場合はここで中断する。
+  // 安定性を考え、合計1.5GBを超える場合はここで中断する。
   var usedSfxIds = collectUsedSfxLibraryIds(appState.freezes, appState.logo);
   sfxLibraryListMeta()
     .then(function (metas) {
@@ -9123,17 +9243,39 @@ function startMakeVideoJob() {
       }
 
       persistGhSettings(user, repo, token);
-
-      var warnings = validateProjectForConfirmation(appState);
-      if (warnings.length > 0) {
-        showConfirmWarningsModal(warnings);
-        return;
-      }
-      runMakeVideoJobUpload();
+      showUploadEstimateModal(user, repo, token, totalBytes);
     })
     .catch(function (err) {
       showJobError("アップロード前の確認に失敗しました: " + (err && err.message ? err.message : err));
     });
+}
+
+/**
+ * 送信前の最終確認モーダルを開き、合計サイズと（実測できれば）推定アップロード時間を
+ * 表示する。実際の速度計測（GitHub APIへの小さなダミーアップロード。measureUploadSpeedBps
+ * 参照）は表示を開いた後にバックグラウンドで行い、終わり次第メッセージを更新する
+ * （計測自体に数秒かかりうるため、先に「計測中…」を出してから確認を待たせる）。
+ * Wi-Fi接続かどうかの判定（isLikelyNonWifiConnection）は同期的に分かるため即座に反映する。
+ */
+function showUploadEstimateModal(user, repo, token, totalBytes) {
+  els.uploadEstimateMessage.textContent = "合計 " + formatBytesShort(totalBytes) + "・回線速度を計測中…";
+  els.uploadEstimateWifiWarning.hidden = !isLikelyNonWifiConnection();
+  els.uploadEstimateModal.hidden = false;
+  measureUploadSpeedBps(user, repo, token).then(function (bytesPerSecond) {
+    if (els.uploadEstimateModal.hidden) return; // 計測中にキャンセル/送信済みなら表示を更新しない
+    var seconds = estimateUploadSeconds(totalBytes, bytesPerSecond);
+    els.uploadEstimateMessage.textContent = buildUploadEstimateMessage(totalBytes, seconds);
+  });
+}
+
+/** アップロード見積もり確認モーダルで「送信する」を押した後の続き（従来の警告確認へ） */
+function proceedPastUploadEstimate() {
+  var warnings = validateProjectForConfirmation(appState);
+  if (warnings.length > 0) {
+    showConfirmWarningsModal(warnings);
+    return;
+  }
+  runMakeVideoJobUpload();
 }
 
 /** レンダリングは通るが意図と違う結果になりそうな警告を、確認モーダルに一覧表示する */

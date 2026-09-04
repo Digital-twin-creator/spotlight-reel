@@ -115,10 +115,18 @@ function makeGithubMockRouter(mock) {
     }
 
     // POST /repos/{owner}/{repo}/git/blobs  … project.json / 動画 のblob作成（1回目=json、2回目=動画）
+    // ※「動画を作る」押下直後に回線速度計測用のダミーblob（アップロード見積り機能）が
+    //   先行して1回POSTされる。先頭のマーカー文字列で検知し、blobCalls等のカウントには
+    //   一切影響させず素通しする（既存シナリオの1回目=json/2回目=動画という前提を守る）。
     if (method === "POST" && pathname === `/repos/${owner}/${repo}/git/blobs`) {
-      mock.blobCalls++;
       let body = {};
       try { body = JSON.parse(request.postData() || "{}"); } catch (e) { /* 無視 */ }
+      const decoded = body.content ? Buffer.from(body.content, "base64").toString("utf8") : "";
+      if (decoded.startsWith("SPOTLIGHT_UPLOAD_SPEED_TEST")) {
+        mock.speedTestBlobCalls = (mock.speedTestBlobCalls || 0) + 1;
+        return json(201, { sha: "speed-test-blob-sha" });
+      }
+      mock.blobCalls++;
       if (body.encoding !== "base64" || typeof body.content !== "string") {
         mock.blobPayloadInvalid = true;
       }
@@ -286,6 +294,20 @@ async function loadVideoAndOpenSettings(page, videoPath) {
   await page.waitForFunction(() => document.getElementById("video").duration > 0, null, { timeout: 10000 });
 }
 
+/**
+ * 「動画を作る」をタップし、アップロード見積もり確認モーダル（uploadEstimateModal）で
+ * 「送信する」を押して先へ進める。バリデーションエラーや合計サイズ超過など、
+ * モーダルが出る前に中断するケースでは使わない。
+ */
+async function clickMakeVideoBtnAndProceed(page) {
+  await page.click("#makeVideoBtn");
+  await page.waitForFunction(
+    () => document.getElementById("uploadEstimateModal").hidden === false,
+    null, { timeout: 5000 }
+  );
+  await page.click("#uploadEstimateProceedBtn");
+}
+
 async function main() {
   const videoPath = prepareTestVideo();
   const iphone = devices["iPhone 13"];
@@ -307,7 +329,7 @@ async function main() {
 
     await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
 
     await page.waitForFunction(
       () => document.getElementById("makeVideoBtn").disabled === true,
@@ -379,7 +401,7 @@ async function main() {
 
     await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
 
     await page.waitForFunction(
       () => document.getElementById("jobStatusLine").className.indexOf("err") >= 0,
@@ -431,7 +453,7 @@ async function main() {
   }
 
   console.log("");
-  console.log("=== シナリオ4: 合計400MBを超える場合は通信せず中断する ===");
+  console.log("=== シナリオ4: 合計1.5GBを超える場合は通信せず中断する ===");
   {
     const context = await browser.newContext({ ...iphone });
     const page = await context.newPage();
@@ -444,11 +466,11 @@ async function main() {
     await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
 
-    // 実ファイルを400MB超に差し替える代わりに、読み込み済みFileの.sizeだけを偽装する
+    // 実ファイルを1.5GB超に差し替える代わりに、読み込み済みFileの.sizeだけを偽装する
     // （事前確認の合計サイズチェックはIndexedDB上のメタデータとFile.sizeだけを見て
     // 通信前に中断するため、これで十分再現できる）
     await page.evaluate(() => {
-      Object.defineProperty(appState.videoFile, "size", { value: 500 * 1024 * 1024, configurable: true });
+      Object.defineProperty(appState.videoFile, "size", { value: 2 * 1024 * 1024 * 1024, configurable: true });
     });
 
     await page.click("#makeVideoBtn");
@@ -460,11 +482,13 @@ async function main() {
     const statusText = await page.evaluate(() => document.getElementById("jobStatusLine").textContent);
     const statusClass = await page.evaluate(() => document.getElementById("jobStatusLine").className);
     const btnDisabled = await page.evaluate(() => document.getElementById("makeVideoBtn").disabled);
+    const estimateModalHidden = await page.evaluate(() => document.getElementById("uploadEstimateModal").hidden);
 
-    check(statusClass.indexOf("err") >= 0, "合計400MB超でタップするとエラー表示になる");
+    check(statusClass.indexOf("err") >= 0, "合計1.5GB超でタップするとエラー表示になる");
     check(statusText.indexOf("動画が大きすぎます") >= 0 && statusText.indexOf("解像度を下げるか") >= 0 && statusText.indexOf("トリミング") >= 0,
       "エラーメッセージが要求通りの文言になっている: " + statusText);
-    check(calledUnexpectedly === false, "合計400MB超の場合、GitHub APIへは一切通信しない（アップロードすら始めない）");
+    check(calledUnexpectedly === false, "合計1.5GB超の場合、GitHub APIへは一切通信しない（アップロードすら始めない）");
+    check(estimateModalHidden === true, "合計1.5GB超の場合、アップロード見積もり確認モーダルは出ない（サイズ超過チェックが先に働く）");
     check(btnDisabled === false, "中断後、ボタンが押せる状態のまま（処理中で固まらない）");
     check(pageErrors.length === 0, "ページ例外が発生していない: " + JSON.stringify(pageErrors));
 
@@ -531,7 +555,7 @@ async function main() {
 
     await loadVideoAndOpenSettings(page, videoPath);
     await fillGhSettings(page, { user: OWNER, repo: REPO, token: TOKEN });
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
 
     // 90秒のポーリングが終わり、情報表示（エラーではない）に切り替わるまで待つ
     await page.waitForFunction(
@@ -582,7 +606,7 @@ async function main() {
     await page.click("#commitFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
 
     await page.waitForFunction(
       () => document.getElementById("confirmWarningsModal").hidden === false,
@@ -605,7 +629,7 @@ async function main() {
     check(btnDisabledAfterBack === false, "「戻って直す」後、「動画を作る」ボタンは押せる状態のまま");
 
     // 再度タップし、今度は「このまま作る」を選ぶと、通常どおりアップロードが進む
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
     await page.waitForFunction(
       () => document.getElementById("confirmWarningsModal").hidden === false,
       null, { timeout: 3000 }
@@ -745,7 +769,7 @@ async function main() {
     await page.click("#commitFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
     await page.waitForFunction(
       () => !document.getElementById("jobResultLink").hidden,
       null, { timeout: 30000 }
@@ -807,7 +831,7 @@ async function main() {
     await page.click("#commitFreezeBtn");
     await page.waitForFunction(() => document.getElementById("editorSection").hidden, null, { timeout: 5000 });
 
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
     await page.waitForFunction(
       () => !document.getElementById("jobResultLink").hidden,
       null, { timeout: 30000 }
@@ -845,7 +869,7 @@ async function main() {
     });
     check(partCount === 3, "偽装したサイズから3パートになる想定どおり: " + partCount);
 
-    await page.click("#makeVideoBtn");
+    await clickMakeVideoBtnAndProceed(page);
     await page.waitForFunction(
       () => !document.getElementById("jobResultLink").hidden,
       null, { timeout: 30000 }
