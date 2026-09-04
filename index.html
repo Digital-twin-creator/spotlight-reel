@@ -913,22 +913,6 @@
           <label style="margin:0;" for="showSafeZoneCheckbox">映像上にセーフゾーンの枠を薄く表示する</label>
         </div>
       </div>
-      <div class="field">
-        <label>出力解像度</label>
-        <select id="outputModeSelect">
-          <option value="original">元のまま</option>
-          <option value="1080x1920">1080 x 1920</option>
-          <option value="720x1280">720 x 1280</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>画質</label>
-        <select id="qualitySelect">
-          <option value="standard">標準(crf20)</option>
-          <option value="high">高(crf17)</option>
-          <option value="best">最高(crf15)</option>
-        </select>
-      </div>
     </div>
   </details>
 
@@ -1225,6 +1209,36 @@
           <div class="status-line" id="ghSettingsStatus"></div>
         </div>
       </details>
+
+      <div class="field">
+        <label>出力先</label>
+        <select id="outputPresetSelect">
+          <option value="instagram_tiktok">Instagram / TikTok（1080x1920）</option>
+          <option value="youtube_shorts">YouTube Shorts（2160x3840・入力が4K未満なら入力解像度まで）</option>
+          <option value="custom">カスタム（解像度・画質を指定）</option>
+        </select>
+        <p class="muted" style="margin-top:6px;">
+          同じ編集内容のまま、ここを切り替えて「動画を作る」を押すだけで別解像度で作り直せます。
+        </p>
+      </div>
+      <div id="customOutputFieldsWrap" hidden>
+        <div class="field">
+          <label>出力解像度</label>
+          <select id="outputModeSelect">
+            <option value="original">元のまま（1080x1920）</option>
+            <option value="1080x1920">1080 x 1920</option>
+            <option value="720x1280">720 x 1280</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>画質</label>
+          <select id="qualitySelect">
+            <option value="standard">標準(crf20)</option>
+            <option value="high">高(crf17)</option>
+            <option value="best">最高(crf15)</option>
+          </select>
+        </div>
+      </div>
 
       <button class="primary" id="makeVideoBtn">🎬 動画を作る</button>
 
@@ -1523,6 +1537,32 @@ var QUALITY_LEVELS = ["standard", "high", "best"];
 var DEFAULT_QUALITY = "high";
 function resolveQuality(q) {
   return QUALITY_LEVELS.indexOf(q) >= 0 ? q : DEFAULT_QUALITY;
+}
+
+/**
+ * 出力先プリセット（render.pyのOUTPUT_PRESET_NAMES/DEFAULT_OUTPUT_PRESETと同じ3値）。
+ * "instagram_tiktok"（既定。1080x1920・crf17固定）と"youtube_shorts"
+ * （2160x3840・入力が4K未満なら入力解像度まで・crf18固定）は、解像度・画質を
+ * render.py側で自動的に決める。"custom"のときだけ、下のoutputMode/qualityの値
+ * （OUTPUT_PRESETS/QUALITY_LEVELS）が実際に使われる。
+ * 同じ編集内容のままこの値だけ切り替えて「動画を作る」を押せば、別解像度で
+ * 作り直せる（project.jsonの他の内容は一切変わらないため）。
+ */
+var OUTPUT_PRESET_KINDS = ["instagram_tiktok", "youtube_shorts", "custom"];
+var DEFAULT_OUTPUT_PRESET = "instagram_tiktok";
+function resolveOutputPresetKind(p) {
+  return OUTPUT_PRESET_KINDS.indexOf(p) >= 0 ? p : DEFAULT_OUTPUT_PRESET;
+}
+/**
+ * project.json読み込み時、output.presetが省略されている旧JSONを正しい区分へ復元する。
+ * output.width/heightが明示されていれば（旧JSONの「1080x1920」「720x1280」選択、
+ * または既存の自由記述）"custom"として扱い、outputMode/qualityの値をそのまま
+ * 見せる。output自体が省略/空ならinstagram_tiktok（既定）として扱う。
+ */
+function resolveOutputPresetFromJSON(output) {
+  if (output && output.preset === "youtube_shorts") return "youtube_shorts";
+  if (output && (output.preset === "custom" || output.width || output.height)) return "custom";
+  return DEFAULT_OUTPUT_PRESET;
 }
 
 /** ライブラリの効果音（自分のmp3/wav）を使うときの位置合わせ（render.pyのSFX_ALIGNS_FREEZE/LOGOと同じ） */
@@ -1920,15 +1960,22 @@ function buildProjectJSON(state) {
       };
     });
   }
-  if (preset) {
-    project.output = { width: preset.width, height: preset.height, fps: 30 };
-  }
-  // output.quality は既定（"high"）のときは省略する（JSONの見た目を変えない＝完全後方互換）。
-  // 既定以外を選んだ場合のみproject.outputを（無ければ新設して）明示的に書き出す。
-  var quality = resolveQuality(state.quality);
-  if (quality !== DEFAULT_QUALITY) {
-    project.output = project.output || {};
-    project.output.quality = quality;
+  // 出力先プリセット。instagram_tiktok（既定）はoutput自体を省略し、render.py側の
+  // 既定（1080x1920・crf17）に委ねる（完全後方互換）。youtube_shortsはoutput.presetだけ
+  // 書き出し、解像度（2160x3840・入力が4K未満なら入力解像度まで）とcrf(18)はrender.py側で
+  // 決める。customのときだけ、outputMode/qualityで選んだ解像度・画質を明示的に書き出す。
+  var outputPreset = resolveOutputPresetKind(state.outputPreset);
+  if (outputPreset === "youtube_shorts") {
+    project.output = { preset: "youtube_shorts" };
+  } else if (outputPreset === "custom") {
+    if (preset) {
+      project.output = { width: preset.width, height: preset.height, fps: 30 };
+    }
+    var quality = resolveQuality(state.quality);
+    if (quality !== DEFAULT_QUALITY) {
+      project.output = project.output || {};
+      project.output.quality = quality;
+    }
   }
   // mask_options.model は既定（isnet-general-use）のときは省略する（JSONの見た目を変えない＝
   // 完全後方互換）。既定以外（高精度モデル）を選んだ場合のみ明示的に書き出す。
@@ -2386,6 +2433,7 @@ function parseProjectJSON(json, sfxLibrary) {
   var slideSec = legacyShadowSlideSec !== null ? legacyShadowSlideSec : numOr(style.slide_sec, SLIDE_SEC_DEFAULT);
   return {
     videoFileName: json.video || "",
+    outputPreset: resolveOutputPresetFromJSON(json.output),
     outputMode: matchOutputPreset(json.output),
     quality: resolveQuality(json.output && json.output.quality),
     revealSec: revealSec,
@@ -3877,6 +3925,10 @@ if (typeof module !== "undefined" && module.exports) {
     QUALITY_LEVELS: QUALITY_LEVELS,
     DEFAULT_QUALITY: DEFAULT_QUALITY,
     resolveQuality: resolveQuality,
+    OUTPUT_PRESET_KINDS: OUTPUT_PRESET_KINDS,
+    DEFAULT_OUTPUT_PRESET: DEFAULT_OUTPUT_PRESET,
+    resolveOutputPresetKind: resolveOutputPresetKind,
+    resolveOutputPresetFromJSON: resolveOutputPresetFromJSON,
     SFX_ALIGNS_FREEZE: SFX_ALIGNS_FREEZE,
     SFX_ALIGNS_LOGO: SFX_ALIGNS_LOGO,
     SFX_ALIGN_DEFAULT: SFX_ALIGN_DEFAULT,
@@ -4156,6 +4208,7 @@ function reloadSfxLibrary() {
 var appState = {
   videoFileName: "",
   videoFile: null,
+  outputPreset: DEFAULT_OUTPUT_PRESET,
   outputMode: "original",
   quality: DEFAULT_QUALITY,
   sfxLibrary: [],  // reloadSfxLibrary()が起動時・登録/削除のたびに同期する（buildProjectJSON用）
@@ -4377,7 +4430,7 @@ function init() {
     "shadowEnabledCheckbox", "shadowOptionsBody", "shadowColorWheel", "shadowColorInput", "shadowColorNameLabel",
     "shadowAlphaSlider", "shadowAlphaValue", "shadowDistanceSlider", "shadowDistanceValue",
     "shadowDirectionSelect", "shadowBlurSlider", "shadowBlurValue", "shadowSourceSelect",
-    "outputModeSelect", "qualitySelect",
+    "outputPresetSelect", "customOutputFieldsWrap", "outputModeSelect", "qualitySelect",
     "logoSection", "pickLogoBtn", "logoFileInput", "logoFileName",
     "logoAutoTransparentBgCheckbox", "logoAutoTransparentPreviewCanvas", "logoAtSelect",
     "logoBackgroundSelect", "logoColorRow", "logoColorInput", "logoColorHexInput", "logoColorNameLabel",
@@ -4768,6 +4821,12 @@ function init() {
 
   els.qualitySelect.addEventListener("change", function () {
     appState.quality = resolveQuality(els.qualitySelect.value);
+    saveToLocalStorage();
+  });
+
+  els.outputPresetSelect.addEventListener("change", function () {
+    appState.outputPreset = resolveOutputPresetKind(els.outputPresetSelect.value);
+    updateOutputPresetVisibility();
     saveToLocalStorage();
   });
 
@@ -8692,6 +8751,11 @@ function startSpinPreviewLoops() {
     });
 }
 
+/** 出力先プリセットが"custom"のときだけ、解像度/画質の手動指定欄を表示する */
+function updateOutputPresetVisibility() {
+  els.customOutputFieldsWrap.hidden = resolveOutputPresetKind(appState.outputPreset) !== "custom";
+}
+
 function applyLogoSettingsToInputs() {
   var logo = appState.logo || {};
   if (logo.imageFile) {
@@ -8917,6 +8981,8 @@ function applySettingsToInputs() {
   els.showSafeZoneCheckbox.checked = !!appState.showSafeZone;
   els.outputModeSelect.value = appState.outputMode;
   els.qualitySelect.value = resolveQuality(appState.quality);
+  els.outputPresetSelect.value = resolveOutputPresetKind(appState.outputPreset);
+  updateOutputPresetVisibility();
   applyLogoSettingsToInputs();
   applyWatermarkSettingsToInputs();
   applyHashtagsSettingsToInputs();
@@ -9062,6 +9128,7 @@ function buildLocalStoragePayload(dropThumbs) {
     shadowDirection: appState.shadowDirection,
     shadowBlurRatio: appState.shadowBlurRatio,
     shadowSource: appState.shadowSource,
+    outputPreset: appState.outputPreset,
     outputMode: appState.outputMode,
     quality: appState.quality,
     freezes: dropThumbs
@@ -9174,6 +9241,7 @@ function loadFromLocalStorage(videoFileName) {
     appState.shadowDirection = resolveShadowDirection(data.shadowDirection);
     appState.shadowBlurRatio = numOr(data.shadowBlurRatio, DEFAULT_SHADOW.blur);
     appState.shadowSource = resolveShadowSource(data.shadowSource);
+    appState.outputPreset = resolveOutputPresetKind(data.outputPreset);
     appState.outputMode = data.outputMode || "original";
     appState.quality = resolveQuality(data.quality);
     appState.freezes = Array.isArray(data.freezes) ? data.freezes : [];
@@ -10147,7 +10215,9 @@ function handleJsonFileChange(e) {
       appState.shadowDirection = loaded.shadowDirection;
       appState.shadowBlurRatio = loaded.shadowBlurRatio;
       appState.shadowSource = loaded.shadowSource;
+      appState.outputPreset = loaded.outputPreset;
       appState.outputMode = loaded.outputMode;
+      appState.quality = loaded.quality;
       appState.freezes = loaded.freezes;
       appState.logo = loaded.logo || defaultLogoState();
       appState.watermark = loaded.watermark || defaultWatermarkState();

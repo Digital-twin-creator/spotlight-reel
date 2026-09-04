@@ -199,6 +199,7 @@ test("sortFreezesByTime: time昇順に並び替える（元配列は変更しな
 function sampleState() {
   return {
     videoFileName: "dummy_input.mp4",
+    outputPreset: "custom",
     outputMode: "1080x1920",
     revealSec: 0.8,
     slideSec: 0.4,
@@ -471,6 +472,72 @@ test("parseProjectJSON: buildProjectJSONでstandardを書き出し→読み込�
   state.quality = "standard";
   const loaded = core.parseProjectJSON(core.buildProjectJSON(state));
   assert.strictEqual(loaded.quality, "standard");
+});
+
+/* ---- 出力先プリセット(instagram_tiktok/youtube_shorts/custom) ---- */
+test("buildProjectJSON: outputPresetが既定(instagram_tiktok)ならoutputキー自体を省略する（後方互換）", () => {
+  const state = sampleState();
+  state.outputPreset = "instagram_tiktok";
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.output, undefined);
+});
+
+test("buildProjectJSON: outputPresetが未指定でもoutputキーを省略する（既定扱い。outputMode/qualityは無視される）", () => {
+  const state = sampleState();
+  delete state.outputPreset;
+  const project = core.buildProjectJSON(state);
+  assert.strictEqual(project.output, undefined);
+});
+
+test("buildProjectJSON: outputPreset=youtube_shortsならoutput.presetだけを出力し、width/height/qualityは出さない", () => {
+  const state = sampleState();
+  state.outputPreset = "youtube_shorts";
+  state.quality = "best";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.output, { preset: "youtube_shorts" });
+});
+
+test("buildProjectJSON: outputPreset=customならoutputMode/qualityの値をそのまま出力する", () => {
+  const state = sampleState();
+  state.outputPreset = "custom";
+  state.outputMode = "720x1280";
+  state.quality = "standard";
+  const project = core.buildProjectJSON(state);
+  assert.deepStrictEqual(project.output, { width: 720, height: 1280, fps: 30, quality: "standard" });
+});
+
+test("resolveOutputPresetKind: 不明な値はDEFAULT_OUTPUT_PRESET(instagram_tiktok)にフォールバックする", () => {
+  assert.strictEqual(core.resolveOutputPresetKind("4k"), core.DEFAULT_OUTPUT_PRESET);
+  assert.strictEqual(core.resolveOutputPresetKind(undefined), "instagram_tiktok");
+});
+
+test("parseProjectJSON: output.preset='youtube_shorts'を読み込んでoutputPresetとして復元する", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [], style: {},
+    output: { preset: "youtube_shorts" }
+  });
+  assert.strictEqual(loaded.outputPreset, "youtube_shorts");
+});
+
+test("parseProjectJSON: output.width/heightが明示された旧JSON（presetキー無し）はcustomとして復元する", () => {
+  const loaded = core.parseProjectJSON({
+    version: 1, video: "x.mp4", freezes: [], style: {},
+    output: { width: 1080, height: 1920, fps: 30 }
+  });
+  assert.strictEqual(loaded.outputPreset, "custom");
+  assert.strictEqual(loaded.outputMode, "1080x1920");
+});
+
+test("parseProjectJSON: outputが省略/空ならoutputPresetは既定(instagram_tiktok)になる", () => {
+  const loaded = core.parseProjectJSON({ version: 1, video: "x.mp4", freezes: [], style: {} });
+  assert.strictEqual(loaded.outputPreset, core.DEFAULT_OUTPUT_PRESET);
+});
+
+test("parseProjectJSON: buildProjectJSONでyoutube_shortsを書き出し→読み込むと同じプリセットに往復できる", () => {
+  const state = sampleState();
+  state.outputPreset = "youtube_shorts";
+  const loaded = core.parseProjectJSON(core.buildProjectJSON(state));
+  assert.strictEqual(loaded.outputPreset, "youtube_shorts");
 });
 
 /* ---- 効果音ライブラリ（自分のmp3/wav、align位置合わせ） ---- */

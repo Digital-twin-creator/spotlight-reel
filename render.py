@@ -209,10 +209,10 @@ AUDIO_SR = 48000              # 音声処理のサンプリングレート
 AUDIO_CH = 2                  # 音声処理のチャンネル数（ステレオ固定）
 KEEP_LOOP_SEC = 0.5           # audio_during_freeze="keep" のときにループする長さ
 
-# output.width/height が省略された場合の既定出力解像度。入力の向き・解像度に
-# 関わらず常にこのサイズへ正規化する（縦長のSNS向け動画を主用途とするため。
-# 横動画を入力してもレターボックスで縦1080x1920に収める＝アスペクト比を保った
-# 縮小を優先する特別扱いはしない）。
+# output.width/height が省略された場合（＝カスタム扱いだが解像度未指定）の既定出力解像度。
+# 入力の向き・解像度に関わらず常にこのサイズへ正規化する（縦長のSNS向け動画を主用途と
+# するため。横動画を入力してもレターボックスで縦1080x1920に収める＝アスペクト比を
+# 保った縮小を優先する特別扱いはしない）。output.presetの"instagram_tiktok"と同じ値。
 DEFAULT_OUTPUT_WIDTH = 1080
 DEFAULT_OUTPUT_HEIGHT = 1920
 
@@ -223,8 +223,8 @@ DOWNSCALE_FLAGS = "lanczos"
 DOWNSCALE_UNSHARP = "unsharp=5:5:0.3:5:5:0.0"
 
 # output.quality（省略時は"high"）→ 出力のH.264 crf値。数値が小さいほど高画質・大容量。
-# presetは品質段階に関わらずslow固定（フリーズ区間・hybrid区間を含む最終エンコードの
-# 既定をcrf17/slowへ引き上げた際、段階を分けても速度優先にする理由がないため）。
+# output.presetが"custom"のときだけ参照する（instagram_tiktok/youtube_shortsはcrfも
+# プリセット固定のため、qualityキーは無視する）。
 QUALITY_CRF = {"standard": 20, "high": 17, "best": 15}
 DEFAULT_QUALITY = "high"
 DEFAULT_ENCODE_PRESET = "slow"
@@ -241,18 +241,77 @@ def resolve_quality_crf(output_cfg):
     return QUALITY_CRF[quality]
 
 
-# 現在有効なcrf値（render()/render_multi_clip()の先頭でset_encode_quality()により
-# project["output"]["quality"]から設定される）。open_video_writer等の最終エンコード
-# 呼び出し箇所は、render()から見て何段も深い場所に散らばっており、呼び出し階層
-# 全体にcrfを引数として通すのは煩雑なため、_TIMING_LOGと同じ考え方でモジュール
+# output.preset：出力先ごとの解像度・crfのプリセット。
+# - "instagram_tiktok"（既定）：1080x1920固定・crf17固定
+# - "youtube_shorts"：2160x3840をターゲットにするが、入力の表示上の解像度がそれ未満
+#   （幅<2160 または 高さ<3840。いわゆる「4K未満」）ならアップスケールせず、入力自身の
+#   解像度をそのまま使う。crfは常に18
+# - "custom"：output.width/height（省略時DEFAULT_OUTPUT_WIDTH/HEIGHT）・output.qualityを
+#   そのまま使う（従来どおりの挙動）
+OUTPUT_PRESET_NAMES = ("instagram_tiktok", "youtube_shorts", "custom")
+DEFAULT_OUTPUT_PRESET = "instagram_tiktok"
+INSTAGRAM_TIKTOK_WIDTH = DEFAULT_OUTPUT_WIDTH
+INSTAGRAM_TIKTOK_HEIGHT = DEFAULT_OUTPUT_HEIGHT
+INSTAGRAM_TIKTOK_CRF = QUALITY_CRF["high"]
+YOUTUBE_SHORTS_WIDTH = 2160
+YOUTUBE_SHORTS_HEIGHT = 3840
+YOUTUBE_SHORTS_CRF = 18
+
+
+def resolve_output_spec(out_cfg, src_w, src_h):
+    """
+    project["output"]から実際の出力解像度(W, H)とcrfを求める。
+
+    out_cfg["preset"]（省略時DEFAULT_OUTPUT_PRESET="instagram_tiktok"）で分岐する。
+    ただし後方互換のため、out_cfgにwidth/heightが明示されている場合は、presetの値に
+    関わらず常にそちらを優先する（"複数クリップ内部処理専用のcrf直接指定"、および
+    presetという概念が無かった旧JSON・既存テストの両方が、今までどおり明示した
+    width/height・qualityで動くようにするため）。
+    """
+    out_cfg = out_cfg or {}
+
+    if isinstance(out_cfg.get("crf"), (int, float)):
+        # 複数クリップ内部処理専用：render_multi_clipが最初に解決したcrfを、各クリップの
+        # render()呼び出しでもそのまま使うために渡す（プリセット名だけでは
+        # youtube_shorts等の非標準crf値を復元できないため、直接数値で受け渡す）。
+        W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
+        H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
+        return W, H, int(out_cfg["crf"])
+
+    has_explicit_size = ("width" in out_cfg) or ("height" in out_cfg)
+    preset = out_cfg.get("preset") or DEFAULT_OUTPUT_PRESET
+    if preset not in OUTPUT_PRESET_NAMES:
+        preset = DEFAULT_OUTPUT_PRESET
+
+    if preset == "youtube_shorts" and not has_explicit_size:
+        W, H = YOUTUBE_SHORTS_WIDTH, YOUTUBE_SHORTS_HEIGHT
+        if src_w < W or src_h < H:
+            # 入力が4K未満：無理にアップスケールせず入力自身の解像度をそのまま使う
+            W, H = src_w, src_h
+        return even(W), even(H), YOUTUBE_SHORTS_CRF
+
+    if preset == "instagram_tiktok" and not has_explicit_size:
+        return INSTAGRAM_TIKTOK_WIDTH, INSTAGRAM_TIKTOK_HEIGHT, INSTAGRAM_TIKTOK_CRF
+
+    # "custom"、または明示的にwidth/heightが指定されている場合（従来互換）
+    W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
+    H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
+    crf = resolve_quality_crf(out_cfg)
+    return W, H, crf
+
+
+# 現在有効なcrf値（render()/prepare_multi_clip_normalized()の先頭でset_encode_quality()
+# により、resolve_output_spec()が求めたcrfに設定される）。open_video_writer等の最終
+# エンコード呼び出し箇所は、render()から見て何段も深い場所に散らばっており、呼び出し
+# 階層全体にcrfを引数として通すのは煩雑なため、_TIMING_LOGと同じ考え方でモジュール
 # レベルの状態として持たせている。
-_CURRENT_CRF = QUALITY_CRF[DEFAULT_QUALITY]
+_CURRENT_CRF = INSTAGRAM_TIKTOK_CRF
 
 
-def set_encode_quality(output_cfg):
-    """render()系のエントリポイントの先頭で、その回のcrfを確定させる。"""
+def set_encode_quality(crf):
+    """render()系のエントリポイントの先頭で、resolve_output_spec()が求めたcrfを設定する。"""
     global _CURRENT_CRF
-    _CURRENT_CRF = resolve_quality_crf(output_cfg)
+    _CURRENT_CRF = crf
 
 
 def current_crf():
@@ -5256,7 +5315,10 @@ def render(project, json_path, video_path, out_path, preview_path=None,
     fps = float(out_cfg.get("fps") or info["fps"])
     if fps <= 0:
         raise RuntimeError("出力サイズ/fpsが不正です。")
-    set_encode_quality(out_cfg)
+    W, H, crf = resolve_output_spec(out_cfg, info["width"], info["height"])
+    if W <= 0 or H <= 0:
+        raise RuntimeError("出力サイズ/fpsが不正です。")
+    set_encode_quality(crf)
 
     # --- 一時ディレクトリは、確認用PNGだけの場合も含めて関数を抜ける時に必ず片付ける ---
     tmpdir = tempfile.mkdtemp(prefix="spotlight_")
@@ -5267,11 +5329,6 @@ def render(project, json_path, video_path, out_path, preview_path=None,
                  f"固定{fps:.2f}fpsへ正規化してから処理します。")
             video_path = normalize_frame_rate(video_path, fps, info["has_audio"], tmpdir)
             info = probe_video(video_path)
-
-        W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
-        H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
-        if W <= 0 or H <= 0:
-            raise RuntimeError("出力サイズ/fpsが不正です。")
 
         log(f"入力: {video_path}  {info['width']}x{info['height']} "
             f"{info['fps']:.3f}fps rotation={info['rotation']} "
@@ -5679,7 +5736,7 @@ def prepare_multi_clip_normalized(project, json_path, tmpdir):
     render_multi_clip本番と抽出用の呼び出しとで必ず一致させる必要がある
     （extract_apple_frames_multi_clipのdocstring参照）。
 
-    戻り値: (W, H, fps, normalized_paths)
+    戻り値: (W, H, fps, crf, normalized_paths)
     """
     clips = project["clips"]
     n = len(clips)
@@ -5695,10 +5752,10 @@ def prepare_multi_clip_normalized(project, json_path, tmpdir):
 
     first_info = probe_video(clip_video_paths[0])
     fps = float(out_cfg.get("fps") or first_info["fps"])
-    W = even(out_cfg.get("width") or DEFAULT_OUTPUT_WIDTH)
-    H = even(out_cfg.get("height") or DEFAULT_OUTPUT_HEIGHT)
+    W, H, crf = resolve_output_spec(out_cfg, first_info["width"], first_info["height"])
     if fps <= 0 or W <= 0 or H <= 0:
         raise RuntimeError("出力サイズ/fpsが不正です。")
+    set_encode_quality(crf)
 
     log(f"複数クリップ: {n}本のクリップを {W}x{H} {fps:.3f}fps へ正規化します")
 
@@ -5708,20 +5765,27 @@ def prepare_multi_clip_normalized(project, json_path, tmpdir):
         prepare_clip_video(src_path, c["in"], c["out"], W, H, fps, norm_path)
         normalized_paths.append(norm_path)
 
-    return W, H, fps, normalized_paths
+    return W, H, fps, crf, normalized_paths
 
 
-def clip_project_for(project, clips, i, norm_path, W, H, fps):
+def clip_project_for(project, clips, i, norm_path, W, H, fps, crf):
     """
     render_multi_clipとextract_apple_frames_multi_clipの両方が使う共通処理：
     クリップ単体をあたかも独立した1本の動画であるかのようにrender()へ渡すための
     project辞書を組み立てる。ラストロゴ（project["logo"]）は最後のクリップにだけ
     渡し、それ以外はNone（全体の末尾に1回だけ表示されるようにする）。
+
+    output.crfには、prepare_multi_clip_normalized()がproject["output"]（プリセット・
+    width/height・quality）から一度だけ解決した実際のcrf値をそのまま渡す
+    （resolve_output_spec()の"crf直接指定"の仕組み。各クリップのrender()呼び出しが
+    それぞれ独自にpresetを解決し直すと、youtube_shortsの入力解像度キャップ判定が
+    クリップごとの正規化後動画（すでにWxHへ揃えられている）を基準にしてしまい、
+    本来の入力解像度で判定すべきキャップが正しく機能しなくなるため）。
     """
     return {
         "raw": {},
         "video": norm_path,
-        "output": {"width": W, "height": H, "fps": fps, "quality": (project["output"] or {}).get("quality")},
+        "output": {"width": W, "height": H, "fps": fps, "crf": crf},
         "style": project["style"],
         "freezes": clips[i]["freezes"],
         "logo": project["logo"] if i == len(clips) - 1 else None,
@@ -5751,11 +5815,11 @@ def extract_apple_frames_multi_clip(project, json_path, model_name, out_dir):
     tmpdir = tempfile.mkdtemp(prefix="spotlight_multiclip_extract_")
     os.makedirs(out_dir, exist_ok=True)
     try:
-        W, H, fps, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
+        W, H, fps, crf, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
 
         all_frames = []
         for i, norm_path in enumerate(normalized_paths):
-            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps)
+            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps, crf)
             clip_json_path = os.path.join(tmpdir, f"clip_{i:02d}_project.json")
             clip_frames_dir = os.path.join(tmpdir, f"clip_{i:02d}_frames")
             manifest_path = render(clip_project, clip_json_path, norm_path, None,
@@ -5804,7 +5868,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
     tmpdir = tempfile.mkdtemp(prefix="spotlight_multiclip_")
     render_start = time.time()
     try:
-        W, H, fps, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
+        W, H, fps, crf, normalized_paths = prepare_multi_clip_normalized(project, json_path, tmpdir)
 
         # --- 各クリップを個別にレンダリングする。watermarkの位相を全クリップを通して
         #     連続させるため、各クリップのrender()呼び出しには、そのクリップが最終
@@ -5821,7 +5885,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         for i, (c, norm_path) in enumerate(zip(clips, normalized_paths)):
             is_last = (i == n - 1)
             watermark_time_offset = cumulative_time
-            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps)
+            clip_project = clip_project_for(project, clips, i, norm_path, W, H, fps, crf)
             clip_json_path = os.path.join(tmpdir, f"clip_{i:02d}_project.json")
             clip_out_path = os.path.join(tmpdir, f"clip_{i:02d}_rendered.mp4")
             log(f"--- クリップ {i + 1}/{n} をレンダリング（{c['video']}） ---")
@@ -5849,9 +5913,10 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
 
         # --- クリップ間の遷移を挟んで結合（先頭から順に、累積結果へ次のクリップを
         #     マージしていく）。各クリップのrender()呼び出しで既にcurrent_crf()は
-        #     project["output"]["quality"]から設定済みだが、念のためここでも
-        #     明示しておく（merge_clip_pairはrender()を経由しないため） ---
-        set_encode_quality(project["output"])
+        #     このcrf（prepare_multi_clip_normalized()が一度だけ解決した値）に設定
+        #     済みだが、念のためここでも明示しておく（merge_clip_pairはrender()を
+        #     経由しないため） ---
+        set_encode_quality(crf)
         merged = clip_outputs[0]
         for i in range(1, n):
             transition = clips[i - 1]["transition_out"]

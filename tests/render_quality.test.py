@@ -2810,6 +2810,77 @@ try:
     check(loaded_ht_none.get("hashtags") is None,
           "hashtagsキーが無い旧JSONではNoneのまま（完全後方互換）")
 
+    # ------------------------------------------------------------------
+    # 出力先プリセット（output.preset: instagram_tiktok/youtube_shorts/custom）
+    # ------------------------------------------------------------------
+    print("")
+    print("=== 出力先プリセット：resolve_output_spec()の純粋ロジック ===")
+
+    W, H, crf = render.resolve_output_spec({}, 3840, 2160)
+    check((W, H, crf) == (1080, 1920, 17),
+          f"output省略（既定instagram_tiktok）は常に1080x1920・crf17: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "instagram_tiktok"}, 3840, 2160)
+    check((W, H, crf) == (1080, 1920, 17),
+          f"preset=instagram_tiktokを明示しても同じ1080x1920・crf17: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "youtube_shorts"}, 1080, 1920)
+    check((W, H, crf) == (1080, 1920, 18),
+          f"youtube_shorts：入力(1080x1920)が4K未満なのでアップスケールせず入力解像度のまま・crf18: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "youtube_shorts"}, 4000, 7000)
+    check((W, H, crf) == (2160, 3840, 18),
+          f"youtube_shorts：入力が4K超なので2160x3840へダウンスケール・crf18: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "youtube_shorts"}, 2160, 3840)
+    check((W, H, crf) == (2160, 3840, 18),
+          f"youtube_shorts：入力がちょうど4K相当なら2160x3840のまま・crf18: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "custom", "width": 540, "height": 960}, 3840, 2160)
+    check((W, H, crf) == (540, 960, 17),
+          f"custom：明示したwidth/height、quality省略時はcrf17(high): got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"preset": "custom", "width": 540, "height": 960, "quality": "standard"}, 3840, 2160)
+    check((W, H, crf) == (540, 960, 20),
+          f"custom：quality=standardならcrf20: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"width": 540, "height": 960}, 3840, 2160)
+    check((W, H, crf) == (540, 960, 17),
+          f"後方互換：presetキーが無くてもwidth/heightが明示されていればcustom扱い: got {(W, H, crf)}")
+
+    W, H, crf = render.resolve_output_spec({"width": 500, "height": 700, "crf": 18}, 9999, 9999)
+    check((W, H, crf) == (500, 700, 18),
+          f"複数クリップ内部用のcrf直接指定：presetの解決を経由せずそのまま使われる: got {(W, H, crf)}")
+
+    print("")
+    print("=== 出力先プリセット：実際にrender()を通した検証（dummy_input.mp4は1080x1920） ===")
+    preset_project = {
+        "version": 1,
+        "video": "dummy_input.mp4",
+        "style": {"font": "assets/fonts/NotoSansJP-Bold.ttf",
+                  "title_font": "assets/fonts/Anton-Regular.ttf",
+                  "title_font_jp": "assets/fonts/NotoSansJP-Bold.ttf"},
+        "freezes": [{"time": 2.0, "name": "テスト",
+                     "strokes": [{"width": 0.1, "points": [[0.3, 0.35], [0.33, 0.3]]}]}],
+    }
+
+    out_ig = os.path.join(tmpdir, "preset_instagram.mp4")
+    render_direct(preset_project, video_path, out_ig, tmpdir)
+    ig_info = render.probe_video(out_ig)
+    check((ig_info["width"], ig_info["height"]) == (1080, 1920),
+          f"output省略時（既定instagram_tiktok）は実際に1080x1920で出力される: {ig_info['width']}x{ig_info['height']}")
+    check(render.current_crf() == 17, f"instagram_tiktokのcrfは17: {render.current_crf()}")
+
+    yt_project = dict(preset_project)
+    yt_project["output"] = {"preset": "youtube_shorts"}
+    out_yt = os.path.join(tmpdir, "preset_youtube.mp4")
+    render_direct(yt_project, video_path, out_yt, tmpdir)
+    yt_info = render.probe_video(out_yt)
+    check((yt_info["width"], yt_info["height"]) == (1080, 1920),
+          f"youtube_shorts：入力(1080x1920)は4K未満なのでアップスケールせず入力解像度のまま出力される: "
+          f"{yt_info['width']}x{yt_info['height']}")
+    check(render.current_crf() == 18, f"youtube_shortsのcrfは18: {render.current_crf()}")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
