@@ -5634,6 +5634,20 @@ def probe_duration(path):
     return float(out) if out else 0.0
 
 
+def audio_stream_duration(path):
+    """
+    音声ストリームの尺（秒）をffprobeで取得する（probe_durationのformat=durationとは別に、
+    音声ストリーム自体のduration。音声が無ければ0.0）。映像の実デコードフレーム数
+    （probe_segment_frame_count）と比較して、最終出力の映像/音声の尺が一致しているかを
+    検証するために使う。
+    """
+    ffprobe = find_exe("ffprobe")
+    cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+           "-show_entries", "stream=duration", "-of", "csv=p=0", path]
+    out = subprocess.run(cmd, capture_output=True).stdout.decode().strip()
+    return float(out) if out else 0.0
+
+
 def prepare_clip_video(video_path, in_t, out_t, W, H, fps, out_path):
     """
     クリップ（clips[i]）をin/outでトリムし、出力解像度・fpsに正規化した動画ファイルを
@@ -5702,17 +5716,35 @@ def merge_clip_pair(a_path, b_path, transition, out_path, fps):
     最終出力で音声より映像が大幅に短く終わり、後続クリップの映像が丸ごと
     欠落する）。実機（複数クリップ・iPhone縦動画）でこの症状が実際に発生した
     ため、必ず実測フレーム数を使う。
+
+    さらに、acrossfadeはxfadeのoffsetのような明示指定を受け付けず、常に
+    「a_pathの音声ストリーム自身の実際の長さ」を基準に自動でブレンド位置を
+    決める。そのためa_path自体の音声の長さが映像の長さ（frame_count_a/fps）と
+    厳密に一致していないと、映像側（offsetで明示制御）と音声側（自動検出）の
+    ブレンド位置がずれる。このズレはmerge_clip_pairの出力自体には現れにくい
+    小さな誤差でも、その出力を次のmerge_clip_pair呼び出しのa_pathとして連鎖
+    的に使う複数クリップ結合（3本以上）では蓄積し、実機の長尺・4K回転素材や
+    常時表示watermark/hashtags（hybridレンダリング）を伴う複雑な入力で、後半の
+    映像が丸ごと欠落するほど大きくなることを確認した。そのため、この関数の
+    出力音声は常に「想定する合計尺（offset + b_path側の実測長）」へ
+    apad+atrimで強制的に合わせ、次の連鎖でこの関数のa_pathとして使われても
+    ズレが蓄積しないようにする。
     """
     xfade_type = XFADE_TYPES[transition["type"]]
     sec = transition_blend_sec(transition)
     frame_count_a = probe_segment_frame_count(a_path)
     dur_a = frame_count_a / fps
     offset = max(0.0, dur_a - sec)
+    frame_count_b = probe_segment_frame_count(b_path)
+    dur_b = frame_count_b / fps
+    target_sec = offset + dur_b
+    expected_frames = round(target_sec * fps)
 
     ffmpeg = find_exe("ffmpeg")
     filter_complex = (
         f"[0:v][1:v]xfade=transition={xfade_type}:duration={sec:.6f}:offset={offset:.6f}[v];"
-        f"[0:a][1:a]acrossfade=d={sec:.6f}[a]"
+        f"[0:a][1:a]acrossfade=d={sec:.6f}[a0];"
+        f"[a0]apad=whole_dur={target_sec:.6f},atrim=0:{target_sec:.6f},asetpts=PTS-STARTPTS[a]"
     )
     cmd = [ffmpeg, "-y", "-v", "error", "-i", a_path, "-i", b_path,
            "-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]",
@@ -5721,6 +5753,14 @@ def merge_clip_pair(a_path, b_path, transition, out_path, fps):
     res = subprocess.run(cmd)
     if res.returncode != 0 or not os.path.exists(out_path):
         raise RuntimeError(f"クリップ間の遷移（{transition['type']}）の合成に失敗しました。")
+
+    actual_frames = probe_segment_frame_count(out_path)
+    if abs(actual_frames - expected_frames) > 1:
+        raise RuntimeError(
+            f"クリップ間の遷移（{transition['type']}）の合成後、映像の尺が想定と一致しません"
+            f"（映像側の欠落の可能性があります）。想定{expected_frames}フレーム"
+            f"（{target_sec:.2f}秒）・実際{actual_frames}フレーム（{actual_frames / fps:.2f}秒）。"
+        )
     return out_path
 
 
@@ -5881,6 +5921,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         #     ズレてしまう）、1本ずつ順にレンダリングしながらその場で計算していく。 ---
         clip_outputs = []
         clip_timings = []
+        clip_frame_counts = []
         cumulative_time = 0.0
         for i, (c, norm_path) in enumerate(zip(clips, normalized_paths)):
             is_last = (i == n - 1)
@@ -5892,7 +5933,15 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
             render(clip_project, clip_json_path, norm_path, clip_out_path, mode=mode,
                    watermark_time_offset=watermark_time_offset)
             clip_outputs.append(clip_out_path)
-            actual_clip_duration = probe_duration(clip_out_path)
+            # probe_duration（コンテナのメタデータ）ではなく実デコードフレーム数から
+            # 秒数を求める（merge_clip_pairのoffset計算・item1の修正と同じ理由。
+            # 特にhybridレンダリングの出力はffmpeg concat+remuxを経由するため、
+            # コンテナのduration値が実デコード可能なフレーム数とわずかにずれることがある。
+            # watermarkの位相計算（cumulative_time）・後段の整合性検証の両方の基準を
+            # 実測フレーム数に統一しておく）。
+            clip_frames = probe_segment_frame_count(clip_out_path)
+            clip_frame_counts.append(clip_frames)
+            actual_clip_duration = clip_frames / fps
 
             if not is_last:
                 blend_sec = transition_blend_sec(clips[i]["transition_out"])
@@ -5907,6 +5956,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
                 "clip_index": i,
                 "video": c["video"],
                 "duration_seconds": round(actual_clip_duration, 2),
+                "frame_count": clip_frames,
                 "render_mode": clip_timing.get("render_mode"),
                 "render_seconds": clip_timing.get("render_seconds"),
             })
@@ -5917,6 +5967,8 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         #     済みだが、念のためここでも明示しておく（merge_clip_pairはrender()を
         #     経由しないため） ---
         set_encode_quality(crf)
+        blend_frames_list = [round(transition_blend_sec(clips[i]["transition_out"]) * fps)
+                              for i in range(n - 1)]
         merged = clip_outputs[0]
         for i in range(1, n):
             transition = clips[i - 1]["transition_out"]
@@ -5929,14 +5981,52 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
         shutil.copyfile(merged, out_path)
 
+        # --- 最終出力の映像フレーム数・音声尺が想定どおりかを検証する。実機
+        #     （複数クリップ・iPhone縦動画・常時表示watermark/hashtags等）で、後半クリップの
+        #     映像が丸ごと欠落し、音声だけがタイムライン全体の尺のまま残るという不具合が
+        #     繰り返し報告されているため、無音のまま壊れた動画を出力してしまう前に、ここで
+        #     必ず検出して例外にする（--mode fullへのフォールバック等、原因調査の手掛かりに
+        #     なるよう、クリップ・遷移ごとの想定尺と実測尺を全てエラーメッセージに含める）。
+        expected_total_frames = sum(clip_frame_counts) - sum(blend_frames_list)
+        actual_video_frames = probe_segment_frame_count(out_path)
+        actual_audio_seconds = audio_stream_duration(out_path)
+        actual_audio_frames = round(actual_audio_seconds * fps)
+
+        breakdown_lines = []
+        for i, frames in enumerate(clip_frame_counts):
+            breakdown_lines.append(f"  クリップ{i}（{clips[i]['video']}）: 実測{frames}フレーム"
+                                    f"（{frames / fps:.2f}秒）")
+            if i < len(blend_frames_list):
+                breakdown_lines.append(f"    → 遷移{i}/{i + 1}（{clips[i]['transition_out']['type']}）"
+                                        f"でブレンド{blend_frames_list[i]}フレーム分を重ねる")
+        breakdown = "\n".join(breakdown_lines)
+
+        if abs(actual_video_frames - expected_total_frames) > 1 or abs(actual_video_frames - actual_audio_frames) > 1:
+            raise RuntimeError(
+                "複数クリップ結合: 最終出力の映像/音声の尺が想定と一致しません"
+                "（後半クリップの映像が欠落している可能性があります）。\n"
+                f"クリップ・遷移ごとの内訳:\n{breakdown}\n"
+                f"想定合計フレーム数（各クリップの実測フレーム数の合計－遷移のブレンド分）: "
+                f"{expected_total_frames}フレーム（{expected_total_frames / fps:.2f}秒）\n"
+                f"最終出力の実測映像フレーム数: {actual_video_frames}フレーム（{actual_video_frames / fps:.2f}秒）\n"
+                f"最終出力の実測音声の尺: {actual_audio_seconds:.2f}秒（{actual_audio_frames}フレーム換算）"
+            )
+        if actual_video_frames != expected_total_frames or actual_video_frames != actual_audio_frames:
+            warn(f"複数クリップ結合: 最終出力の映像/音声の尺が想定と1フレームだけずれています"
+                 f"（想定{expected_total_frames}・映像実測{actual_video_frames}・"
+                 f"音声実測{actual_audio_frames}フレーム換算。誤差1フレームまでは許容）。")
+
         total_seconds = time.time() - render_start
-        total_duration = probe_duration(out_path)
+        total_duration = actual_video_frames / fps
         log(f"完成: {out_path}  （{n}クリップ結合 / 総尺{total_duration:.2f}秒 / "
             f"所要時間{total_seconds:.2f}秒）")
         try:
             summary = {
                 "clips": clip_timings,
                 "total_duration_seconds": round(total_duration, 2),
+                "total_frame_count": actual_video_frames,
+                "expected_frame_count": expected_total_frames,
+                "audio_frame_count": actual_audio_frames,
                 "render_seconds": round(total_seconds, 2),
             }
             with open(TIMING_JSON_NAME, "w", encoding="utf-8") as f:
