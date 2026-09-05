@@ -197,8 +197,8 @@ def main():
         d0 = timing["clips"][0]["duration_seconds"]
         d1 = timing["clips"][1]["duration_seconds"]
         d2 = timing["clips"][2]["duration_seconds"]
-        blend1 = render.transition_blend_sec(t1)
-        blend2 = render.transition_blend_sec(t2)
+        blend1 = render.transition_blend_sec(t1, 30.0)
+        blend2 = render.transition_blend_sec(t2, 30.0)
         expected_total = d0 + d1 + d2 - blend1 - blend2
 
         actual_total = render.probe_duration(out_path)
@@ -471,6 +471,51 @@ def main():
         check(abs(video_frames - audio_frames) <= 1,
               f"縦動画×複数クリップでも映像の実フレーム数と音声の尺が一致する（±1フレーム）: "
               f"映像={video_frames}枚 音声換算={audio_frames}枚")
+
+    print("")
+    print("=== シナリオ6: cut遷移（既定の遷移種別）でも映像が欠落しない ===")
+    with tempfile.TemporaryDirectory(prefix="multi_clip_test_") as tmpdir:
+        # cut は transition_out省略時の既定値（DEFAULT_TRANSITION_TYPE）であり、
+        # 実際のジョブでも最も使われる頻度が高い。ffmpegのxfadeフィルタは、
+        # duration（ブレンド秒数）が1フレームの時間（1/fps）未満だと2本目の入力の
+        # 映像を一切出力しないまま1本目の長さで打ち切る既知の挙動があり、
+        # CUT_TRANSITION_SEC=0.01は一般的なfps（24〜60）で常にこれに該当していた
+        # （実機ジョブで「3クリップ中、2本目以降の映像が丸ごと欠落する」形で再現・
+        # transition_blend_secのfps対応フロアで修正）。crossfade/fade_blackのみを
+        # 使う他シナリオではこの経路が一切検証されないため、cutを明示的に検証する。
+        clips = [
+            base_clip(portrait_path, 1.0, 6.0, "クリップ1", transition_out={"type": "cut"}),
+            base_clip(landscape_path, 0.0, 4.0, "クリップ2", transition_out={"type": "cut"}),
+            base_clip(portrait_path, 0.5, 4.5, "クリップ3"),
+        ]
+        proj = build_project(clips, with_logo=False)
+        out_path, timing = render_project(proj, tmpdir, "scenario6")
+
+        output_fps = float(proj["output"]["fps"])
+        d0 = timing["clips"][0]["duration_seconds"]
+        d1 = timing["clips"][1]["duration_seconds"]
+        d2 = timing["clips"][2]["duration_seconds"]
+        blend = render.transition_blend_sec({"type": "cut"}, output_fps)
+        expected_total = d0 + d1 + d2 - 2 * blend
+
+        video_frames = render.probe_segment_frame_count(out_path)
+        expected_frames = round(expected_total * output_fps)
+        check(abs(video_frames - expected_frames) <= 1,
+              f"cut遷移×3クリップで想定どおりのフレーム数（±1フレーム。2本目以降の"
+              f"映像欠落の回帰確認）: 期待={expected_frames}枚（クリップ実測尺"
+              f"{d0:.2f}+{d1:.2f}+{d2:.2f}－遷移{blend:.3f}×2） 実際={video_frames}枚")
+
+        def audio_stream_duration(path):
+            ffprobe = render.find_exe("ffprobe")
+            cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+                   "-show_entries", "stream=duration", "-of", "csv=p=0", path]
+            out = subprocess.run(cmd, capture_output=True).stdout.decode().strip()
+            return float(out) if out else 0.0
+
+        audio_frames = round(audio_stream_duration(out_path) * output_fps)
+        check(abs(video_frames - audio_frames) <= 1,
+              f"cut遷移でも映像の実フレーム数と音声の尺（フレーム換算）が一致する"
+              f"（±1フレーム）: 映像={video_frames}枚 音声換算={audio_frames}枚")
 
     print("")
     print(f"{passed} 件成功 / {failed} 件失敗")

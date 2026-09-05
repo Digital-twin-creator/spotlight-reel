@@ -5690,11 +5690,27 @@ XFADE_TYPES = {"cut": "fade", "fade_black": "fadeblack", "crossfade": "fade", "w
 CUT_TRANSITION_SEC = 0.01
 
 
-def transition_blend_sec(transition):
-    """遷移の実際のブレンド秒数（cutは常にCUT_TRANSITION_SEC固定）"""
+def transition_blend_sec(transition, fps):
+    """
+    遷移の実際のブレンド秒数（xfade/acrossfadeへ渡すduration）。
+
+    ffmpegのxfadeフィルタは、duration（ブレンド秒数）が1フレームの時間
+    （1/fps）未満だと内部の状態遷移が正しく働かず、2本目の入力の映像を
+    一切出力しないまま1本目の映像の長さで出力が打ち切られる（音声側は
+    acrossfade+当関数側のapad補正により正しく延びるため、症状としては
+    「音声は最後まで続くのに映像だけ途中で終わり、後続クリップの映像が
+    丸ごと欠落する」となる）ことを実機再現で確認した
+    （duration=0.01秒・fps=30、つまり0.3フレーム分で発生。1フレーム分
+    ちょうど＝0.0333...秒以上では正常に機能する）。cutの既定値
+    CUT_TRANSITION_SEC=0.01はfps=24〜60の一般的な動画で常にこの
+    1フレーム未満に該当し、複数クリップ結合でcut遷移（既定の遷移種別）
+    を使うだけで再現する不具合だった。安全マージンを見て、遷移の種類に
+    かかわらず常に2フレーム分の時間以上を確保する。
+    """
+    min_sec = 2.0 / fps
     if transition["type"] == "cut":
-        return CUT_TRANSITION_SEC
-    return max(0.001, transition["sec"])
+        return max(CUT_TRANSITION_SEC, min_sec)
+    return max(min_sec, transition["sec"])
 
 
 def merge_clip_pair(a_path, b_path, transition, out_path, fps):
@@ -5731,7 +5747,7 @@ def merge_clip_pair(a_path, b_path, transition, out_path, fps):
     ズレが蓄積しないようにする。
     """
     xfade_type = XFADE_TYPES[transition["type"]]
-    sec = transition_blend_sec(transition)
+    sec = transition_blend_sec(transition, fps)
     frame_count_a = probe_segment_frame_count(a_path)
     dur_a = frame_count_a / fps
     offset = max(0.0, dur_a - sec)
@@ -5944,7 +5960,7 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
             actual_clip_duration = clip_frames / fps
 
             if not is_last:
-                blend_sec = transition_blend_sec(clips[i]["transition_out"])
+                blend_sec = transition_blend_sec(clips[i]["transition_out"], fps)
                 cumulative_time = watermark_time_offset + actual_clip_duration - blend_sec
 
             clip_timing = {}
@@ -5967,14 +5983,14 @@ def render_multi_clip(project, json_path, out_path, mode="auto"):
         #     済みだが、念のためここでも明示しておく（merge_clip_pairはrender()を
         #     経由しないため） ---
         set_encode_quality(crf)
-        blend_frames_list = [round(transition_blend_sec(clips[i]["transition_out"]) * fps)
+        blend_frames_list = [round(transition_blend_sec(clips[i]["transition_out"], fps) * fps)
                               for i in range(n - 1)]
         merged = clip_outputs[0]
         for i in range(1, n):
             transition = clips[i - 1]["transition_out"]
             merged_next = os.path.join(tmpdir, f"merged_{i:02d}.mp4")
             log(f"--- クリップ{i}/{i + 1}を遷移（{transition['type']}, "
-                f"{transition_blend_sec(transition):.3f}秒）で結合 ---")
+                f"{transition_blend_sec(transition, fps):.3f}秒）で結合 ---")
             merge_clip_pair(merged, clip_outputs[i], transition, merged_next, fps)
             merged = merged_next
 
