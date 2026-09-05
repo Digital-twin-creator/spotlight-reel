@@ -1280,6 +1280,19 @@
         </div>
       </div>
     </div>
+
+    <!-- ロゴ/透かしロゴの画像がリロード等で失われていて「動画を作る」がブロックされた際、
+         行き止まりにせず「選び直す」か「オフ（削除）にして進む」かをその場で選べるモーダル -->
+    <div class="confirm-modal" id="missingAssetModal" hidden>
+      <div class="confirm-modal-card">
+        <strong>⚠️ 画像を選び直してください</strong>
+        <p class="muted" id="missingAssetMessage" style="margin-top:6px;"></p>
+        <div class="confirm-modal-actions">
+          <button type="button" class="ghost danger" id="missingAssetDisableBtn"></button>
+          <button type="button" class="primary" id="missingAssetPickBtn">🖼 画像を選ぶ</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 8. 書き出し・読み込み -->
@@ -4203,6 +4216,91 @@ function reloadSfxLibrary() {
   });
 }
 
+/**
+ * ロゴ/透かしロゴ画像のIndexedDB永続化（"logo"/"watermark"の2スロットのみを持つ、
+ * 効果音ライブラリ（sfxLibrary*）と同じ考え方のシンプルなBlobストア）。
+ * File（imageFile）はページのリロードで失われるため、ここに保存しておき、
+ * 次回起動時（restoreImageAssetsFromIndexedDB参照）に選び直しなしで復元する。
+ */
+var IMAGE_ASSET_DB_NAME = "spotlight_reel_image_assets";
+var IMAGE_ASSET_DB_VERSION = 1;
+var IMAGE_ASSET_STORE = "files";
+
+function imageAssetOpenDB() {
+  return new Promise(function (resolve, reject) {
+    if (!window.indexedDB) { reject(new Error("このブラウザはIndexedDBに対応していません")); return; }
+    var req = indexedDB.open(IMAGE_ASSET_DB_NAME, IMAGE_ASSET_DB_VERSION);
+    req.onupgradeneeded = function () {
+      var db = req.result;
+      if (!db.objectStoreNames.contains(IMAGE_ASSET_STORE)) {
+        db.createObjectStore(IMAGE_ASSET_STORE, { keyPath: "slot" });
+      }
+    };
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { reject(req.error); };
+  });
+}
+
+/** slot（"logo"または"watermark"）にファイル(File)を保存する（既存の同スロットは上書き） */
+function imageAssetSave(slot, file) {
+  return imageAssetOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var record = { slot: slot, name: file.name, size: file.size, type: file.type,
+                      savedAt: Date.now(), blob: file };
+      var tx = db.transaction(IMAGE_ASSET_STORE, "readwrite");
+      tx.objectStore(IMAGE_ASSET_STORE).put(record);
+      tx.oncomplete = function () { resolve(record); };
+      tx.onerror = function () { reject(tx.error); };
+    });
+  });
+}
+
+/** slotのレコード（Blob本体を含む）を取得する。無ければnullでresolveする */
+function imageAssetGet(slot) {
+  return imageAssetOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(IMAGE_ASSET_STORE, "readonly");
+      var req = tx.objectStore(IMAGE_ASSET_STORE).get(slot);
+      req.onsuccess = function () { resolve(req.result || null); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function imageAssetDelete(slot) {
+  return imageAssetOpenDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(IMAGE_ASSET_STORE, "readwrite");
+      tx.objectStore(IMAGE_ASSET_STORE).delete(slot);
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error); };
+    });
+  });
+}
+
+/**
+ * appState.logo/watermarkが「画像名（imageName）はあるがFileが無い」状態（リロード直後や
+ * project.json読み込み直後）なら、IndexedDBに保存済みの同スロットの画像で埋め直す。
+ * 見つからない場合（別端末・プライベートブラウズ等）は何もしない
+ * （その場合は startMakeVideoJob 側のモーダルで選び直し/オフを案内する）。
+ * 呼び出し後、実際にどちらか一方でも復元できればUIの再描画まで行う。
+ */
+function restoreImageAssetsFromIndexedDB() {
+  var needsLogo = !!(appState.logo && appState.logo.imageName && !appState.logo.imageFile);
+  var needsWatermark = !!(appState.watermark && appState.watermark.imageName && !appState.watermark.imageFile);
+  if (!needsLogo && !needsWatermark) return Promise.resolve();
+  var logoPromise = needsLogo ? imageAssetGet("logo").catch(function () { return null; }) : Promise.resolve(null);
+  var watermarkPromise = needsWatermark ? imageAssetGet("watermark").catch(function () { return null; }) : Promise.resolve(null);
+  return Promise.all([logoPromise, watermarkPromise]).then(function (results) {
+    var logoRecord = results[0], watermarkRecord = results[1];
+    var restoredAny = false;
+    if (logoRecord && logoRecord.blob) { appState.logo.imageFile = logoRecord.blob; restoredAny = true; }
+    if (watermarkRecord && watermarkRecord.blob) { appState.watermark.imageFile = watermarkRecord.blob; restoredAny = true; }
+    if (restoredAny) applySettingsToInputs();
+    return restoredAny;
+  });
+}
+
 /* ---------------- 状態 ---------------- */
 
 var appState = {
@@ -4472,6 +4570,7 @@ function init() {
     "makeVideoBtn", "jobProgressWrap", "jobProgressFill", "jobStatusLine", "jobActionsLink", "jobResultLink",
     "confirmWarningsModal", "confirmWarningsList", "confirmWarningsBackBtn", "confirmWarningsProceedBtn",
     "uploadEstimateModal", "uploadEstimateMessage", "uploadEstimateWifiWarning",
+    "missingAssetModal", "missingAssetMessage", "missingAssetDisableBtn", "missingAssetPickBtn",
     "uploadEstimateCancelBtn", "uploadEstimateProceedBtn"
   ].forEach(function (id) { els[id] = $(id); });
 
@@ -4940,6 +5039,7 @@ function init() {
       appState.watermark.autoTransparentBg !== false);
     saveToLocalStorage();
     updateJsonPreview();
+    imageAssetSave("watermark", appState.watermark.imageFile).catch(function () {});
   });
   els.watermarkPositionSelect.addEventListener("change", function () {
     appState.watermark.position = WATERMARK_POSITIONS.indexOf(els.watermarkPositionSelect.value) >= 0
@@ -5092,6 +5192,29 @@ function init() {
   els.uploadEstimateProceedBtn.addEventListener("click", function () {
     els.uploadEstimateModal.hidden = true;
     proceedPastUploadEstimate();
+  });
+
+  els.missingAssetPickBtn.addEventListener("click", function () {
+    els.missingAssetModal.hidden = true;
+    if (missingAssetContext === "logo") {
+      els.logoFileInput.click();
+    } else if (missingAssetContext === "watermark") {
+      els.watermarkFileInput.click();
+    }
+  });
+  els.missingAssetDisableBtn.addEventListener("click", function () {
+    els.missingAssetModal.hidden = true;
+    if (missingAssetContext === "logo") {
+      clearLogo();
+    } else if (missingAssetContext === "watermark") {
+      appState.watermark.enabled = false;
+      els.watermarkEnabledCheckbox.checked = false;
+      els.watermarkOptionsBody.hidden = true;
+      saveToLocalStorage();
+      updateJsonPreview();
+    }
+    // このアセットはもうブロック要因ではなくなったので、そのまま続きから再開する
+    startMakeVideoJob();
   });
 
   wireDrawCanvasTouch();
@@ -5271,6 +5394,11 @@ function loadVideoFile(file) {
       applySettingsToInputs();
       renderFreezeList();
       updateJsonPreview();
+      // ロゴ/透かしロゴの画像はlocalStorageには名前しか残らないため、IndexedDBに
+      // 保存済みの実体があれば選び直しなしで復元する（見つからなければ何もしない）
+      restoreImageAssetsFromIndexedDB().then(function (restoredAny) {
+        if (restoredAny) { saveToLocalStorage(); updateJsonPreview(); }
+      }).catch(function () {});
     }
     applyConfirmedResultIfAny();
   }, 0);
@@ -8530,6 +8658,9 @@ function handleLogoFileChange(e) {
   renderAutoTransparentPreview(file, els.logoAutoTransparentPreviewCanvas, appState.logo.autoTransparentBg !== false);
   saveToLocalStorage();
   updateJsonPreview();
+  // リロード後も選び直し不要にするため、IndexedDBにも保存しておく（失敗しても今回の
+  // レンダリング自体には影響しないため無視する）
+  imageAssetSave("logo", file).catch(function () {});
 }
 
 /** 効果音ライブラリへのファイル追加（複数選択可）。1件ずつIndexedDBに保存し、終わったら一覧を更新する */
@@ -8598,6 +8729,7 @@ function clearLogo() {
   applyLogoSettingsToInputs();
   saveToLocalStorage();
   updateJsonPreview();
+  imageAssetDelete("logo").catch(function () {});
 }
 
 /** logo.background の値("auto"/"video"/"#RRGGBB")から、選択欄が示すべきモードを決める */
@@ -8816,6 +8948,7 @@ function handleWatermarkFileChange(e) {
     appState.watermark.autoTransparentBg !== false);
   saveToLocalStorage();
   updateJsonPreview();
+  imageAssetSave("watermark", file).catch(function () {});
 }
 
 function applyWatermarkSettingsToInputs() {
@@ -8825,7 +8958,9 @@ function applyWatermarkSettingsToInputs() {
   if (wm.imageFile) {
     els.watermarkFileName.textContent = "選択中: " + wm.imageFile.name;
   } else if (wm.imageName) {
-    els.watermarkFileName.textContent = "設定済み（" + wm.imageName + "）。「動画を作る」の前に透かしロゴ画像を選び直してください";
+    els.watermarkFileName.textContent = wm.enabled
+      ? "設定済み（" + wm.imageName + "）。「動画を作る」の前に透かしロゴ画像を選び直してください"
+      : "設定済み（" + wm.imageName + "）。透かしはオフのため画像の選び直しは不要です";
   } else {
     els.watermarkFileName.textContent = "まだ透かしロゴ画像が選ばれていません";
   }
@@ -9770,6 +9905,31 @@ function showJobError(msg) {
   els.jobStatusLine.textContent = msg;
 }
 
+// missingAssetModalが「どちらのアセットについての警告か」を覚えておくための文脈
+// （missingAssetPickBtn/missingAssetDisableBtnのクリックハンドラが参照する）
+var missingAssetContext = null; // "logo" | "watermark"
+
+/**
+ * ロゴ/透かしロゴの画像がリロード等で失われていて「動画を作る」がブロックされた際、
+ * 行き止まりにせず「画像を選ぶ」か「オフ（削除）にして進む」かをその場で選べる
+ * モーダルを開く。kindは"logo"または"watermark"。
+ */
+function showMissingAssetModal(kind) {
+  missingAssetContext = kind;
+  if (kind === "logo") {
+    els.missingAssetMessage.textContent =
+      "ラストロゴの設定が残っていますが、画像が選び直されていません" +
+      "（ページの再読み込みで画像だけは保持されないことがあります）。";
+    els.missingAssetDisableBtn.textContent = "🗑 ロゴ設定を削除して進む";
+  } else {
+    els.missingAssetMessage.textContent =
+      "透かしロゴの設定が残っていますが、画像が選び直されていません" +
+      "（ページの再読み込みで画像だけは保持されないことがあります）。";
+    els.missingAssetDisableBtn.textContent = "透かしをオフにして進む";
+  }
+  els.missingAssetModal.hidden = false;
+}
+
 function showJobSuccess(msg) {
   els.jobStatusLine.className = "job-status-line ok";
   els.jobStatusLine.textContent = msg;
@@ -9816,15 +9976,17 @@ function startMakeVideoJob() {
 
   var logoFile = (appState.logo && appState.logo.imageFile) || null;
   if (appState.logo && appState.logo.imageName && !logoFile) {
-    showJobError("ラストロゴの設定が残っていますが画像が選び直されていません。ロゴ画像を選び直すか、「ロゴ設定を削除」してください");
     els.logoSection.open = true;
+    showMissingAssetModal("logo");
     return;
   }
 
+  // 透かしロゴは無効（チェックを外した状態）なら、画像が選び直されていなくても
+  // 一切ブロックしない（JSON側もbuildProjectJSONがenabled===falseなら除外する）
   var watermarkFile = (appState.watermark && appState.watermark.imageFile) || null;
-  if (appState.watermark && appState.watermark.imageName && !watermarkFile) {
-    showJobError("透かしロゴの設定が残っていますが画像が選び直されていません。透かしロゴ画像を選び直してください");
+  if (appState.watermark && appState.watermark.enabled && appState.watermark.imageName && !watermarkFile) {
     els.watermarkSection.open = true;
+    showMissingAssetModal("watermark");
     return;
   }
 
@@ -10226,6 +10388,11 @@ function handleJsonFileChange(e) {
       renderFreezeList();
       updateJsonPreview();
       saveToLocalStorage();
+      // ロゴ/透かしロゴの画像はJSONにはファイル名しか含まれないため、IndexedDBに
+      // 保存済みの実体があれば選び直しなしで復元する（見つからなければ何もしない）
+      restoreImageAssetsFromIndexedDB().then(function (restoredAny) {
+        if (restoredAny) { saveToLocalStorage(); updateJsonPreview(); }
+      }).catch(function () {});
       var note = "JSONを読み込みました（フリーズ " + appState.freezes.length + " 件）。";
       if (loaded.videoFileName && loaded.videoFileName !== appState.videoFileName) {
         note += " 動画「" + loaded.videoFileName + "」を選び直してください。";
